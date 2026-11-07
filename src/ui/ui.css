@@ -1,0 +1,1324 @@
+/**
+ * rui-ui —— 组件库内置极简 UI 套件样式（替代 antd 的 CSS-in-JS）。
+ *
+ * 设计方向（v2.0.1 视觉升级：现代卡片风）：
+ * - 白卡片 + 三级蓝调阴影 + hairline 边框，品牌蓝 #2f6bff 单一主色；
+ * - 全部颜色/圆角/阴影/缓动收敛为 --rui-* 设计令牌（定义在 :root，
+ *   因为 Modal/Drawer/message 等 portal 弹层挂在 body 下，不在 .rui-root 内）；
+ * - 数据密集场景使用等宽数字（tabular-nums），尺寸/进度列天然对齐；
+ * - 类名保持 rui- 前缀与旧版完全一致，消费方覆盖样式不受影响；
+ * - 纯 CSS 零依赖；不打包 web font（用精修系统栈，避免 FOUT 与体积）；
+ * - prefers-reduced-motion 下全部动效降级。
+ */
+
+/* ---------- 设计令牌 ---------- */
+:root {
+  /* 品牌色（主色 60%） */
+  --rui-brand: #2f6bff;
+  --rui-brand-hover: #5585ff;
+  --rui-brand-active: #1f4fd6;
+  --rui-brand-bg: #eef3ff;
+  --rui-brand-bg-hover: #e0eaff;
+  --rui-brand-ring: rgba(47, 107, 255, 0.28);
+
+  /* 文字（暖调近黑，非纯黑） */
+  --rui-text: #1f2329;
+  --rui-text-secondary: #5c6470;
+  --rui-text-tertiary: #8f959e;
+  --rui-text-disabled: #bfc5cd;
+
+  /* 表面与边框（30% 辅助层） */
+  --rui-surface: #ffffff;
+  --rui-surface-muted: #f7f8fa;
+  --rui-border: #e6e9ee;
+  --rui-border-strong: #d4d9e0;
+
+  /* 语义状态色 */
+  --rui-success: #16a34a;
+  --rui-success-bg: #ecfdf3;
+  --rui-success-border: #bbeecb;
+  --rui-warning: #d97706;
+  --rui-warning-bg: #fff8eb;
+  --rui-warning-border: #f6dda6;
+  --rui-danger: #dc2626;
+  --rui-danger-bg: #fef2f2;
+  --rui-danger-border: #f6c6c6;
+
+  /* 圆角 */
+  --rui-radius-sm: 6px;
+  --rui-radius-md: 10px;
+  --rui-radius-lg: 14px;
+
+  /* 三级阴影（带环境色的蓝灰调，非纯黑） */
+  --rui-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --rui-shadow-2:
+    0 4px 12px -2px rgba(16, 24, 40, 0.08),
+    0 2px 4px -2px rgba(16, 24, 40, 0.04);
+  --rui-shadow-3:
+    0 16px 40px -8px rgba(16, 24, 40, 0.18),
+    0 4px 12px -4px rgba(16, 24, 40, 0.08);
+
+  /* 动效 */
+  --rui-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --rui-dur-fast: 160ms;
+  --rui-dur-base: 280ms;
+
+  /* 字体：精修系统栈（组件库不打包 web font） */
+  --rui-font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+}
+
+/* ---------- 根容器 ---------- */
+/* .rui-root 与各 portal 弹层根（Drawer/Modal/message/Tooltip/Popover 挂在
+   body 下，不在 .rui-root 内）都必须拿到字体栈与基础排版，否则弹层内
+   文字回退到浏览器衬线默认字体。 */
+.rui-root,
+.rui-drawer,
+.rui-modal,
+.rui-message-notice,
+.rui-tooltip,
+.rui-popover {
+  font-family: var(--rui-font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--rui-text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.rui-root *,
+.rui-root *::before,
+.rui-root *::after,
+.rui-drawer *,
+.rui-drawer *::before,
+.rui-drawer *::after,
+.rui-modal *,
+.rui-modal *::before,
+.rui-modal *::after,
+.rui-message-notice *,
+.rui-message-notice *::before,
+.rui-message-notice *::after,
+.rui-tooltip *,
+.rui-tooltip *::before,
+.rui-tooltip *::after,
+.rui-popover *,
+.rui-popover *::before,
+.rui-popover *::after {
+  box-sizing: border-box;
+}
+
+/* 焦点可见性：键盘可达（鼠标点击不出现） */
+.rui-root :focus-visible {
+  outline: 2px solid var(--rui-brand-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ---------- Typography ---------- */
+.rui-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--rui-text);
+  margin: 0;
+  word-break: break-word;
+}
+.rui-text-secondary {
+  color: var(--rui-text-secondary);
+}
+.rui-text-success {
+  color: var(--rui-success);
+}
+.rui-text-warning {
+  color: var(--rui-warning);
+}
+.rui-text-danger {
+  color: var(--rui-danger);
+}
+.rui-text-disabled {
+  color: var(--rui-text-disabled);
+}
+.rui-text-strong {
+  font-weight: 600;
+}
+.rui-text-ellipsis {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Space ---------- */
+.rui-space {
+  display: inline-flex;
+  gap: 8px;
+}
+.rui-space-vertical {
+  flex-direction: column;
+}
+.rui-space-align-center {
+  align-items: center;
+}
+.rui-space-align-start {
+  align-items: flex-start;
+}
+.rui-space-align-end {
+  align-items: flex-end;
+}
+.rui-space-align-baseline {
+  align-items: baseline;
+}
+.rui-space-wrap {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+/* ---------- Button ---------- */
+.rui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5714;
+  border: 1px solid var(--rui-border-strong);
+  border-radius: var(--rui-radius-sm);
+  background: var(--rui-surface);
+  color: var(--rui-text);
+  cursor: pointer;
+  transition:
+    color var(--rui-dur-fast) ease-out,
+    background-color var(--rui-dur-fast) ease-out,
+    border-color var(--rui-dur-fast) ease-out,
+    box-shadow var(--rui-dur-fast) ease-out;
+  white-space: nowrap;
+  user-select: none;
+  font-family: inherit;
+  box-shadow: var(--rui-shadow-1);
+}
+.rui-btn:hover {
+  border-color: var(--rui-brand-hover);
+  color: var(--rui-brand-hover);
+}
+.rui-btn:active {
+  border-color: var(--rui-brand-active);
+  color: var(--rui-brand-active);
+  box-shadow: none;
+}
+.rui-btn:focus-visible {
+  outline: 2px solid var(--rui-brand-ring);
+  outline-offset: 2px;
+}
+.rui-btn-sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  border-radius: var(--rui-radius-sm);
+  box-shadow: none;
+}
+.rui-btn-primary {
+  background: var(--rui-brand);
+  border-color: var(--rui-brand);
+  color: #fff;
+  box-shadow:
+    0 1px 2px rgba(47, 107, 255, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+.rui-btn-primary:hover {
+  background: var(--rui-brand-hover);
+  border-color: var(--rui-brand-hover);
+  color: #fff;
+  box-shadow:
+    0 2px 6px rgba(47, 107, 255, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+.rui-btn-primary:active {
+  background: var(--rui-brand-active);
+  border-color: var(--rui-brand-active);
+  color: #fff;
+  box-shadow: none;
+}
+.rui-btn-dangerous {
+  background: var(--rui-danger);
+  border-color: var(--rui-danger);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3);
+}
+.rui-btn-dangerous:hover {
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(220, 38, 38, 0.35);
+}
+.rui-btn-dangerous:active {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #fff;
+  box-shadow: none;
+}
+.rui-btn-link {
+  border-color: transparent;
+  background: transparent;
+  color: var(--rui-brand);
+  height: auto;
+  padding: 0 4px;
+  box-shadow: none;
+}
+.rui-btn-link:hover {
+  background: transparent;
+  color: var(--rui-brand-hover);
+}
+.rui-btn-text {
+  border-color: transparent;
+  background: transparent;
+  color: var(--rui-text);
+  box-shadow: none;
+}
+.rui-btn-text:hover {
+  background: var(--rui-brand-bg);
+  border-color: transparent;
+  color: var(--rui-brand);
+}
+.rui-btn[disabled],
+.rui-btn-disabled {
+  cursor: not-allowed;
+  border-color: var(--rui-border) !important;
+  background: var(--rui-surface-muted) !important;
+  color: var(--rui-text-disabled) !important;
+  box-shadow: none !important;
+}
+.rui-btn-loading {
+  pointer-events: none;
+  opacity: 0.65;
+}
+.rui-btn-block {
+  width: 100%;
+}
+
+/* ---------- Tag（状态 pill 徽章） ---------- */
+.rui-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  border: 1px solid var(--rui-border);
+  border-radius: 100px;
+  background: var(--rui-surface-muted);
+  color: var(--rui-text-secondary);
+  white-space: nowrap;
+}
+.rui-tag-blue {
+  background: var(--rui-brand-bg);
+  border-color: #c3d4ff;
+  color: var(--rui-brand-active);
+}
+.rui-tag-cyan {
+  background: #e8fafa;
+  border-color: #b0e8ec;
+  color: #0e7490;
+}
+.rui-tag-green,
+.rui-tag-success {
+  background: var(--rui-success-bg);
+  border-color: var(--rui-success-border);
+  color: #15803d;
+}
+.rui-tag-orange,
+.rui-tag-warning {
+  background: var(--rui-warning-bg);
+  border-color: var(--rui-warning-border);
+  color: #b45309;
+}
+.rui-tag-red,
+.rui-tag-error {
+  background: var(--rui-danger-bg);
+  border-color: var(--rui-danger-border);
+  color: #b91c1c;
+}
+.rui-tag-processing {
+  background: var(--rui-brand-bg);
+  border-color: #c3d4ff;
+  color: var(--rui-brand-active);
+}
+.rui-tag-processing::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rui-brand);
+  animation: rui-blink 1.2s ease-in-out infinite;
+}
+
+/* ---------- Badge ---------- */
+.rui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.rui-badge-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  border-radius: 100px;
+  background: var(--rui-danger);
+  color: #fff;
+  box-shadow: 0 0 0 2px var(--rui-surface);
+}
+.rui-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rui-border-strong);
+  flex: none;
+}
+.rui-badge-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+.rui-badge-status-success .rui-badge-status-dot {
+  background: var(--rui-success);
+  box-shadow: 0 0 0 3px var(--rui-success-bg);
+}
+.rui-badge-status-processing .rui-badge-status-dot {
+  background: var(--rui-brand);
+  box-shadow: 0 0 0 3px var(--rui-brand-bg);
+  animation: rui-blink 1.2s ease-in-out infinite;
+}
+.rui-badge-status-warning .rui-badge-status-dot {
+  background: var(--rui-warning);
+  box-shadow: 0 0 0 3px var(--rui-warning-bg);
+}
+.rui-badge-status-error .rui-badge-status-dot {
+  background: var(--rui-danger);
+  box-shadow: 0 0 0 3px var(--rui-danger-bg);
+}
+.rui-badge-status-default .rui-badge-status-dot {
+  background: var(--rui-text-tertiary);
+  box-shadow: 0 0 0 3px var(--rui-surface-muted);
+}
+.rui-badge-text {
+  font-size: 14px;
+  color: var(--rui-text);
+}
+
+/* ---------- Spin ---------- */
+.rui-spin {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid var(--rui-brand-bg);
+  border-top-color: var(--rui-brand);
+  border-radius: 50%;
+  animation: rui-spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+.rui-spin-sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+.rui-spin-lg {
+  width: 24px;
+  height: 24px;
+}
+.rui-spin-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.rui-spin-nested {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.rui-spin-block {
+  display: block;
+  text-align: center;
+  padding: 24px;
+}
+
+/* ---------- Empty ---------- */
+.rui-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  color: var(--rui-text-tertiary);
+  font-size: 14px;
+}
+.rui-empty-image {
+  width: 72px;
+  height: auto;
+  margin-bottom: 10px;
+  opacity: 0.75;
+}
+
+/* ---------- Alert ---------- */
+.rui-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--rui-radius-md);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.rui-alert-success {
+  background: var(--rui-success-bg);
+  border: 1px solid var(--rui-success-border);
+}
+.rui-alert-info {
+  background: var(--rui-brand-bg);
+  border: 1px solid #c3d4ff;
+}
+.rui-alert-warning {
+  background: var(--rui-warning-bg);
+  border: 1px solid var(--rui-warning-border);
+}
+.rui-alert-error {
+  background: var(--rui-danger-bg);
+  border: 1px solid var(--rui-danger-border);
+}
+.rui-alert-icon {
+  flex: none;
+  margin-top: 2px;
+}
+.rui-alert-success .rui-alert-icon {
+  color: var(--rui-success);
+}
+.rui-alert-info .rui-alert-icon {
+  color: var(--rui-brand);
+}
+.rui-alert-warning .rui-alert-icon {
+  color: var(--rui-warning);
+}
+.rui-alert-error .rui-alert-icon {
+  color: var(--rui-danger);
+}
+.rui-alert-message {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- Card（现代卡片：hairline + 三级阴影层次） ---------- */
+.rui-card {
+  border: 1px solid var(--rui-border);
+  border-radius: var(--rui-radius-lg);
+  background: var(--rui-surface);
+  color: var(--rui-text);
+  box-shadow: var(--rui-shadow-1);
+}
+.rui-card-small {
+  border-radius: var(--rui-radius-md);
+}
+.rui-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--rui-border);
+  font-size: 15px;
+  font-weight: 600;
+}
+.rui-card-small .rui-card-head {
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 14px;
+}
+.rui-card-extra {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--rui-text-secondary);
+}
+.rui-card-body {
+  padding: 18px;
+}
+.rui-card-small .rui-card-body {
+  padding: 14px;
+}
+
+/* ---------- Divider ---------- */
+.rui-divider {
+  border: none;
+  border-top: 1px solid var(--rui-border);
+  margin: 0;
+}
+
+/* ---------- Row / Col（24 栅格） ---------- */
+.rui-row {
+  display: flex;
+  flex-flow: row wrap;
+}
+.rui-col {
+  position: relative;
+  min-height: 1px;
+}
+.rui-col-1 { width: 4.1667%; }
+.rui-col-2 { width: 8.3333%; }
+.rui-col-3 { width: 12.5%; }
+.rui-col-4 { width: 16.6667%; }
+.rui-col-6 { width: 25%; }
+.rui-col-8 { width: 33.3333%; }
+.rui-col-10 { width: 41.6667%; }
+.rui-col-12 { width: 50%; }
+.rui-col-14 { width: 58.3333%; }
+.rui-col-16 { width: 66.6667%; }
+.rui-col-18 { width: 75%; }
+.rui-col-20 { width: 83.3333%; }
+.rui-col-22 { width: 91.6667%; }
+.rui-col-24 { width: 100%; }
+
+/* ---------- Progress（渐变进度条） ---------- */
+.rui-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rui-progress-rail {
+  flex: 1;
+  height: 8px;
+  background: var(--rui-surface-muted);
+  border-radius: 100px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--rui-border);
+}
+.rui-progress-small .rui-progress-rail {
+  height: 6px;
+}
+.rui-progress-inner {
+  height: 100%;
+  border-radius: 100px;
+  background: linear-gradient(90deg, var(--rui-brand-hover), var(--rui-brand));
+  transition: width var(--rui-dur-base) var(--rui-ease);
+}
+.rui-progress-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--rui-text);
+  white-space: nowrap;
+  min-width: 3em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.rui-progress-status-success .rui-progress-inner {
+  background: linear-gradient(90deg, #34d399, var(--rui-success));
+}
+.rui-progress-status-exception .rui-progress-inner {
+  background: linear-gradient(90deg, #f87171, var(--rui-danger));
+}
+
+/* ---------- Statistic ---------- */
+.rui-statistic-title {
+  font-size: 13px;
+  color: var(--rui-text-secondary);
+  margin-bottom: 4px;
+}
+.rui-statistic-content {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 26px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.rui-statistic-prefix {
+  font-size: 0.55em;
+  color: var(--rui-text-secondary);
+}
+.rui-statistic-value {
+  font-weight: 650;
+}
+.rui-statistic-suffix {
+  font-size: 0.5em;
+  color: var(--rui-text-secondary);
+}
+
+/* ---------- Switch ---------- */
+/* 文字与滑块分居两侧：checked 滑块在右/文字在左（.rui-switch-text-inner），
+   unchecked 滑块在左/文字在右（.rui-switch-text-unchecked）。
+   带文字时加宽（.rui-switch-has-text），避免文字叠进滑块。 */
+.rui-switch {
+  position: relative;
+  display: inline-block;
+  min-width: 44px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--rui-border-strong);
+  border: none;
+  cursor: pointer;
+  transition: background var(--rui-dur-fast) ease-out;
+  padding: 0;
+  flex: none;
+  vertical-align: middle;
+}
+.rui-switch:hover {
+  background: var(--rui-text-tertiary);
+}
+.rui-switch-checked {
+  background: var(--rui-brand);
+}
+.rui-switch-checked:hover {
+  background: var(--rui-brand-hover);
+}
+.rui-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.25);
+  transition: left var(--rui-dur-fast) var(--rui-ease);
+}
+.rui-switch-checked::after {
+  /* calc 锚定右侧（带文字加宽时滑块仍贴右），保持 left 过渡动画 */
+  left: calc(100% - 20px);
+}
+.rui-switch:focus-visible {
+  outline: 2px solid var(--rui-brand-ring);
+  outline-offset: 2px;
+}
+.rui-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.rui-switch-has-text {
+  min-width: 56px;
+}
+.rui-switch-text {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  line-height: 1;
+  color: #fff;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+.rui-switch-text-inner {
+  left: 8px;
+}
+.rui-switch-text-unchecked {
+  right: 8px;
+}
+/* small：28×16 迷你开关；带文字时加宽到 44 并缩小字号 */
+.rui-switch-sm {
+  min-width: 28px;
+  height: 16px;
+  border-radius: 8px;
+}
+.rui-switch-sm::after {
+  width: 12px;
+  height: 12px;
+  top: 2px;
+  left: 2px;
+}
+.rui-switch-sm.rui-switch-checked::after {
+  left: calc(100% - 14px);
+}
+.rui-switch-sm.rui-switch-has-text {
+  min-width: 44px;
+}
+.rui-switch-sm .rui-switch-text {
+  font-size: 11px;
+}
+.rui-switch-sm .rui-switch-text-inner {
+  left: 6px;
+}
+.rui-switch-sm .rui-switch-text-unchecked {
+  right: 6px;
+}
+
+/* ---------- InputNumber ---------- */
+.rui-input-number {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  padding: 0 11px;
+  font-size: 14px;
+  border: 1px solid var(--rui-border-strong);
+  border-radius: var(--rui-radius-sm);
+  background: var(--rui-surface);
+  color: var(--rui-text);
+  transition:
+    border-color var(--rui-dur-fast) ease-out,
+    box-shadow var(--rui-dur-fast) ease-out;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.rui-input-number:hover {
+  border-color: var(--rui-brand-hover);
+}
+.rui-input-number:focus {
+  border-color: var(--rui-brand);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--rui-brand-ring);
+}
+.rui-input-number:disabled {
+  background: var(--rui-surface-muted);
+  color: var(--rui-text-disabled);
+  cursor: not-allowed;
+}
+.rui-input-number-sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.rui-input-number-group {
+  display: inline-flex;
+  align-items: stretch;
+  width: 100%;
+}
+.rui-input-number-group .rui-input-number {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  flex: 1;
+  min-width: 0;
+}
+.rui-input-number-addon {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 11px;
+  font-size: 13px;
+  background: var(--rui-surface-muted);
+  border: 1px solid var(--rui-border-strong);
+  border-left: none;
+  border-radius: 0 var(--rui-radius-sm) var(--rui-radius-sm) 0;
+  color: var(--rui-text-secondary);
+  white-space: nowrap;
+}
+
+/* ---------- Slider ---------- */
+.rui-slider {
+  position: relative;
+  padding: 4px 0 20px;
+  width: 100%;
+}
+.rui-slider-rail {
+  position: relative;
+  height: 4px;
+  background: var(--rui-border);
+  border-radius: 2px;
+}
+.rui-slider-track {
+  position: absolute;
+  height: 100%;
+  background: var(--rui-brand);
+  border-radius: 2px;
+}
+.rui-slider-handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border: 2px solid var(--rui-brand);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: var(--rui-shadow-1);
+  pointer-events: none;
+}
+.rui-slider-input {
+  position: absolute;
+  inset: -8px 0;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.rui-slider-input:disabled {
+  cursor: not-allowed;
+}
+.rui-slider-marks {
+  position: relative;
+  height: 20px;
+  margin-top: 4px;
+}
+.rui-slider-mark {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: var(--rui-text-tertiary);
+  white-space: nowrap;
+}
+
+/* ---------- Tooltip ---------- */
+.rui-tooltip {
+  position: fixed;
+  z-index: 1070;
+  max-width: 250px;
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #fff;
+  background: rgba(28, 31, 35, 0.92);
+  border-radius: var(--rui-radius-sm);
+  box-shadow: var(--rui-shadow-2);
+  pointer-events: none;
+  animation: rui-fade-in var(--rui-dur-fast) ease-out;
+  word-break: break-word;
+}
+.rui-tooltip-arrow {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: rgba(28, 31, 35, 0.92);
+  transform: rotate(45deg);
+}
+
+/* ---------- Popover / Popconfirm ---------- */
+.rui-popover {
+  position: fixed;
+  z-index: 1070;
+  background: var(--rui-surface);
+  border: 1px solid var(--rui-border);
+  border-radius: var(--rui-radius-md);
+  box-shadow: var(--rui-shadow-3);
+  animation: rui-fade-in var(--rui-dur-fast) ease-out;
+}
+.rui-popconfirm {
+  padding: 14px 16px;
+  max-width: 300px;
+}
+.rui-popconfirm-title {
+  display: flex;
+  gap: 8px;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.rui-popconfirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ---------- Collapse ---------- */
+.rui-collapse {
+  border: 1px solid var(--rui-border);
+  border-radius: var(--rui-radius-md);
+  background: var(--rui-surface);
+  overflow: hidden;
+}
+.rui-collapse-ghost {
+  border: none;
+  background: transparent;
+}
+.rui-collapse-item {
+  border-bottom: 1px solid var(--rui-border);
+}
+.rui-collapse-item:last-child {
+  border-bottom: none;
+}
+.rui-collapse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: background var(--rui-dur-fast) ease-out;
+}
+.rui-collapse-header:hover {
+  background: var(--rui-surface-muted);
+}
+.rui-collapse-small .rui-collapse-header {
+  padding: 7px 14px;
+}
+.rui-collapse-arrow {
+  transition: transform var(--rui-dur-fast) var(--rui-ease);
+  color: var(--rui-text-tertiary);
+  font-size: 12px;
+  flex: none;
+  margin-left: 8px;
+}
+.rui-collapse-item-active .rui-collapse-arrow {
+  transform: rotate(90deg);
+}
+.rui-collapse-content {
+  padding: 14px;
+  font-size: 14px;
+  border-top: 1px solid var(--rui-border);
+}
+
+/* ---------- Modal ---------- */
+.rui-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(16, 24, 40, 0.5);
+  backdrop-filter: blur(2px);
+  animation: rui-fade-in var(--rui-dur-base) ease-out;
+}
+.rui-modal-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: auto;
+  outline: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 100px 16px 32px;
+}
+.rui-modal {
+  position: relative;
+  width: 520px;
+  max-width: 100%;
+  background: var(--rui-surface);
+  border-radius: var(--rui-radius-lg);
+  box-shadow: var(--rui-shadow-3);
+  animation: rui-zoom-in var(--rui-dur-base) var(--rui-ease);
+}
+.rui-modal-header {
+  padding: 18px 24px;
+  font-size: 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--rui-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.rui-modal-close {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--rui-text-tertiary);
+  font-size: 16px;
+  padding: 4px;
+  line-height: 1;
+  border-radius: var(--rui-radius-sm);
+  transition:
+    color var(--rui-dur-fast) ease-out,
+    background-color var(--rui-dur-fast) ease-out;
+}
+.rui-modal-close:hover {
+  color: var(--rui-text);
+  background: var(--rui-surface-muted);
+}
+.rui-modal-body {
+  padding: 24px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.rui-modal-footer {
+  padding: 12px 24px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------- Drawer ---------- */
+.rui-drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(16, 24, 40, 0.5);
+  backdrop-filter: blur(2px);
+  animation: rui-fade-in var(--rui-dur-base) ease-out;
+}
+.rui-drawer {
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  bottom: 0;
+  background: var(--rui-surface);
+  box-shadow: var(--rui-shadow-3);
+  display: flex;
+  flex-direction: column;
+}
+.rui-drawer-right {
+  right: 0;
+  animation: rui-slide-right var(--rui-dur-base) var(--rui-ease);
+}
+.rui-drawer-left {
+  left: 0;
+  animation: rui-slide-left var(--rui-dur-base) var(--rui-ease);
+}
+.rui-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  font-size: 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--rui-border);
+  flex: none;
+}
+.rui-drawer-body {
+  padding: 24px;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: auto;
+  flex: 1;
+}
+
+/* ---------- message toast ---------- */
+.rui-message {
+  position: fixed;
+  top: 8px;
+  left: 0;
+  right: 0;
+  z-index: 1010;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.rui-message-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 80%;
+  padding: 10px 16px;
+  background: var(--rui-surface);
+  border: 1px solid var(--rui-border);
+  border-radius: var(--rui-radius-md);
+  box-shadow: var(--rui-shadow-3);
+  font-size: 14px;
+  line-height: 1.6;
+  pointer-events: auto;
+  animation: rui-message-in var(--rui-dur-base) var(--rui-ease);
+  word-break: break-word;
+}
+.rui-message-success .rui-message-icon {
+  color: var(--rui-success);
+}
+.rui-message-error .rui-message-icon {
+  color: var(--rui-danger);
+}
+.rui-message-warning .rui-message-icon {
+  color: var(--rui-warning);
+}
+.rui-message-info .rui-message-icon {
+  color: var(--rui-brand);
+}
+.rui-message-loading .rui-message-icon {
+  color: var(--rui-brand);
+}
+
+/* ---------- Table ---------- */
+.rui-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.rui-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--rui-text);
+  text-align: left;
+}
+.rui-table-bordered {
+  border: 1px solid var(--rui-border);
+  border-radius: var(--rui-radius-md);
+}
+.rui-table thead th {
+  background: var(--rui-surface-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--rui-text-secondary);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rui-border);
+  white-space: nowrap;
+}
+.rui-table-bordered thead th {
+  border-right: 1px solid var(--rui-border);
+}
+.rui-table-bordered thead th:last-child {
+  border-right: none;
+}
+.rui-table tbody td {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--rui-border);
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+.rui-table-bordered tbody td {
+  border-right: 1px solid var(--rui-border);
+}
+.rui-table-bordered tbody td:last-child {
+  border-right: none;
+}
+.rui-table tbody tr {
+  transition: background-color var(--rui-dur-fast) ease-out;
+}
+/* 性能：长列表（数百行）下跳过屏外行的布局/绘制，预留行高避免滚动跳动。
+   对不支持 content-visibility 的浏览器（Firefox/Safari）自动降级为无优化。 */
+.rui-table tbody tr.rui-table-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+}
+.rui-table tbody tr:hover td {
+  background: var(--rui-brand-bg);
+}
+.rui-table-small thead th,
+.rui-table-small tbody td {
+  padding: 7px 8px;
+}
+.rui-table-ellipsis {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rui-table-empty {
+  padding: 8px;
+  text-align: center;
+  color: var(--rui-text-tertiary);
+}
+.rui-table-loading {
+  position: relative;
+}
+.rui-table-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.6);
+}
+.rui-table-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--rui-brand);
+  vertical-align: middle;
+}
+.rui-table-checkbox:disabled {
+  cursor: not-allowed;
+}
+
+/* ---------- 滚动条（数据面板内细滚动条） ---------- */
+.rui-table-wrap,
+.rui-drawer-body,
+.rui-modal-wrap {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rui-border-strong) transparent;
+}
+.rui-table-wrap::-webkit-scrollbar,
+.rui-drawer-body::-webkit-scrollbar,
+.rui-modal-wrap::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.rui-table-wrap::-webkit-scrollbar-thumb,
+.rui-drawer-body::-webkit-scrollbar-thumb,
+.rui-modal-wrap::-webkit-scrollbar-thumb {
+  background: var(--rui-border-strong);
+  border-radius: 3px;
+}
+.rui-table-wrap::-webkit-scrollbar-track,
+.rui-drawer-body::-webkit-scrollbar-track,
+.rui-modal-wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 动画 ---------- */
+@keyframes rui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rui-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rui-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@keyframes rui-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rui-zoom-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes rui-slide-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes rui-slide-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes rui-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---------- 动效降级 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .rui-root *,
+  .rui-root *::before,
+  .rui-root *::after,
+  .rui-modal,
+  .rui-drawer,
+  .rui-message-notice,
+  .rui-tooltip,
+  .rui-popover {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

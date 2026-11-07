@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.vite/
+.env
+.env.*
+!.env.example
+
+# server runtime data
+server/data/
+server/tmp/
+server/uploads/
+server/coverage/
+
+# logs / IDE / OS
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
