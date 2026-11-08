@@ -3,11 +3,11 @@ import { useEffect, useRef } from "react";
 
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
 import { useUploadStore } from "../store/upload";
-import { ProcessingStats, UploadFile } from "../types/upload";
+import { ProcessingStats, UploadFile, UploadStatus } from "../types/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { useShallow } from "zustand/react/shallow";
 import { compileAllowedTypes, isFileTypeAllowed } from "../../../shared/fileType";
-import { dedupeByContentKey } from "../services/uploadDedupe";
+import { reconcileIncomingFiles } from "../services/uploadDedupe";
 // VU-25：应用构建下 worker 独立成 asset；库构建由 vite.lib.config.ts 统一重写为
 // `?worker&inline`，避免消费方 dev server 把 .pnpm 深层 worker 路径当 SPA fallback 返回 HTML。
 import FilePrepareWorker from "../worker/filePrepareWorker.ts?worker";
@@ -243,14 +243,19 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
             const cost = endTime - startTime;
             setCost(cost);
 
-            // VU-19：按内容指纹（hash+size+lastModified+fileName）去重，
-            // 同一物理文件重复选择只保留一条队列记录，不再生成多条。
-            const { newItems: newFiles, skipped } = dedupeByContentKey(
+            // VU-19：按内容指纹（hash+size+lastModified+fileName）去重；
+            // E2E-02：若命中「刷新后残留的中断记录」，则复用原记录 id 与
+            // chunkSize 重新绑定文件引用，保证服务端分片键跨会话稳定。
+            const {
+              newItems: newFiles,
+              rebindItems,
+              skipped,
+            } = reconcileIncomingFiles(
               engine.store.getState().files,
               data.uploadFiles
             );
 
-            if (newFiles.length === 0) {
+            if (newFiles.length === 0 && rebindItems.length === 0) {
               if (skipped > 0) {
                 messageApi.info(`已跳过 ${skipped} 个已在队列中的文件`);
               }
@@ -260,8 +265,8 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
             // VU-43：N 条彼此独立的 IDB 写入并发执行，不再逐个串行 await。
             // fileRef 注册是同步内存操作，放在同一批任务里保证顺序无关。
-            await Promise.all(
-              newFiles.map(async (file) => {
+            await Promise.all([
+              ...newFiles.map(async (file) => {
                 // T3.1：fileRef 仅入主线程注册表，剥离后再持久化，
                 // IndexedDB 中不再存放整文件数据（原 buffer 字段已移除）
                 const { fileRef, ...persistable } = file;
@@ -269,8 +274,36 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
                   engine.fileRegistry.registerFileRef(file.id, fileRef);
                 }
                 await engine.storage.setItem(file.id, persistable);
-              })
-            );
+              }),
+              ...rebindItems.map(async ({ existing: record, incoming }) => {
+                const merged: UploadFile = {
+                  ...incoming,
+                  // 复用既有队列 id，服务端分片键随之保持稳定
+                  id: record.id,
+                  hash: record.hash ?? incoming.hash,
+                  hashMode: record.hashMode ?? incoming.hashMode,
+                  // 关键：保留既有 chunkSize/chunkCount，不按当前 RTT 重算
+                  chunkSize: record.chunkSize || incoming.chunkSize,
+                  chunkCount: record.chunkCount || incoming.chunkCount,
+                  status: UploadStatus.QUEUED,
+                  progress: 0,
+                  createdAt: record.createdAt ?? incoming.createdAt,
+                  order: record.order ?? incoming.order,
+                  errorMessage: undefined,
+                  awaitingReselect: undefined,
+                };
+                if (incoming.fileRef) {
+                  engine.fileRegistry.registerFileRef(
+                    record.id,
+                    incoming.fileRef
+                  );
+                }
+                const persistable: UploadFile = { ...merged };
+                // fileRef 仅保留在内存注册表中，不写入 IndexedDB
+                delete persistable.fileRef;
+                await engine.storage.setItem(record.id, persistable);
+              }),
+            ]);
 
             await refreshFiles();
 
@@ -280,11 +313,20 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               data.stats.oversized > 0 ? `, ${data.stats.oversized}个超过大小限制` : ""
             }`;
             messageApi.success(resultMessage);
+            if (rebindItems.length > 0) {
+              messageApi.info(
+                `已重新绑定 ${rebindItems.length} 个中断文件，将从断点继续上传`
+              );
+            }
             if (skipped > 0) {
               messageApi.info(`已跳过 ${skipped} 个已在队列中的文件`);
             }
 
-            if (uploadConfig.autoUpload && newFiles.length > 0 && !isNetworkOffline) {
+            if (
+              uploadConfig.autoUpload &&
+              newFiles.length + rebindItems.length > 0 &&
+              !isNetworkOffline
+            ) {
               // 同一时间只保留一个待执行自动上传；卸载时由 cleanup 统一清理
               if (autoUploadTimerRef.current !== null) {
                 clearTimeout(autoUploadTimerRef.current);

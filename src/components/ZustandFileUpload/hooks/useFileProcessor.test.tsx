@@ -4,6 +4,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ChangeEvent } from "react";
 
 import { useFileProcessor } from "./useFileProcessor";
+import { reconcileIncomingFiles } from "../services/uploadDedupe";
+import { UploadStatus, type UploadFile } from "../types/upload";
 
 /**
  * VU-58 收尾：为 useFileProcessor 编写行为断言单测。
@@ -83,6 +85,11 @@ vi.mock("../context/UploadEngineContext", () => ({
 
 vi.mock("../services/uploadDedupe", () => ({
   dedupeByContentKey: vi.fn(() => ({ newItems: [], skipped: 0 })),
+  reconcileIncomingFiles: vi.fn(() => ({
+    newItems: [],
+    rebindItems: [],
+    skipped: 0,
+  })),
 }));
 
 vi.mock("../worker/filePrepareWorker.ts?worker", () => ({
@@ -112,6 +119,9 @@ beforeEach(() => {
   h.config.hashMode = "full";
 
   h.instances.length = 0;
+  h.engine.storage.setItem.mockClear();
+  h.engine.fileRegistry.registerFileRef.mockClear();
+  h.storeState.refreshFiles.mockClear();
 });
 
 describe("useFileProcessor 行为断言", () => {
@@ -262,5 +272,81 @@ describe("useFileProcessor 行为断言", () => {
     // 预处理流程收尾：loading 置回 false、记录耗时
     expect(h.storeState.setLoading).toHaveBeenCalledWith(false);
     expect(h.storeState.setCost).toHaveBeenCalled();
+  });
+
+  it("E2E-02：重选同一文件时复用既有 id 与 chunkSize，保证分片键稳定", async () => {
+    const fileRef = new File(["abc"], "a.bin");
+    const existing: UploadFile = {
+      id: "q-old",
+      fileName: "a.bin",
+      fileSize: 100,
+      fileType: "",
+      lastModified: 0,
+      hash: "h1",
+      hashMode: "full",
+      chunkSize: 256 * 1024,
+      chunkCount: 1,
+      status: UploadStatus.ERROR,
+      progress: 0,
+      createdAt: 1,
+      order: 0,
+      errorMessage: "文件引用已失效",
+      awaitingReselect: false,
+    };
+    const incoming: UploadFile = {
+      ...existing,
+      id: "q-new",
+      chunkSize: 1024 * 1024,
+      chunkCount: 1,
+      status: UploadStatus.QUEUED,
+      createdAt: 2,
+      fileRef,
+    };
+    vi.mocked(reconcileIncomingFiles).mockReturnValueOnce({
+      newItems: [],
+      rebindItems: [{ existing, incoming }],
+      skipped: 0,
+    });
+
+    const { result } = renderHook(() =>
+      useFileProcessor({ uploadAll: vi.fn() })
+    );
+
+    act(() => {
+      result.current.handleFileChange(makeEvent([makeFile("a.bin", "", 100)]));
+    });
+
+    const worker = h.instances[0]!;
+    await act(async () => {
+      worker.onmessage!({
+        data: {
+          type: "complete",
+          uploadFiles: [incoming],
+          stats: { processed: 1, total: 1, success: 1, failed: 0, oversized: 0 },
+        },
+      } as MessageEvent);
+    });
+
+    expect(h.engine.fileRegistry.registerFileRef).toHaveBeenCalledWith(
+      "q-old",
+      fileRef
+    );
+    const write = h.engine.storage.setItem.mock.calls.find(
+      ([id]) => id === "q-old"
+    );
+    expect(write).toBeTruthy();
+    expect(write![1]).toMatchObject({
+      id: "q-old",
+      chunkSize: 256 * 1024,
+      chunkCount: 1,
+      status: UploadStatus.QUEUED,
+      errorMessage: undefined,
+      awaitingReselect: undefined,
+    });
+    expect((write![1] as UploadFile).fileRef).toBeUndefined();
+    expect(h.messageApi.info).toHaveBeenCalledWith(
+      expect.stringContaining("断点继续上传")
+    );
+    expect(h.storeState.refreshFiles).toHaveBeenCalled();
   });
 });
