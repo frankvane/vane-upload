@@ -404,54 +404,62 @@ export function useBatchUploader(): BatchUploaderActions {
   ]);
 
   const cancelUpload = useCallback(() => {
+    const state = engine.store.getState();
     const activeController = activeUploadAbortRef.current;
     if (activeController && !activeController.signal.aborted) {
       activeController.abort();
       getMessageApi().info("已取消当前上传任务");
     }
 
-    // P1-8：abort 只会让主线程 Promise 落败，Worker 内在途 fetch 需显式
-    // CANCEL 才会中断（bridge 收到 signal 后会 terminate 兜底）
-    const uploadingFiles = engine.store
-      .getState()
-      .files.filter((file) => file.status === UploadStatus.UPLOADING);
-    for (const file of uploadingFiles) {
-      engine.workerPool.cancelUploadTask(file.id);
-    }
+    // F-01：整批取消必须把「正在飞」的记录统一落定为 PAUSED。
+    // 旧实现只 abort + cancelUploadTask，把收尾完全押在 Worker 回 cancelled 上：
+    // Worker 若正卡在长同步哈希 / 大文件合并等待里收不到 cancel，任务 Promise
+    // 永不 settle（见 uploadWorkerBridge 的兜底结算），行就永久停在「上传中 100%」，
+    // 速率还冻结在最后一次采样值，既不能继续也没有报错。
+    // 这里改为「乐观落定 + 标记用户取消」：UI 立刻可见，settle 后
+    // cancelled 分支按 PAUSED 写回（口径一致，不会退回 QUEUED）。
+    const interruptedFiles = state.files.filter(
+      (file) =>
+        file.status === UploadStatus.UPLOADING ||
+        file.status === UploadStatus.PREPARING_UPLOAD ||
+        file.status === UploadStatus.PAUSED
+    );
 
-    // T3.3：PAUSED 文件无存活 Worker 任务，直接复位为待上传
-    const pausedFiles = engine.store
-      .getState()
-      .files.filter((file) => file.status === UploadStatus.PAUSED);
-    for (const file of pausedFiles) {
+    for (const file of interruptedFiles) {
+      userCancelledIdsRef.current.add(file.id);
+      cancelledInBatchIdsRef.current.add(file.id);
+
+      // 向 Worker 发 cancel；若 Worker 无响应，bridge 兜底窗口后强制结算
+      engine.workerPool.cancelUploadTask(file.id);
+
+      const progress = state.progressMap[file.id] ?? file.progress ?? 0;
       engine.store.getState().patchFile(file.id, {
-        status: UploadStatus.QUEUED,
+        status: UploadStatus.PAUSED,
         errorMessage: undefined,
         awaitingReselect: false,
       });
-      const updated = {
+      // 冻结速率/ETA 归零：否则暂停后仍展示最后一次采样速度，看起来像「还在传」
+      engine.store
+        .getState()
+        .setProgressDetail(file.id, { progress, speed: 0, eta: 0 });
+
+      void engine.storage.setItem(file.id, {
         ...file,
-        status: UploadStatus.QUEUED,
+        status: UploadStatus.PAUSED,
+        progress,
         errorMessage: undefined,
         awaitingReselect: false,
-      };
-      void engine.storage.setItem(file.id, updated);
+      });
     }
 
     setIsUploading(false);
     setBatchInfo(null);
 
-    // 取消整批：对应分片缓存一并清理，避免刷新后又被当成「可续传」自动拉起。
-    const terminalStatuses = new Set<UploadStatus>([
-      UploadStatus.DONE,
-      UploadStatus.INSTANT,
-      UploadStatus.ERROR,
-    ]);
-    for (const file of engine.store.getState().files) {
-      if (!terminalStatuses.has(file.status)) {
-        void clearFileChunkCache(engine.instanceId, file.id);
-      }
-    }
+    // F-02：不再清理这些记录的分片缓存。
+    // 旧实现「取消即清缓存」会让「继续」和「重试」都拿不到字节来源
+    // （刷新后直接判缓存缺失、要求重新选择文件），等于取消一次就锁死该行。
+    // 「取消后刷新不被自动拉起」的目标改由 PAUSED 语义保证：
+    // isUploadableStatus 不包含 PAUSED，只有用户显式点「继续」才会续传。
   }, [
     activeUploadAbortRef,
     getMessageApi,

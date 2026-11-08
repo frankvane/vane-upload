@@ -43,6 +43,7 @@ const h = vi.hoisted(() => {
         files: [] as UploadFile[],
         patchFile,
         progressMap: {} as Record<string, number>,
+        setProgressDetail: storeState.setProgressDetail,
       })),
       setState: vi.fn(),
     },
@@ -151,6 +152,7 @@ const setEngineFiles = (files: UploadFile[]) => {
     files,
     patchFile: h.patchFile,
     progressMap: {} as Record<string, number>,
+    setProgressDetail: h.storeState.setProgressDetail,
   });
 };
 
@@ -185,7 +187,7 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(h.storeState.setBatchInfo).toHaveBeenCalledWith(null);
   });
 
-  it("cancelUpload：取消在途/暂停文件、复位上传态并清 batchInfo", () => {
+  it("cancelUpload：在途/暂停文件统一落定为已暂停、速率归零并清 batchInfo", () => {
     const uploading = makeFile({ id: "up", status: UploadStatus.UPLOADING });
     const paused = makeFile({ id: "pa", status: UploadStatus.PAUSED });
     setEngineFiles([uploading, paused]);
@@ -196,18 +198,30 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
       result.current.cancelUpload();
     });
 
-    // UPLOADING 文件触发 Worker 取消
+    // F-01：在飞行的文件都要向 Worker 发取消，避免任务悬挂
     expect(h.engine.workerPool.cancelUploadTask).toHaveBeenCalledWith("up");
-    // PAUSED 文件复位为 QUEUED 并写回存储
+    expect(h.engine.workerPool.cancelUploadTask).toHaveBeenCalledWith("pa");
+    // 两者都落定为 PAUSED（不再是「暂停复位为排队中」的旧口径）
+    expect(h.patchFile).toHaveBeenCalledWith("up", {
+      status: UploadStatus.PAUSED,
+      errorMessage: undefined,
+      awaitingReselect: false,
+    });
     expect(h.patchFile).toHaveBeenCalledWith("pa", {
-      status: UploadStatus.QUEUED,
+      status: UploadStatus.PAUSED,
       errorMessage: undefined,
       awaitingReselect: false,
     });
     expect(h.engine.storage.setItem).toHaveBeenCalledWith(
       "pa",
-      expect.objectContaining({ status: UploadStatus.QUEUED })
+      expect.objectContaining({ status: UploadStatus.PAUSED })
     );
+    // F-01：速率/ETA 归零，避免暂停后仍显示冻结速率
+    expect(h.storeState.setProgressDetail).toHaveBeenCalledWith("up", {
+      progress: 0,
+      speed: 0,
+      eta: 0,
+    });
     expect(h.storeState.setIsUploading).toHaveBeenCalledWith(false);
     expect(h.storeState.setBatchInfo).toHaveBeenCalledWith(null);
   });

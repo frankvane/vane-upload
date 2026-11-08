@@ -462,3 +462,74 @@ test("VU-63-11 重复上传同一文件去重（S09 / VU-19）", async ({ page }
     ),
   ).toBeVisible({ timeout: 20_000 });
 });
+
+/**
+ * F-01 / F-02 回归：批次详情抽屉里的整批「取消上传」。
+ *
+ * 历史缺陷（浏览器实测发现）：
+ * - F-01：取消后部分行永久停在「上传中 100% + 冻结速率」。Worker 若卡在长同步
+ *   哈希/合并等待里收不到 cancel，任务 Promise 永不 settle，状态机无法收尾。
+ * - F-02：取消时把非终态记录的分片缓存一并清空，导致该行「继续/重试」失去字节
+ *   来源（刷新后直接判缓存缺失），取消一次即锁死该行。
+ *
+ * 修复后应有行为：取消 → 所有在飞行立即落定为「已暂停」（速率归零、记录保留、
+ * 分片缓存保留）→ 点「继续」可续传至产物就绪。
+ */
+test("VU-63-12 F-01/F-02 整批「取消上传」后不留「上传中」死行，可继续完成", async ({
+  page,
+}) => {
+  // 整批取消入口在批次详情抽屉里，只有 full 模式才渲染 BatchInfoDisplay
+  await page.goto("/e2e-full.html");
+  await expect(fileInput(page)).toBeAttached();
+
+  const specs = [
+    { name: "batch-cancel-a.bin", seed: "vu63-batchcancel-a" + RUN_SALT },
+    { name: "batch-cancel-b.bin", seed: "vu63-batchcancel-b" + RUN_SALT },
+  ];
+  const files = specs.map((s) => {
+    const content = randContent(3 * 1024 * 1024, s.seed);
+    return { ...fixture(s.name, content), _md5: md5(content) };
+  });
+
+  // 只用「延迟」而不置位 abort 闸口：取消本身就会终止 Worker，
+  // 若再用 route.abort 制造分片失败，worker 可能先上报网络错误，把用例
+  // 变成「取消 vs 网络失败」的竞态，测不到「取消落定 PAUSED」这条断言。
+  const { handler } = makeUploadGate(2_000);
+  await page.route("**/api/file/upload", handler);
+
+  await uploadFiles(page, files);
+  for (const f of files) {
+    await waitRowStatus(page, f.name, "上传中", 20_000);
+  }
+
+  // 打开抽屉 → 整批取消
+  await page.getByRole("button", { name: "详情" }).click();
+  const cancelBtn = page.getByRole("button", { name: "取消上传" });
+  await expect(cancelBtn).toBeVisible({ timeout: 10_000 });
+  await cancelBtn.click();
+
+  // F-01：两行都必须落定为「已暂停」，且不再有任何行显示「上传中」
+  for (const f of files) {
+    await waitRowStatus(page, f.name, "已暂停", 15_000);
+    await expect(
+      page.locator("tbody tr", { has: page.locator("td", { hasText: f.name }) })
+    ).toHaveCount(1);
+  }
+  await expect(page.locator("tbody").getByText("上传中", { exact: true })).toHaveCount(
+    0,
+    { timeout: 10_000 }
+  );
+
+  // F-02：缓存未被清空 → 点「继续」可续传至终态（无需重新选择文件）
+  await page.unroute("**/api/file/upload");
+  const rowA = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "batch-cancel-a.bin" }),
+  });
+  await rowA.getByRole("button", { name: "继续" }).click();
+  await expect(
+    rowA.getByText("已完成", { exact: true }).or(
+      rowA.getByText("秒传成功", { exact: true })
+    )
+  ).toBeVisible({ timeout: 45_000 });
+  expect(await findProductFile(files[0]._md5)).not.toBeNull();
+});
