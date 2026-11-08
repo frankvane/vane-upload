@@ -385,12 +385,16 @@ async function fetchWithRetry(
           wrappedError.name === "AbortError" ||
           wrappedError.message.includes("timeout");
 
-        if ((isNetworkError || isTimeoutError) && attempts < maxRetries) {
-          const nextRetryDelay = retryInterval * currentAttempt;
-          debug(`将在 ${nextRetryDelay}ms 后重试请求`, undefined, true);
-          setTimeout(makeRequest, nextRetryDelay);
-          return;
-        }
+        // E2E-04：网络错误 / 超时即判失败，不再按 maxRetries 反复等待。
+        // 后端不可用时每次尝试都必然失败，继续重试只会让 UI 长时间停在
+        // 「上传中 0%」；5xx 的重试仍保留在上面的响应分支。
+        debug(
+          `请求异常直接失败${
+            isNetworkError || isTimeoutError ? "（连接级错误，不再重试）" : ""
+          }`,
+          { error: wrappedError.message },
+          true,
+        );
 
         reject(wrappedError);
       } finally {
@@ -411,6 +415,30 @@ const isCancellation = (error: unknown, signal?: AbortSignal): boolean =>
   Boolean(signal?.aborted) ||
   (error instanceof Error &&
     (error.name === "AbortError" || error.message === "上传已取消"));
+
+/**
+ * E2E-04：连接级失败（网络断开 / 请求超时 / 后端不可达）。
+ * 这类错误继续跑完整条上传链路没有意义，应尽快上报明确错误让用户重试。
+ */
+const isConnectionFailure = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "TypeError" ||
+    error.name === "AbortError" ||
+    error.message.includes("network") ||
+    error.message.includes("timeout") ||
+    error.message.includes("Failed to fetch")
+  );
+};
+
+/**
+ * E2E-04：后端整体不可用（连接级失败或 5xx）。
+ * 仅用于「预检 + 状态查询」两次探测都失败时的快速失败判定；
+ * 单个分片的 5xx 仍按原有重试 + 继续策略处理，避免一处抖动中断整个文件。
+ */
+const isBackendUnavailable = (error: unknown): boolean =>
+  isConnectionFailure(error) ||
+  (error instanceof Error && /^HTTP 错误 5\d\d/.test(error.message));
 
 self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
   let fileId: string | undefined;
@@ -560,6 +588,15 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       : "/api/file/status";
     const statusUrl = joinUrl(baseURL, statusApi);
 
+    // E2E-04：预检与状态查询只用作优化，各最多尝试 2 次；
+    // 若两次探测都因连接级错误/5xx 失败，说明后端不可用，立即给明确错误，
+    // 不再进入分片上传阶段（否则会继续白跑一轮「上传中 0%」）。
+    const probeOptions = {
+      ...retryOptions,
+      maxRetries: Math.min(retryOptions.maxRetries, 2),
+    };
+    let precheckFailure: unknown = null;
+
     // P2-1（a）：秒传快路径前置。
     // 旧实现必须先串行算完全部分片 MD5（大文件数千片、数分钟）才发秒传确认，
     // 即便文件早已存在也要白付一轮全量哈希。这里先不带 chunk_md5s 做一次轻量确认：
@@ -585,7 +622,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           }),
         },
         {
-          ...retryOptions,
+          ...probeOptions,
           authHeaders,
           credentials: credentialsMode,
           allowedHosts: taskAllowedHosts.get(fileInfo.id),
@@ -595,6 +632,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         // 预检失败不改变主流程：后续状态查询会退化为全量重传，
         // 真正的鉴权 / 网络错误会在分片上传阶段照常抛出。
         debug("秒传预检请求失败，继续常规流程", { error: String(error) }, true);
+        if (!isCancellation(error, taskSignal)) {
+          precheckFailure = error;
+        }
         return null;
       });
 
@@ -629,7 +669,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         `${statusUrl}?${statusQuery}`,
         { method: "GET" },
         {
-          ...retryOptions,
+          ...probeOptions,
           authHeaders,
           credentials: credentialsMode,
           allowedHosts: taskAllowedHosts.get(fileInfo.id),
@@ -652,6 +692,21 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     } catch (error) {
       // 只有「预检 + 状态查询都失败」才退化为全量重传。
       debug("状态查询失败，按全量重传处理", { error: String(error) }, true);
+      // E2E-04：两次探测都是连接级失败/5xx → 后端不可用，立即明确报错，
+      // 不再进入分片上传白跑一轮。
+      if (
+        !isCancellation(error, taskSignal) &&
+        isBackendUnavailable(error) &&
+        precheckFailure !== null &&
+        isBackendUnavailable(precheckFailure)
+      ) {
+        self.postMessage({
+          type: "error",
+          message:
+            "无法连接服务器（网络错误或后端不可用），请检查网络后重试上传",
+        });
+        return;
+      }
     }
 
     // VU-49：不再物化 `needUploadChunks` 数组与等量的任务闭包。
@@ -675,6 +730,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       // 记录已完成的分片数量，用于计算进度
       let totalUploadedChunks = chunkCount - missingCount;
       const failedChunks: number[] = [];
+      // E2E-04：首个「连接级失败 / 5xx 已耗尽重试」的分片错误。
+      // 一旦命中就停止领取新分片，避免后端不可用时把剩余分片全部再跑一遍。
+      let fatalChunkError: unknown = null;
       // 刷新后续传时本地缓存缺片：记录首个缺失索引，最终以「需重新选择文件」上报
       let cacheMissingIndex: number | null = null;
 
@@ -798,6 +856,15 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
               true,
             );
             debugError(`分片 ${i + 1} 上传失败:`, error);
+            // E2E-04：连接级失败不再继续上传剩余分片（由 shouldStop 终止游标池），
+            // 保留首个错误用于向上报可读原因。
+            if (
+              fatalChunkError === null &&
+              !isCancellation(error, taskSignal) &&
+              isConnectionFailure(error)
+            ) {
+              fatalChunkError = error;
+            }
             // 失败索引由 pool 的 onFailure 统一记录，这里继续抛出以计入 failed。
             throw error;
           }
@@ -812,9 +879,12 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           next: nextChunk,
           concurrency: chunkConcurrency,
           task: uploadChunk,
-          // 取消后不再领取新分片；缓存缺片后同样停止领取（剩余分片已无法读取）。
+          // 取消后不再领取新分片；缓存缺片后同样停止领取（剩余分片已无法读取）；
+          // 连接级失败/5xx 后停止领取，尽快把明确错误抛给 UI（E2E-04）。
           shouldStop: () =>
-            taskSignal?.aborted === true || cacheMissingIndex !== null,
+            taskSignal?.aborted === true ||
+            cacheMissingIndex !== null ||
+            fatalChunkError !== null,
           onFailure: (index) => {
             failedChunks.push(index);
           },
@@ -848,6 +918,18 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
             fileId: fileInfo.id,
             uploadedChunks: stats?.uploadedChunks ?? totalUploadedChunks,
             totalChunks: stats?.totalChunks ?? chunkCount,
+          });
+          return;
+        }
+
+        // E2E-04：连接级失败时优先上报可读原因，不再用「N 个分片失败」的模糊文案；
+        // 此时正常情况下只有一个在途批次被计入失败。
+        if (fatalChunkError !== null) {
+          self.postMessage({
+            type: "error",
+            message:
+              "无法连接服务器（网络错误或后端不可用），请检查网络后重试上传",
+            failedChunks,
           });
           return;
         }
