@@ -34,8 +34,13 @@ interface UploadWorkerApiConfig {
 
 interface RunUploadTaskOptions {
   file: UploadFile;
-  /** 主线程文件引用（T3.1 流式分片）：File 结构化克隆进 Worker，按需 slice 读取 */
-  fileRef: File;
+  /**
+   * 主线程文件引用（T3.1 流式分片）：File 结构化克隆进 Worker，按需 slice 读取。
+   * 刷新后续传时为空，改由 chunkCache 提供分片字节。
+   */
+  fileRef?: File;
+  /** 分片缓存（方案 A）：fileRef 缺失时 Worker 从 IndexedDB 读取尚未确认的分片 */
+  chunkCache?: { instanceId: string };
   networkParams: UploadWorkerNetworkParams;
   uploadConfig: UploadWorkerApiConfig;
   signal?: AbortSignal;
@@ -60,6 +65,8 @@ interface UploadTaskResult {
   pausedChunks?: number;
   /** T3.3：总分片数 */
   totalChunks?: number;
+  /** 分片缓存缺片：需用户重新选择文件（而非普通上传失败） */
+  cacheMissing?: boolean;
   errorMessage?: string;
 }
 
@@ -342,6 +349,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
           finish({
             success: false,
             skipped: false,
+            cacheMissing: Boolean(payload.cacheMissing),
             errorMessage: payload.message ?? "Upload failed",
           });
           return;
@@ -397,12 +405,13 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
           ),
         },
         fileRef: options.fileRef,
+        chunkCache: options.chunkCache,
         networkParams: options.networkParams,
         uploadConfig: options.uploadConfig,
       };
 
-      // 注意：File 通过结构化克隆传入 Worker（不转移），主线程注册表仍需持有该
-      // 引用以支持刷新后的重选/重试；若用 transfer 列表转移，主线程引用会被置空。
+      // 注意：File 通过结构化克隆传入 Worker（不转移）。主线程注册表仍持有该引用，
+      // 以支持会话内重试；刷新后引用丢失时由分片缓存接管字节来源。
       bumpIdleTimer();
       worker.postMessage(message);
     });

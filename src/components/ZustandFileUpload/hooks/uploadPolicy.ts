@@ -97,6 +97,8 @@ export interface UploadTaskResult {
   success?: boolean;
   skipped?: boolean;
   pausedChunks?: number;
+  /** 分片缓存缺片：需要用户重新选择文件，而不是普通上传失败 */
+  cacheMissing?: boolean;
   errorMessage?: string;
 }
 
@@ -104,7 +106,7 @@ export type UploadResultKind =
   | { kind: "cancelled" }
   | { kind: "paused"; pausedChunks?: number }
   | { kind: "success"; skipped: boolean }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; cacheMissing?: boolean };
 
 /**
  * 将 worker 结果判别为状态机分支（纯函数）。
@@ -122,7 +124,11 @@ export function classifyUploadResult(result: UploadTaskResult): UploadResultKind
   if (result.success) {
     return { kind: "success", skipped: Boolean(result.skipped) };
   }
-  return { kind: "error", message: result.errorMessage ?? "上传失败" };
+  return {
+    kind: "error",
+    message: result.errorMessage ?? "上传失败",
+    ...(result.cacheMissing ? { cacheMissing: true } : {}),
+  };
 }
 
 /** 上传成功判定：INSTANT（秒传）或 DONE。供编排层写状态/释放引用前判断。 */

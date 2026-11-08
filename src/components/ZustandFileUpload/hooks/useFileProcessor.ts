@@ -8,6 +8,10 @@ import { useUploadEngine } from "../context/UploadEngineContext";
 import { useShallow } from "zustand/react/shallow";
 import { compileAllowedTypes, isFileTypeAllowed } from "../../../shared/fileType";
 import { reconcileIncomingFiles } from "../services/uploadDedupe";
+import {
+  primeChunkCache,
+  type ChunkCacheStatus,
+} from "../services/chunkCache";
 // VU-25：应用构建下 worker 独立成 asset；库构建由 vite.lib.config.ts 统一重写为
 // `?worker&inline`，避免消费方 dev server 把 .pnpm 深层 worker 路径当 SPA fallback 返回 HTML。
 import FilePrepareWorker from "../worker/filePrepareWorker.ts?worker";
@@ -265,15 +269,54 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
             // VU-43：N 条彼此独立的 IDB 写入并发执行，不再逐个串行 await。
             // fileRef 注册是同步内存操作，放在同一批任务里保证顺序无关。
+            const chunkCacheOptions = {
+              instanceId: engine.instanceId,
+              maxFileSize: uploadConfig.chunkCacheMaxFileSize,
+            };
+            // 同一批选择只提示一次同类降级，避免多文件时刷屏。
+            const notifiedCacheIssues = new Set<ChunkCacheStatus>();
+            const notifyCacheIssue = (status: ChunkCacheStatus) => {
+              if (status === "ready" || notifiedCacheIssues.has(status)) {
+                return;
+              }
+              notifiedCacheIssues.add(status);
+              if (status === "skipped") {
+                const maxMB = Math.round(
+                  (chunkCacheOptions.maxFileSize ?? 0) / 1024 / 1024
+                );
+                messageApi.warning(
+                  `部分文件超过 ${maxMB}MB，未启用刷新续传缓存，刷新后需重新选择文件`
+                );
+              } else {
+                messageApi.warning(
+                  "浏览器存储不可用或空间不足，刷新后需重新选择文件继续上传"
+                );
+              }
+            };
+            /**
+             * 方案 A：选文件即预热分片缓存（全部待传分片）。
+             * 不阻塞选择流程；上传启动前 processFileUpload 会 await 同一个预热 Promise，
+             * 保证「上传开始时缓存已完整」，否则刷新续传会静默缺片。
+             */
+            const primeCache = (file: UploadFile, fileRef?: File) => {
+              if (!fileRef) {
+                return;
+              }
+              void primeChunkCache(file, fileRef, chunkCacheOptions)
+                .then(notifyCacheIssue)
+                .catch(() => undefined);
+            };
+
             await Promise.all([
               ...newFiles.map(async (file) => {
-                // T3.1：fileRef 仅入主线程注册表，剥离后再持久化，
-                // IndexedDB 中不再存放整文件数据（原 buffer 字段已移除）
+                // T3.1：fileRef 仅入主线程注册表，剥离后再持久化；
+                // 文件字节由分片缓存（方案 A）持久化，刷新后可重建。
                 const { fileRef, ...persistable } = file;
                 if (fileRef) {
                   engine.fileRegistry.registerFileRef(file.id, fileRef);
                 }
                 await engine.storage.setItem(file.id, persistable);
+                primeCache(persistable, fileRef);
               }),
               ...rebindItems.map(async ({ existing: record, incoming }) => {
                 const merged: UploadFile = {
@@ -302,6 +345,8 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
                 // fileRef 仅保留在内存注册表中，不写入 IndexedDB
                 delete persistable.fileRef;
                 await engine.storage.setItem(record.id, persistable);
+                // 重选绑定后按既有 chunkSize/chunkCount 重新预热缓存
+                primeCache(persistable, incoming.fileRef);
               }),
             ]);
 

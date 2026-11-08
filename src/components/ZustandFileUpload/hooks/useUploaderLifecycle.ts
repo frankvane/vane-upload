@@ -50,6 +50,7 @@ const createCleanupPolicy = (engine: UploadEngine) =>
     getCleanupDelay: () => engine.store.getState().cleanupDelay,
     storage: engine.storage,
     fileRegistry: engine.fileRegistry,
+    instanceId: engine.instanceId,
   });
 
 export function useUploaderLifecycle({

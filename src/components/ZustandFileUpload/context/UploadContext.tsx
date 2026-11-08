@@ -11,6 +11,7 @@ import { API_BASE_URL, API_PATHS } from "../../../config/api";
 import { createUploadStorage } from "../services/uploadStorageInstance";
 import { createFileRegistry } from "../services/fileRegistry";
 import { createUploadWorkerPool } from "../services/uploadWorkerBridge";
+import { DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE } from "../services/chunkCache";
 import { createUploadStore, UploadStoreContext } from "../store/upload";
 import { UploadEngine, UploadEngineContext } from "./UploadEngineContext";
 
@@ -27,6 +28,7 @@ const DEFAULT_CONFIG: UploadConfig = {
   maxFileSize: 100 * 1024 * 1024,
   allowedFileTypes: [],
   maxFiles: 100,
+  chunkCacheMaxFileSize: DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE,
 };
 
 export interface UploadContextType extends UploadConfig, UploadAuthConfig {
@@ -70,6 +72,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   maxFileSize = DEFAULT_CONFIG.maxFileSize,
   allowedFileTypes = DEFAULT_CONFIG.allowedFileTypes,
   maxFiles = DEFAULT_CONFIG.maxFiles,
+  chunkCacheMaxFileSize = DEFAULT_CONFIG.chunkCacheMaxFileSize,
   autoUpload = true,
   autoCleanup = true,
   cleanupDelay = 10,
@@ -152,6 +155,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       maxFileSize,
       allowedFileTypes: stableAllowedFileTypes,
       maxFiles,
+      chunkCacheMaxFileSize,
       autoUpload,
       autoCleanup,
       cleanupDelay,
@@ -187,6 +191,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       maxFileSize,
       stableAllowedFileTypes,
       maxFiles,
+      chunkCacheMaxFileSize,
       autoUpload,
       autoCleanup,
       cleanupDelay,

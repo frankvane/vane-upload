@@ -87,7 +87,20 @@ const FileTable: React.FC<FileTableProps> = ({
         render: (_: unknown, record: UploadFile) => {
           const statusItem =
             statusMap[record.status] || { text: record.status, color: "default" };
-          return <Tag color={statusItem.color}>{statusItem.text}</Tag>;
+          return (
+            <Tag
+              color={statusItem.color}
+              // 方案 A：缓存缺失等失败原因需在行内可查，避免「上传失败」后
+              // 用户不知道为什么要重新选择文件。
+              title={
+                record.status === UploadStatus.ERROR
+                  ? record.errorMessage
+                  : undefined
+              }
+            >
+              {statusItem.text}
+            </Tag>
+          );
         },
         align: "center" as AlignItem,
         width: "10%",

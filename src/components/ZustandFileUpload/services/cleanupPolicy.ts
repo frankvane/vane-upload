@@ -1,6 +1,7 @@
 ﻿import { UploadFile, UploadStatus } from "../types/upload";
 import type { FileRegistry } from "./fileRegistry";
 import { listUploadFiles } from "./uploadStorage";
+import { clearFileChunkCache } from "./chunkCache";
 
 interface BatchInfo {
   current: number;
@@ -30,6 +31,8 @@ interface CleanupPolicyOptions {
   storage: LocalForage;
   /** 该实例的 File 引用注册表（T3.2：替换模块级单例） */
   fileRegistry: FileRegistry;
+  /** 实例 id：用于按实例/文件清理分片缓存（方案 A）。缺省 "default" */
+  instanceId?: string;
 }
 
 const canCleanup = (status: UploadStatus) =>
@@ -172,6 +175,11 @@ export class UploadCleanupPolicy {
     );
     for (const id of removedIds) {
       this.options.fileRegistry.releaseFileRef(id);
+      // 方案 A：记录被自动清理时同步回收分片缓存（完成时已清，这里兜底）。
+      void clearFileChunkCache(
+        this.options.instanceId ?? "default",
+        id
+      );
     }
 
     // 用已知快照刷新：整个清理流程只发生 1 次 iterate。

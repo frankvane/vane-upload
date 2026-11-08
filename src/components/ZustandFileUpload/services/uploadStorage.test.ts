@@ -113,7 +113,7 @@ describe("uploadStorage（T2.8 补齐）", () => {
     expect(fakeRegistry.releaseFileRef).toHaveBeenCalledTimes(3);
   });
 
-  it("recoverInterruptedUploadFiles：有 buffer 的中断任务恢复到 QUEUED", async () => {
+  it("recoverInterruptedUploadFiles：有 fileRef 的中断任务恢复到 QUEUED", async () => {
     iterateMock.mockImplementation(async (callback) => {
       callback(
         createFile("u1", UploadStatus.UPLOADING, {
@@ -137,7 +137,7 @@ describe("uploadStorage（T2.8 补齐）", () => {
     expect(saved.errorMessage).toBeUndefined();
   });
 
-  it("recoverInterruptedUploadFiles：buffer 缺失标记 ERROR 且清空进度", async () => {
+  it("recoverInterruptedUploadFiles：fileRef 缺失标记 ERROR 且清空进度", async () => {
     iterateMock.mockImplementation(async (callback) => {
       callback(
         createFile("u2", UploadStatus.PREPARING_UPLOAD, { progress: 42 }),
@@ -172,6 +172,66 @@ describe("uploadStorage（T2.8 补齐）", () => {
       missingFileRefCount: 0,
     });
     expect(setItemMock).not.toHaveBeenCalled();
+  });
+
+  describe("分片缓存（方案 A）：刷新零点击续传", () => {
+    it("无 fileRef 但缓存就绪 → QUEUED，计入 recoveredCount", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("cached", UploadStatus.UPLOADING), "cached");
+      });
+
+      const summary = await recoverInterruptedUploadFiles(fakeStorage, {
+        listReadyFileIds: async () => new Set(["cached"]),
+      });
+
+      expect(summary).toEqual({
+        totalInterrupted: 1,
+        recoveredCount: 1,
+        missingFileRefCount: 0,
+      });
+      const [, saved] = setItemMock.mock.calls[0]!;
+      expect(saved.status).toBe(UploadStatus.QUEUED);
+      expect(saved.awaitingReselect).toBe(false);
+    });
+
+    it("无 fileRef 且缓存缺失 → ERROR + awaitingReselect", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("missing", UploadStatus.UPLOADING), "missing");
+      });
+
+      const summary = await recoverInterruptedUploadFiles(fakeStorage, {
+        listReadyFileIds: async () => new Set(),
+      });
+
+      expect(summary).toEqual({
+        totalInterrupted: 1,
+        recoveredCount: 0,
+        missingFileRefCount: 1,
+      });
+      const [, saved] = setItemMock.mock.calls[0]!;
+      expect(saved.status).toBe(UploadStatus.ERROR);
+      expect(saved.awaitingReselect).toBe(true);
+      expect(saved.errorMessage).toContain("本地续传缓存缺失");
+    });
+
+    it("recoverUploadQueueOnMount：历史 QUEUED 命中缓存保持 QUEUED 且无需写回", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("q-cached", UploadStatus.QUEUED), "q-cached");
+      });
+
+      const snapshot = await recoverUploadQueueOnMount(fakeStorage, {
+        listReadyFileIds: async () => new Set(["q-cached"]),
+      });
+
+      expect(snapshot.files[0]?.status).toBe(UploadStatus.QUEUED);
+      expect(snapshot.summary).toEqual({
+        totalInterrupted: 1,
+        recoveredCount: 1,
+        missingFileRefCount: 0,
+      });
+      expect(snapshot.writeCount).toBe(0);
+      expect(setItemMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("recoverUploadQueueOnMount（VU-39 单次快照恢复）", () => {

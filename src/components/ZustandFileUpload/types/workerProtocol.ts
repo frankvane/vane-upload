@@ -13,11 +13,19 @@ export type UploadWorkerRequest =
         chunkKey?: string;
       };
       /**
-       * 文件引用（T3.1 流式分片）：替代原 fileBuffer 整文件传输。
-       * File/Blob 可结构化克隆进 Worker，分片按需 slice 读取，
-       * 内存驻留 = chunkSize × chunkConcurrency，与文件大小无关。
+       * 文件引用（T3.1 流式分片）：会话内存在时优先按需 slice 读取，
+       * 不做整文件传输。页面刷新后为 undefined，此时必须提供
+       * {@link UploadWorkerRequest} 的 chunkCache，由 Worker 从分片缓存读取字节。
        */
-      fileRef: File;
+      fileRef?: File;
+      /**
+       * 分片缓存（方案 A）：fileRef 缺失时的字节来源。
+       * Worker 通过同一 IndexedDB（`react-upload-chunks`）读取尚未确认成功的分片，
+       * 并在分片上传成功后删除对应缓存，使占用随进度下降。
+       */
+      chunkCache?: {
+        instanceId: string;
+      };
       networkParams?: {
         networkType?: string;
         fileConcurrency?: number;
@@ -89,6 +97,11 @@ export type UploadWorkerResponse =
       type: "error";
       message?: string;
       failedChunks?: number[];
+      /**
+       * 分片缓存缺失（刷新后续传时字节已不存在）。
+       * 主线程据此把记录置为「需重新选择文件」，而不是普通上传失败。
+       */
+      cacheMissing?: boolean;
     }
   | {
       type: "retry";

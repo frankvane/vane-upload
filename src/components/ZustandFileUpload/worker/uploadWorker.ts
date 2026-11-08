@@ -5,6 +5,11 @@ import { runCursorPool } from "./../../../shared/concurrency";
 import SparkMD5 from "spark-md5";
 import type { UploadHashMode } from "../types/upload";
 import { computeUploadProgress } from "../services/uploadProgress";
+import {
+  deleteCachedChunk,
+  deleteFileCache,
+  readCachedChunk,
+} from "../services/chunkCacheStore";
 import { joinUrl } from "../../../shared/url";
 import { getAllowedHosts, isUrlAllowed } from "../../../shared/urlSafety";
 
@@ -22,10 +27,17 @@ type UploadWorkerMessage =
         chunkKey?: string;
       };
       /**
-       * 文件引用（T3.1 流式分片）：替代原 fileBuffer 整文件传输。
-       * File 结构化克隆进 Worker，分片按需 slice 读取，内存驻留与文件大小无关。
+       * 文件引用（T3.1 流式分片）：会话内优先按需 slice 读取；
+       * 页面刷新后为 undefined，此时由 chunkCache 提供分片字节。
        */
-      fileRef: File;
+      fileRef?: File;
+      /**
+       * 分片缓存（方案 A）：fileRef 缺失时从 IndexedDB 读取尚未确认成功的分片，
+       * 分片上传成功后删除对应缓存。
+       */
+      chunkCache?: {
+        instanceId: string;
+      };
       networkParams?: {
         chunkConcurrency?: number;
         maxRetries?: number;
@@ -163,6 +175,17 @@ function debug(
     message: safeMessage,
     data: safeData,
   });
+}
+
+/**
+ * 刷新后续传时本地分片缓存缺片：属于「需重新选择文件」，
+ * 上层必须据此把记录置为 awaitingReselect，而不是普通上传失败。
+ */
+class ChunkCacheMissError extends Error {
+  constructor(readonly chunkIndex: number) {
+    super(`本地续传缓存缺少分片 ${chunkIndex + 1}`);
+    this.name = "ChunkCacheMissError";
+  }
 }
 
 // 使用 spark-md5 计算文件哈希
@@ -457,7 +480,8 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       return;
     }
 
-    const { fileInfo, fileRef, networkParams, uploadConfig } = event.data;
+    const { fileInfo, fileRef, chunkCache, networkParams, uploadConfig } =
+      event.data;
     fileId = fileInfo.id;
     const authHeaders = uploadConfig?.authHeaders;
     // F3：由 baseURL 推导允许携带鉴权头的宿主白名单（SSRF/token 泄漏防护）
@@ -477,12 +501,13 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       throw new Error("缺少必要参数：fileInfo");
     }
 
-    if (!fileRef) {
-      debug("缺少文件引用", {
+    // 字节来源：会话内 fileRef 优先；刷新后续传仅由分片缓存提供。
+    if (!fileRef && !chunkCache?.instanceId) {
+      debug("缺少文件引用与分片缓存", {
         fileId: fileInfo?.id,
         fileName: fileInfo?.fileName,
       });
-      throw new Error("缺少必要参数：fileRef");
+      throw new Error("缺少必要参数：fileRef 或 chunkCache");
     }
 
     // 任务级取消信号：CANCEL 消息或主线程 terminate 均可中断全部在途请求（P1-8）
@@ -498,13 +523,20 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       hash: fileInfo.hash,
     });
 
+    // 文件字节只用于分片读取与进度换算：会话内取 fileRef.size，
+    // 刷新后续传取持久化的 fileInfo.fileSize（两者一致）。
+    const fileSize = fileRef ? fileRef.size : fileInfo.fileSize;
     const chunkSize = fileInfo.chunkSize || 1024 * 1024;
-    const chunkCount = Math.ceil(fileRef.size / chunkSize);
+    const chunkCount = Math.ceil(fileSize / chunkSize);
+    const cacheKey = chunkCache?.instanceId
+      ? { instanceId: chunkCache.instanceId, fileId: fileInfo.id }
+      : null;
     taskStats.set(fileInfo.id, { uploadedChunks: 0, totalChunks: chunkCount });
     debug("分片信息", {
       chunkSize,
       chunkCount,
-      totalSize: fileRef.size,
+      totalSize: fileSize,
+      fromCache: !fileRef,
     });
 
     // 使用网络参数中的分片并发数和重试参数
@@ -571,6 +603,10 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         debug("文件已秒传（预检命中，跳过全部分片 MD5）", {
           fileName: fileInfo.fileName,
         });
+        // 文件已在服务端完整存在，本地分片缓存不再需要。
+        if (cacheKey) {
+          void deleteFileCache(cacheKey).catch(() => undefined);
+        }
         self.postMessage({ type: "done", skipped: true });
         return;
       }
@@ -628,10 +664,19 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       range: `0..${Math.max(0, chunkCount - 1)}`,
     });
 
+    // 服务端已存在的分片无需本地字节，顺手回收其缓存（刷新临界点可能残留）。
+    if (cacheKey && existingChunks.size > 0) {
+      for (const index of existingChunks) {
+        void deleteCachedChunk(cacheKey, index).catch(() => undefined);
+      }
+    }
+
     try {
       // 记录已完成的分片数量，用于计算进度
       let totalUploadedChunks = chunkCount - missingCount;
       const failedChunks: number[] = [];
+      // 刷新后续传时本地缓存缺片：记录首个缺失索引，最终以「需重新选择文件」上报
+      let cacheMissingIndex: number | null = null;
 
       // 3. 分片上传 - 游标式并发池
       if (missingCount > 0) {
@@ -655,9 +700,26 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
             throw new Error("上传已取消");
           }
 
-          const start = i * chunkSize;
-          const end = Math.min(fileRef.size, start + chunkSize);
-          const chunkBuf = await fileRef.slice(start, end).arrayBuffer();
+          // 字节来源：会话内 fileRef 按需 slice；刷新后续传从分片缓存读取。
+          // 缓存缺片时抛出专用错误，避免被当成普通网络失败。
+          const readChunk = async (): Promise<ArrayBuffer> => {
+            if (fileRef) {
+              const start = i * chunkSize;
+              const end = Math.min(fileRef.size, start + chunkSize);
+              return fileRef.slice(start, end).arrayBuffer();
+            }
+            if (cacheKey) {
+              const cached = await readCachedChunk(cacheKey, i);
+              if (cached) {
+                return cached;
+              }
+            }
+            if (cacheMissingIndex === null) {
+              cacheMissingIndex = i;
+            }
+            throw new ChunkCacheMissError(i);
+          };
+          const chunkBuf = await readChunk();
           // P2-1：按需计算——只算当前要上传的分片，不再预计算全部分片
           const chunkMd5 = calculateMD5(chunkBuf);
 
@@ -671,7 +733,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           formData.append("total", chunkCount.toString());
           formData.append("chunk_md5", chunkMd5);
 
-          debug(`上传分片 ${i + 1}/${chunkCount}`, { size: end - start });
+          debug(`上传分片 ${i + 1}/${chunkCount}`, {
+            size: chunkBuf.byteLength,
+          });
           try {
             // 使用配置的上传 API 地址
             const uploadApi = uploadConfig?.uploadApi || "/api/file/upload";
@@ -693,6 +757,11 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
               },
             );
 
+            // 服务端已确认该分片：立即释放对应缓存，占用随进度下降。
+            if (cacheKey) {
+              void deleteCachedChunk(cacheKey, i).catch(() => undefined);
+            }
+
             // 更新进度
             totalUploadedChunks++;
             const stats = taskStats.get(fileInfo.id);
@@ -701,12 +770,12 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
             }
             const uploadedBytes = Math.min(
               totalUploadedChunks * chunkSize,
-              fileRef.size,
+              fileSize,
             );
             const elapsedMs = Math.max(1, Date.now() - uploadStartTime);
             const detail = computeUploadProgress({
               uploadedBytes,
-              totalBytes: fileRef.size,
+              totalBytes: fileSize,
               elapsedMs,
             });
             debug(`分片 ${i + 1} 上传成功，总进度: ${detail.progress}%`);
@@ -743,8 +812,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           next: nextChunk,
           concurrency: chunkConcurrency,
           task: uploadChunk,
-          // 取消后不再领取新分片，已在途请求由 fetchWithRetry 的 signal 中断。
-          shouldStop: () => taskSignal?.aborted === true,
+          // 取消后不再领取新分片；缓存缺片后同样停止领取（剩余分片已无法读取）。
+          shouldStop: () =>
+            taskSignal?.aborted === true || cacheMissingIndex !== null,
           onFailure: (index) => {
             failedChunks.push(index);
           },
@@ -757,6 +827,17 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           return;
         }
         debug("并发上传任务完成", { failedChunks: failedChunks.length });
+
+        // 刷新后续传时本地缓存缺片：明确上报「需重新选择文件」，
+        // 不能混在普通分片失败里，否则用户会以为只是网络问题。
+        if (cacheMissingIndex !== null) {
+          self.postMessage({
+            type: "error",
+            message: `本地续传缓存缺失（分片 ${cacheMissingIndex + 1}/${chunkCount}），请重新选择文件后继续上传`,
+            cacheMissing: true,
+          });
+          return;
+        }
 
         // 暂停边界：若暂停到达时所有在途分片已结束（极端时序），在此确认 paused，
         // 并结束本次上传任务（Worker 回到空闲，等待主线程 resume 重新发起或取消）
@@ -827,12 +908,22 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       );
       debug("文件合并成功");
 
+      // 合并落盘即完成：清空该文件的全部分片缓存，避免留下垃圾。
+      if (cacheKey) {
+        void deleteFileCache(cacheKey).catch(() => undefined);
+      }
       self.postMessage({ type: "done", skipped: false });
     } catch (error) {
       // VU-07：取消时在途 fetch 抛 AbortError，旧实现统一上报 error，
       // 与主线程的 cancelled 收尾形成竞态，UI 可能显示「失败」。
       if (isCancellation(error, taskSignal)) {
         self.postMessage({ type: "cancelled", fileId: fileId ?? "" });
+      } else if (error instanceof ChunkCacheMissError) {
+        self.postMessage({
+          type: "error",
+          message: `本地续传缓存缺失（分片 ${error.chunkIndex + 1}），请重新选择文件后继续上传`,
+          cacheMissing: true,
+        });
       } else {
         const errorMessage =
           error instanceof Error ? error.message : String(error);

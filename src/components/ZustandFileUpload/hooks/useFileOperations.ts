@@ -8,6 +8,10 @@ import { buildChunkKey } from "../../../shared/chunkKey";
 import { joinUrl } from "../../../shared/url";
 import { resolveAuthHeaders, resolveRequestCredentials } from "../utils/auth";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
+import {
+  clearFileChunkCache,
+  clearInstanceChunkCache,
+} from "../services/chunkCache";
 
 const DEFAULT_ABORT_API = "/api/file/abort";
 
@@ -99,6 +103,8 @@ export function useFileOperations(
         // 记录无法阻止 worker 继续发分片，任务收尾还会把记录写回导致「复活」。
         engine.workerPool.cancelUploadTask(id);
         engine.fileRegistry.releaseFileRef(id);
+        // 方案 A：删除记录即清理分片缓存，并作废在途预热，避免删后被写回。
+        void clearFileChunkCache(engine.instanceId, id);
 
         await engine.storage.removeItem(id);
 
@@ -141,6 +147,8 @@ export function useFileOperations(
   const handleClearList = useCallback(async (): Promise<boolean> => {
     try {
       await engine.storage.clear();
+      // 清空列表 = 放弃所有续传：同步清空该实例的全部分片缓存。
+      await clearInstanceChunkCache(engine.instanceId);
       await refreshFiles();
       getMessageApi().success("文件列表已清空");
       return true;

@@ -11,6 +11,7 @@ import {
   recoverUploadQueueOnMount,
   type UploadRecoverySnapshot,
 } from "./services/uploadStorage";
+import { listReadyFileIds } from "./services/chunkCacheStore";
 import { useUploadStore } from "./store/upload";
 import { useUploadEngine } from "./context/UploadEngineContext";
 import { UploadProvider } from "./context/UploadContext";
@@ -78,6 +79,7 @@ const ZustandFileUploadCore: React.FC = () => {
       // 这里不再做 join("|") → split("|") 的无意义往返。
       allowedFileTypes: uploadConfig.allowedFileTypes,
       maxFiles: uploadConfig.maxFiles,
+      chunkCacheMaxFileSize: uploadConfig.chunkCacheMaxFileSize,
       debug: uploadConfig.debug,
     });
   }, [
@@ -94,6 +96,7 @@ const ZustandFileUploadCore: React.FC = () => {
     uploadConfig.maxFileSize,
     uploadConfig.allowedFileTypes,
     uploadConfig.maxFiles,
+    uploadConfig.chunkCacheMaxFileSize,
     uploadConfig.debug,
   ]);
 
@@ -119,7 +122,10 @@ const ZustandFileUploadCore: React.FC = () => {
   useEffect(() => {
     let active = true;
     if (!recoveryPromiseRef.current) {
-      recoveryPromiseRef.current = recoverUploadQueueOnMount(engine.storage);
+      // 方案 A：把“分片缓存是否就绪”注入恢复流程，就绪即零点击续传。
+      recoveryPromiseRef.current = recoverUploadQueueOnMount(engine.storage, {
+        listReadyFileIds: () => listReadyFileIds(engine.instanceId),
+      });
     }
     const recoveryPromise = recoveryPromiseRef.current;
 
@@ -154,7 +160,7 @@ const ZustandFileUploadCore: React.FC = () => {
 
       if (recovery.missingFileRefCount > 0) {
         messageApi.warning(
-          `${recovery.missingFileRefCount} 个文件缓存缺失，需重新选择后上传`
+          `${recovery.missingFileRefCount} 个文件本地续传缓存缺失，需重新选择后上传`
         );
       }
 

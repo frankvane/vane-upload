@@ -7,6 +7,11 @@ import { useUploadEngine } from "../context/UploadEngineContext";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
 import { useShallow } from "zustand/react/shallow";
 import { isUploadableStatus } from "../services/uploadStorage";
+import {
+  clearFileChunkCache,
+  isFileCacheReady,
+  primeChunkCache,
+} from "../services/chunkCache";
 import { resolveAuthHeaders } from "../utils/auth";
 import {
   applyBeforeEach,
@@ -101,13 +106,24 @@ export function useBatchUploader(): BatchUploaderActions {
         return false;
       }
 
-      // T3.1：文件字节不再驻留 IndexedDB，改由主线程 fileRegistry 持有运行时引用。
-      // 页面刷新后注册表清空 → 需用户重新选择同一文件方可续传（服务端分片检查决定跳过范围）。
+      // 分片缓存（方案 A）：会话内 fileRef 优先；刷新后 fileRef 丢失，
+      // 只要缓存就绪即可零点击续传。上传启动前必须确认缓存完整，
+      // 否则刷新后只覆盖部分分片会造成静默丢数据。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
-      if (!fileRef) {
+      const cacheOptions = {
+        instanceId: engine.instanceId,
+        maxFileSize: uploadConfig.chunkCacheMaxFileSize,
+      };
+      const cacheStatus = fileRef
+        ? await primeChunkCache(file, fileRef, cacheOptions)
+        : (await isFileCacheReady(engine.instanceId, file.id))
+          ? "ready"
+          : "unavailable";
+
+      if (!fileRef && cacheStatus !== "ready") {
         file.status = UploadStatus.ERROR;
         file.progress = 0;
-        file.errorMessage = "文件引用已失效，请重新选择该文件以继续上传";
+        file.errorMessage = "本地续传缓存缺失，请重新选择该文件以继续上传";
         file.awaitingReselect = true;
         await engine.storage.setItem(file.id, file);
         syncFile(file);
@@ -121,6 +137,7 @@ export function useBatchUploader(): BatchUploaderActions {
       const result = await engine.workerPool.runUploadTask({
         file,
         fileRef,
+        chunkCache: { instanceId: engine.instanceId },
         signal,
         networkParams: {
           networkType,
@@ -198,6 +215,8 @@ export function useBatchUploader(): BatchUploaderActions {
         latest.errorMessage = undefined;
         // 上传完成：释放文件引用，避免 File 句柄长期驻留
         engine.fileRegistry.releaseFileRef(file.id);
+        // 已完成（含秒传）：分片缓存不再需要，立即清理；Worker 成功路径同样会删。
+        void clearFileChunkCache(engine.instanceId, file.id);
 
         await engine.storage.setItem(file.id, latest);
         syncFile(latest);
@@ -207,9 +226,14 @@ export function useBatchUploader(): BatchUploaderActions {
         return true;
       }
 
-      // 失败分支
+      // 失败分支：终态不再重试，回收分片缓存，避免长期占用存储。
+      // 缓存缺片本身已无缓存可清；该情形明确标记「需重新选择文件」。
       latest.status = UploadStatus.ERROR;
       latest.errorMessage = kind.message;
+      if (kind.cacheMissing) {
+        latest.awaitingReselect = true;
+      }
+      void clearFileChunkCache(engine.instanceId, file.id);
       await engine.storage.setItem(file.id, latest);
       syncFile(latest);
 
@@ -374,6 +398,18 @@ export function useBatchUploader(): BatchUploaderActions {
 
     setIsUploading(false);
     setBatchInfo(null);
+
+    // 取消整批：对应分片缓存一并清理，避免刷新后又被当成「可续传」自动拉起。
+    const terminalStatuses = new Set<UploadStatus>([
+      UploadStatus.DONE,
+      UploadStatus.INSTANT,
+      UploadStatus.ERROR,
+    ]);
+    for (const file of engine.store.getState().files) {
+      if (!terminalStatuses.has(file.status)) {
+        void clearFileChunkCache(engine.instanceId, file.id);
+      }
+    }
   }, [
     activeUploadAbortRef,
     getMessageApi,
@@ -423,21 +459,25 @@ export function useBatchUploader(): BatchUploaderActions {
         return;
       }
 
-      // Worker 已释放（刷新/卸载后）：重新发起上传，服务端分片校验保证字节级续传
+      // Worker 已释放（刷新/卸载后）：重新发起上传，服务端分片校验保证字节级续传。
+      // 会话内 fileRef 优先；刷新后若分片缓存就绪同样可续传，只有两者都没有才降级重选。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
-      if (!fileRef) {
+      const hasCache = fileRef
+        ? true
+        : await isFileCacheReady(engine.instanceId, file.id);
+      if (!hasCache) {
         engine.store.getState().patchFile(file.id, {
           status: UploadStatus.ERROR,
-          errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
+          errorMessage: "本地续传缓存缺失，请重新选择该文件以继续上传",
           awaitingReselect: true,
         });
         await engine.storage.setItem(file.id, {
           ...file,
           status: UploadStatus.ERROR,
-          errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
+          errorMessage: "本地续传缓存缺失，请重新选择该文件以继续上传",
           awaitingReselect: true,
         });
-        getMessageApi().warning("请重新选择文件以继续上传");
+        getMessageApi().warning("本地续传缓存缺失，请重新选择文件以继续上传");
         return;
       }
       // 复用上传链路：服务端 instant 校验已传分片并跳过，字节级续传

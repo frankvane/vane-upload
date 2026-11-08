@@ -40,9 +40,10 @@ export interface UploadFile {
   createdAt: number; // Created timestamp
   order: number; // Queue order
   /**
-   * 运行时文件引用（T3.1 起替代原 buffer 字段）：
-   * 不持久化进 IndexedDB，仅当前会话内存持有；页面刷新即丢失，
-   * 续传需用户重新选择同一文件（服务端分片检查决定跳过范围）。
+   * 运行时文件引用（T3.1）：
+   * 不持久化进 IndexedDB，仅当前会话内存持有。刷新后本字段丢失，
+   * 但分片字节已由分片缓存（方案 A）持久化，可零点击续传；
+   * 仅当缓存不可用 / 超过大小上限时才需要用户重新选择同一文件。
    */
   fileRef?: File;
   /** 本条记录使用的哈希模式（影响队列 id / 服务端分片键，会话间不宜变更） */
@@ -116,6 +117,12 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
   /** 调试日志开关：默认 false。开启后 Worker 输出分片级日志（200ms 节流） */
   debug?: boolean;
 
+  /**
+   * 分片缓存单文件上限（字节），默认 512MB。
+   * 超过上限的文件不写入分片缓存（刷新后需重新选择文件），并给出明确提示。
+   */
+  chunkCacheMaxFileSize?: number;
+
   // Callbacks
   onUploadStart?: (files: UploadFile[]) => void;
   /**
@@ -185,6 +192,11 @@ export interface UploadConfig {
   withCredentials?: boolean;
   /** 调试日志开关（Worker 内分片级日志，200ms 节流）。默认 false。 */
   debug?: boolean;
+  /**
+   * 分片缓存单文件上限（字节）：尚未确认上传成功的分片会写入 IndexedDB，
+   * 使刷新后可零点击续传；超过该上限不缓存并提示。
+   */
+  chunkCacheMaxFileSize?: number;
 }
 
 export const statusMap: Record<string, { text: string; color: string }> = {

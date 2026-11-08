@@ -70,18 +70,42 @@ export const isUploadableStatus = (status: UploadStatus) =>
 export interface UploadRecoverySummary {
   totalInterrupted: number;
   recoveredCount: number;
-  /** 中断但因刷新丢失运行时文件引用（fileRef）的条数，需用户重新选择后上传 */
+  /** 中断且既无运行时 fileRef、也无分片缓存的条数，需用户重新选择后上传 */
   missingFileRefCount: number;
 }
 
+/**
+ * 挂载恢复所需的分片缓存查询（方案 A）。
+ * 由调用方注入，避免本模块直接依赖 IndexedDB；测试可传假实现。
+ */
+export interface UploadRecoveryChunkCache {
+  /** 该实例下“分片缓存已完整落盘”的文件 id 集合（一次游标遍历） */
+  listReadyFileIds: () => Promise<Set<string>>;
+}
+
 const INTERRUPTED_RECOVERY_MESSAGE =
-  "检测到页面刷新导致上传中断，文件缓存缺失，请重新选择文件";
-const STALE_QUEUE_MESSAGE = "页面已刷新，请重新选择文件后上传";
+  "检测到页面刷新导致上传中断，本地续传缓存缺失，请重新选择文件";
+const STALE_QUEUE_MESSAGE =
+  "页面已刷新，本地续传缓存缺失，请重新选择文件后上传";
+
+/**
+ * 中断任务能否零点击续传：
+ * - 会话内仍持有 fileRef → 可直接重建文件数据；
+ * - 刷新后 fileRef 丢失 → 依赖分片缓存（方案 A）重建。
+ */
+const canResumeWithoutReselect = (
+  file: UploadFile,
+  readyCachedFileIds: Set<string>
+): boolean => Boolean(file.fileRef) || readyCachedFileIds.has(file.id);
 
 export const recoverInterruptedUploadFiles = async (
-  storage: LocalForage
+  storage: LocalForage,
+  chunkCache?: UploadRecoveryChunkCache
 ): Promise<UploadRecoverySummary> => {
   const files = await listUploadFiles(storage);
+  const readyCachedFileIds = chunkCache
+    ? await chunkCache.listReadyFileIds().catch(() => new Set<string>())
+    : new Set<string>();
   const writes: Array<{ id: string; file: UploadFile }> = [];
   let recoveredCount = 0;
   let missingFileRefCount = 0;
@@ -94,15 +118,15 @@ export const recoverInterruptedUploadFiles = async (
 
     totalInterrupted += 1;
 
-    // T3.1：运行时文件引用（fileRef）只存在于当前会话内存，刷新即丢失；
-    // 仍持有引用的中断任务可恢复为待上传，否则标记需重新选择。
-    if (file.fileRef) {
+    // 运行时 fileRef 刷新即丢失；分片缓存就绪时同样可恢复为待上传。
+    if (canResumeWithoutReselect(file, readyCachedFileIds)) {
       writes.push({
         id: file.id,
         file: {
           ...file,
           status: UploadStatus.QUEUED,
           errorMessage: undefined,
+          awaitingReselect: false,
         },
       });
       recoveredCount += 1;
@@ -116,6 +140,7 @@ export const recoverInterruptedUploadFiles = async (
         status: UploadStatus.ERROR,
         progress: 0,
         errorMessage: INTERRUPTED_RECOVERY_MESSAGE,
+        awaitingReselect: true,
       },
     });
     missingFileRefCount += 1;
@@ -145,33 +170,41 @@ export interface UploadRecoverySnapshot {
  * 旧链路为 `recoverInterruptedUploadFiles`（iterate + 逐条写）→ `loadAllUploadFiles`
  * （第二次 iterate）→ 逐条写 → `refreshFiles`（第三次 iterate），共 3 次全表遍历。
  * 这里保留完全相同的两阶段语义，但都在内存里完成：
- *  阶段 1：中断任务按 fileRef 有无 → QUEUED / ERROR；
- *  阶段 2：以阶段 1 结果为输入治理历史 QUEUED 行（刷新后无运行时 File 引用，
- *          无法自动上传）→ awaitingReselect 的 ERROR。
+ *  阶段 1：中断任务按「fileRef 或分片缓存是否可用」→ QUEUED / ERROR；
+ *  阶段 2：治理历史 QUEUED / QUEUED_FOR_UPLOAD 行——缓存就绪的保留 QUEUED
+ *          参与自动续传，缺失的降级为 awaitingReselect 的 ERROR。
  * 最后只把「确实变化」的记录并发写一次，并返回最终快照供 store 直接采用。
  */
 export const recoverUploadQueueOnMount = async (
-  storage: LocalForage
+  storage: LocalForage,
+  chunkCache?: UploadRecoveryChunkCache
 ): Promise<UploadRecoverySnapshot> => {
   // 唯一一次 iterate；listUploadFiles 已按 createdAt 排序。
   const files = await listUploadFiles(storage);
+  // 分片缓存一次性取就绪集合（无 IndexedDB 时注入方会返回空集）。
+  const readyCachedFileIds = chunkCache
+    ? await chunkCache.listReadyFileIds().catch(() => new Set<string>())
+    : new Set<string>();
 
   let totalInterrupted = 0;
   let recoveredCount = 0;
   let missingFileRefCount = 0;
+  const handledByStageOne = new Set<string>();
 
   const afterRecovery = files.map((file): UploadFile => {
     if (!interruptedUploadStatuses.has(file.status)) {
       return file;
     }
 
+    handledByStageOne.add(file.id);
     totalInterrupted += 1;
-    if (file.fileRef) {
+    if (canResumeWithoutReselect(file, readyCachedFileIds)) {
       recoveredCount += 1;
       return {
         ...file,
         status: UploadStatus.QUEUED,
         errorMessage: undefined,
+        awaitingReselect: false,
       };
     }
 
@@ -181,6 +214,7 @@ export const recoverUploadQueueOnMount = async (
       status: UploadStatus.ERROR,
       progress: 0,
       errorMessage: INTERRUPTED_RECOVERY_MESSAGE,
+      awaitingReselect: true,
     };
   });
 
@@ -189,6 +223,17 @@ export const recoverUploadQueueOnMount = async (
       file.status !== UploadStatus.QUEUED &&
       file.status !== UploadStatus.QUEUED_FOR_UPLOAD
     ) {
+      return file;
+    }
+    // 阶段 1 已把可续传的中断任务恢复为 QUEUED，跳过，避免二次计数/降级。
+    if (handledByStageOne.has(file.id)) {
+      return file;
+    }
+    // 刷新前就在队列中的记录：缓存就绪同样零点击续传；否则仍需重选。
+    if (canResumeWithoutReselect(file, readyCachedFileIds)) {
+      totalInterrupted += 1;
+      recoveredCount += 1;
+      // 保持 QUEUED，交由 autoUpload 再次拉起；无需改写其它字段。
       return file;
     }
     return {

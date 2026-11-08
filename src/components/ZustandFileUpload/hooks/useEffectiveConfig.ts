@@ -59,6 +59,7 @@ export const useEffectiveUploadConfig = () => {
     maxFileSize: contextConfig.maxFileSize,
     allowedFileTypes: stableAllowedFileTypes,
     maxFiles: contextConfig.maxFiles,
+    chunkCacheMaxFileSize: contextConfig.chunkCacheMaxFileSize,
 
     // 网络参数配置（可能允许运行时修改，但通常使用 Context 值）
     chunkSize: storeConfig.chunkSize,
@@ -103,6 +104,7 @@ export const useEffectiveUploadConfig = () => {
     contextConfig.maxFileSize,
     stableAllowedFileTypes,
     contextConfig.maxFiles,
+    contextConfig.chunkCacheMaxFileSize,
     contextConfig.onUploadStart,
     contextConfig.onUploadProgress,
     contextConfig.onUploadProgressDetail,
