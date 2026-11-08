@@ -1,206 +1,366 @@
 # vane-upload
 
-独立的上传项目：只负责文件上传。
+React 分片上传组件。一次选文件，自动完成 **哈希 → 秒传预检 → 分片并发上传 → 合并**，
+自带完整 UI（工具栏 + 文件表格 + 批次进度 + 存储统计），开箱可用。
 
-## 范围
+```tsx
+import { ZustandFileUpload } from "vane-upload";
+import "vane-upload/style.css";
 
-- 上传组件 `ZustandFileUpload`（文件选择、校验、队列、暂停/继续、取消、重试、删除）
-- 分片上传与断点续传（服务端分片状态查询 + 秒传预检）
-- 文件/分片并发控制、网络自适应参数
-- 上传进度与状态管理（Zustand store）
-- IndexedDB 暂存与刷新后中断任务恢复（`localforage` 存元数据，`react-upload-chunks` 存未确认分片，刷新后零点击续传）
-- Web Worker：文件哈希预处理（`filePrepareWorker`）、分片上传（`uploadWorker`）
-- 内置 UI 套件与上传相关样式
-- 后端上传接口：秒传预检、分片状态、分片上传、合并
-
-## 目录结构
-
+<ZustandFileUpload uploadApi="/api/file/upload" />
 ```
-vane-upload/
-├── index.html
-├── vite.config.ts               # demo 应用 / Vitest 配置
-├── vite.lib.config.ts           # 组件库构建配置（VU-24）
-├── tsconfig*.json               # 含 tsconfig.lib.json（声明文件产出）
-├── eslint.config.js
-├── package.json                 # 根工程 + workspaces
-├── src/
-│   ├── main.tsx
-│   ├── App.tsx                  # 上传演示页
-│   ├── index.ts                 # 上传链路的公共导出
-│   ├── config/api.ts            # 上传接口路径
-│   ├── components/ZustandFileUpload/
-│   │   ├── index.tsx            # 组件入口
-│   │   ├── components/          # 表格、工具栏、批次信息、存储用量
-│   │   ├── context/             # 上传引擎 / 配置上下文
-│   │   ├── hooks/               # 编排、文件处理、网络检测、生命周期
-│   │   ├── services/            # 存储、编排、清理策略、Worker 桥接
-│   │   ├── store/               # Zustand 上传状态
-│   │   ├── types/               # 上传类型与 Worker 协议
-│   │   └── worker/              # 哈希预处理、分片上传
-│   ├── shared/                  # 上传链路共用工具
-│   ├── ui/                      # 内置极简 UI 套件（含 ui.css）
-│   └── test/setup.ts            # vitest 环境准备
-└── server/
-    ├── package.json
-    ├── src/
-    │   ├── index.js             # 服务启动
-    │   ├── app.js               # Express 应用与鉴权
-    │   ├── controllers/uploadController.js
-    │   ├── routes/fileRoutes.js # 仅上传路由
-    │   ├── models/              # File / FileChunk
-    │   ├── services/chunkStateQueue.js
-    │   ├── middleware/          # 鉴权、分片上传
-    │   ├── config/              # 路径与 SQLite
-    │   └── utils/               # 哈希、路径安全、错误脱敏
-    └── tests/                   # 上传接口与安全测试
-```
+
+## 特性
+
+- **分片上传**：默认 1MB 分片，文件级 / 分片级并发可调，失败自动重试（默认 3 次）
+- **秒传**：同内容文件服务端已存在时直接命中，不再传输字节
+- **断点续传**：暂停 / 取消 / 刷新页面后均可从已上传分片继续，无需重新选文件
+- **完整 UI**：上传 / 暂停 / 继续 / 取消 / 重试 / 删除、批次详情、存储统计、网络自适应徽标
+- **受控回调**：开始、进度（含速率与剩余时间）、单文件完成、单文件失败、整批完成
+- **可定制**：接口路径、并发与重试、大小与数量限制、可见列、自定义校验、鉴权头
+
+---
 
 ## 安装
 
-需要 Node.js >= 20。根工程使用 npm workspaces，一次安装前后端依赖：
-
 ```bash
-npm install
+npm i vane-upload
 ```
 
-## 启动
+`react` / `react-dom`（`^19.3.1`）为 peer 依赖，需宿主项目自行安装；
+`zustand` / `localforage` / `spark-md5` 随包安装，无需额外处理。
 
-后端（默认 `http://localhost:3000`）：
-
-```bash
-npm run dev:server
-# 等价于 npm run dev -w server
-```
-
-本地演示使用 `AUTH_MODE=demo` 关闭鉴权：
-
-```powershell
-$env:AUTH_MODE="demo"; npm run dev:server
-```
-
-前端（默认 `http://localhost:5173`，`/api` 代理到 `http://localhost:3000`）：
-
-```bash
-npm run dev
-```
-
-构建与预览：
-
-```bash
-npm run build
-npm run preview
-```
-
-## 作为组件库使用
-
-`npm run build` 依次产出演示应用（`dist/`）与可发布的库产物（`dist/lib/`），也可单独执行：
-
-```bash
-npm run build:demo   # vite build：dist/index.html + assets，两个 Worker 为独立 asset
-npm run build:lib    # vite build --config vite.lib.config.ts + tsc -p tsconfig.lib.json
-```
-
-`dist/lib/` 内容：
-
-| 文件 | 用途 |
-| ---- | ---- |
-| `index.js` / `index.cjs` | ESM / CJS 入口，由 `package.json` 的 `exports` 指向 |
-| `index.d.ts` 及子模块声明 | TypeScript 类型（`tsc --emitDeclarationOnly` 产出，无额外依赖） |
-| `style.css` | 组件样式，需消费方显式引入 |
-
-消费示例（React 19 项目）：
+## 快速开始
 
 ```tsx
+import { useState } from "react";
 import { ZustandFileUpload, type UploadFile } from "vane-upload";
 import "vane-upload/style.css";
+
+// 注意：数组和回调请定义在组件外或用 useCallback/useMemo 固定引用，
+// 否则每次渲染都会重建内部配置，影响性能。
+const ALLOWED_TYPES: string[] = [];
+
+export default function UploadPage() {
+  const [done, setDone] = useState<UploadFile[]>([]);
+
+  return (
+    <ZustandFileUpload
+      uploadApi="/api/file/upload"
+      checkApi="/api/file/instant"
+      mergeApi="/api/file/merge"
+      chunkSize={1024 * 1024}
+      maxFileSize={100 * 1024 * 1024}
+      maxFiles={10}
+      allowedFileTypes={ALLOWED_TYPES}
+      autoUpload
+      onUploadComplete={(file, success) => {
+        if (success) setDone((prev) => [...prev, file]);
+      }}
+      onBatchComplete={({ success, failed, total }) =>
+        console.log(`本批：共 ${total}，成功 ${success}，失败 ${failed}`)
+      }
+    />
+  );
+}
 ```
 
-- `react` / `react-dom` / `zustand` / `localforage` / `spark-md5` 在库构建中为 external，由消费方提供，不会重复打包。
-- 库产物中的两个 Web Worker 以内联 Blob 形式自包含，消费方无需配置额外资产路径；演示应用构建则拆为独立 Worker asset，便于缓存与并行加载。
+> 组件只负责上传，不含下载功能。后端需实现下方 5 个业务接口（见「后端接口契约」），
+> 仓库内 `server/` 提供了一份可直接运行的参考实现。
 
-## 前端配置
+---
 
-`src/config/api.ts` 读取 `VITE_API_BASE_URL`（可选），未设置时使用同源相对路径。组件 props 也可覆盖：
+## 属性（Props）
+
+### 接口地址
+
+| 属性 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `baseURL` | `string` | `""` | 接口前缀。空字符串表示同源相对路径；跨域时填 `https://api.example.com` |
+| `uploadApi` | `string` | `"/api/file/upload"` | 分片上传接口路径 |
+| `checkApi` | `string` | `"/api/file/instant"` | 秒传预检接口路径。续传用的 `/status` 接口按命名约定由它推导（`/instant` → `/status`），自定义路径请保持同一约定 |
+| `mergeApi` | `string` | `"/api/file/merge"` | 分片合并接口路径 |
+
+### 上传参数
+
+| 属性 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `chunkSize` | `number` | `1048576`（1MB） | 分片大小（字节）。分片键含该值，调整后新旧分片天然隔离 |
+| `fileConcurrency` | `number` | `2` | **同时上传的文件数**（不是总数上限） |
+| `chunkConcurrency` | `number` | `2` | 单个文件内**同时上传的分片数** |
+| `maxRetries` | `number` | `3` | 单文件失败重试次数 |
+| `hashMode` | `"full" \| "sample"` | `"full"` | `full`：全量流式哈希，内存占用与文件大小无关，服务端合并强校验；`sample`：采样哈希，超大文件更快，代价是极低概率采样碰撞 |
+
+### 文件限制
+
+| 属性 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `maxFiles` | `number` | `100` | 列表内**文件总数上限**（已有 + 本次）。超限时**整批拒绝**，提示「最多只能选择 N 个文件（当前已有 M 个）」 |
+| `maxFileSize` | `number` | `104857600`（100MB） | 单文件大小上限（字节）。超限文件**单独跳过**，其余文件照常入队 |
+| `allowedFileTypes` | `string[]` | `[]`（不限） | 允许的 MIME 类型或扩展名，如 `["image/png", ".pdf"]` |
+| `customFileValidator` | `(file: File) => { valid: boolean; message?: string }` | — | 自定义校验。`valid: false` 时该文件不入队，`message` 作为错误提示 |
+
+> 另有内置的**危险扩展名**拦截（40 项：`.html` / `.svg` / `.js` / `.wasm` / `.exe` / `.bat` / `.php` 等，
+> 与服务端落盘校验共用同一份清单）与**同文件去重**（hash + size + lastModified + name 全等视为同一条记录），无需配置。
+
+### UI 行为
+
+| 属性 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `uiMode` | `"full" \| "simple"` | `"full"` | `simple` 仅保留「选择文件 + 文件表格」，隐藏上传/清除/批量重试按钮、批次信息、存储统计抽屉与网络徽标 |
+| `autoUpload` | `boolean` | `true` | 选完文件立即开始上传；`false` 时文件停在「排队中」，需点「上传文件」 |
+| `autoCleanup` | `boolean` | `true` | 上传完成后自动移除记录 |
+| `cleanupDelay` | `number` | `10` | 自动清理延时（秒） |
+| `networkDisplayMode` | `"tooltip" \| "direct"` | `"tooltip"` | 网络徽标（如 `4G 1MB \| 2文件 \| 2分片`）的展开方式：悬停提示 / 直接显示 |
+| `visibleColumns` | `UploadColumnKey[]` | 全部 | 表格可见列，按数组顺序排列。可选：`index` / `fileName` / `fileSize` / `chunkCount` / `status` / `progress` / `action`。**隐藏 `action` 后将无法在表格内暂停/继续/重试/删除** |
+| `instanceId` | `string` | `"default"` | 多实例隔离标识。同页放多个上传组件时传不同值，避免相互串数据 |
+| `settingsSource` | `"localStorage" \| "props"` | `"localStorage"` | `localStorage`：用户在界面切换的开关（自动上传/自动清理/延时/显示模式）会被记住并在下次挂载时恢复；`props`：不读取本地保存值，始终以 props 为准（界面切换仍会写入本地，只是不会被读回） |
+| `chunkCacheMaxFileSize` | `number` | `Infinity` | 分片缓存上限（字节），仅作保险。默认按浏览器可用空间判定，非「整个文件大小」 |
+| `debug` | `boolean` | `false` | 输出 Worker 分片级日志（200ms 节流），仅供排查，不影响上传逻辑 |
+
+### 鉴权
+
+| 属性 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `authToken` | `string` | — | 静态 Token（适合演示，不建议硬编码） |
+| `getAuthToken` | `() => string \| undefined \| Promise<...>` | — | 每次请求前动态取 Token（推荐，支持从异步存储/刷新逻辑取值） |
+| `getAuthHeaders` | `() => Record<string, string> \| Promise<...>` | — | 完全自定义请求头，**优先级最高**，覆盖上面两者 |
+| `authScheme` | `string` | `"Bearer"` | Token 前缀，最终头为 `Authorization: <scheme> <token>` |
+| `withCredentials` | `boolean` | `false` | 是否以 `credentials: "include"` 发送（Cookie 鉴权）。开启需服务端返回 `Access-Control-Allow-Credentials: true` |
+
+---
+
+## 事件（回调）
+
+| 回调 | 签名 | 触发时机 |
+| --- | --- | --- |
+| `onUploadStart` | `(files: UploadFile[]) => void` | 一批上传真正开始时（点「上传文件」或自动上传）。参数为**本次可上传**的记录 |
+| `onUploadProgressDetail` | `(file, detail: UploadProgressDetail) => void` | 每个文件进度变化时。**推荐使用**，`detail` 含 `progress` / `uploadedBytes` / `totalBytes` / `speed` / `eta` |
+| `onUploadProgress` | `(file, progress: number) => void` | 同上，仅百分比。**已废弃**，新项目请用 `onUploadProgressDetail` |
+| `onUploadComplete` | `(file, success: boolean) => void` | 单个文件上传成功时。**「已完成」和「秒传成功」都会触发，`success` 均为 `true`** |
+| `onUploadError` | `(file, error: string) => void` | 单个文件进入**终态失败**时（重试耗尽后），`error` 为可直接展示的文案 |
+| `onBatchComplete` | `(results: { success; failed; total }) => void` | 一批上传结束时（**含存在失败的情况**） |
+
+`UploadProgressDetail` 结构：
+
+```ts
+interface UploadProgressDetail {
+  progress: number;      // 整体百分比 0-100
+  uploadedBytes: number; // 已上传字节
+  totalBytes: number;    // 文件总字节
+  speed: number;         // 瞬时速率（字节/秒）
+  eta: number;           // 预计剩余时间（秒），无法估算时为 0
+}
+```
+
+**以下几点容易踩坑，务必知悉：**
+
+1. **暂停 / 取消 / 删除不会触发任何回调。** 它们只改变行状态，需要感知请订阅进度停止或自行记录操作。
+2. **整批「取消上传」（批次详情抽屉里的按钮）不触发 `onBatchComplete`。** 只有跑完的批次才回调。
+3. **批量重试不触发 `onUploadStart`**，但它引发的成功/失败仍会触发 `onUploadComplete` / `onUploadError`。
+4. **内置 message 的覆盖范围**：文件校验失败、网络断开、删除/清空/重试失败会由组件自己弹提示（若你也弹 toast 会重复）；
+   而**单个文件上传到终态失败只走 `onUploadError`**，组件不额外弹提示，需要你自行提示用户。
+
+---
+
+## 方法
+
+**当前版本（0.1.0）组件不暴露 ref 命令式 API**（没有 `forwardRef` / `useImperativeHandle`），
+所有操作都通过内置 UI 完成。若需要「外部按钮触发上传 / 取消」，目前只能：
+
+- 用 `autoUpload` + 自定义选择文件入口控制时机；
+- 或直接把内置工具栏一起用（它已经包含全部操作）。
+
+内置操作清单与可操作性矩阵：
+
+| 操作 | 入口 | 可用条件 | 行为 |
+| --- | --- | --- | --- |
+| 选择文件 | 工具栏「选择文件」 | 网络在线 | 打开系统文件对话框，支持多选 |
+| 上传 | 工具栏「上传文件」 | 有记录且无进行中任务 | 上传全部「排队中 / 待上传」记录 |
+| 清除列表 | 工具栏「清除列表」 | 有记录且无进行中任务 | 移除全部记录并清理本地分片缓存 |
+| 批量重试 | 工具栏「批量重试 (n)」 | 存在失败记录且无进行中任务 | 重试全部失败记录 |
+| 暂停 | 行内「暂停」 | 状态 = 上传中 | 在分片边界安全暂停，保留进度 |
+| 继续 | 行内「继续」 | 状态 = 已暂停 | 从断点续传，不重传已成功分片 |
+| 取消 | 行内「取消」 | 状态 = 上传中 | 中止传输并保留记录（转为「已暂停」，可「继续」） |
+| 重试 | 行内「重试」 | 状态 = 上传失败 | 重试该文件 |
+| 删除 | 行内「删除」 | 任意状态 | 移除记录 + 清理服务端分片与本地缓存；**上传中删除会真实中止传输** |
+| 整批取消 | 批次详情抽屉「取消上传」 | `uiMode="full"` 且有进行中任务 | 中止整批，在飞行的行统一落定为「已暂停」 |
+
+> 需要真正的命令式 API（如 `ref.current.upload()`）可以提需求，这是一个明确的能力缺口，
+> 而不是用法问题。
+
+### 其他导出
+
+```ts
+import {
+  ZustandFileUpload,     // 组件（同时导出别名 FileUpload）
+  UploadStatus,          // 状态枚举
+  statusMap,             // 状态 → { text, color } 文案映射
+  configureDebug,        // configureDebug({ silent: false }) 打开全量调试日志
+  getDebugLog,           // 取环形缓冲日志
+  clearDebugLog,         // 清空日志
+  resolveAuthHeaders,    // 自行发请求时复用同一套鉴权头解析
+  ErrorBoundary,         // 组件内置的顶层错误边界，可单独使用
+} from "vane-upload";
+
+import type {
+  UploadFile, ZustandFileUploadProps, UploadColumnKey,
+  UploadConfig, UploadAuthConfig, BatchInfo, ProcessProgress,
+  UploadUIMode, UploadSettingsSource, AlignItem, MessageInstance,
+} from "vane-upload";
+```
+
+---
+
+## 文件状态
+
+`UploadFile.status` 取值与界面文案：
+
+| 枚举 | 值 | 文案 | 含义 |
+| --- | --- | --- | --- |
+| `QUEUED` | `queued` | 排队中 | 已入队，等待上传 |
+| `QUEUED_FOR_UPLOAD` | `queued-for-upload` | 待上传 | 等待被批次取走 |
+| `PREPARING_UPLOAD` | `preparing-upload` | 准备上传 | 正在计算哈希 / 预检分片 |
+| `UPLOADING` | `uploading` | 上传中 | 正在传输分片 |
+| `PAUSED` | `paused` | 已暂停 | 可点「继续」续传；**不会被「上传文件」自动带上** |
+| `DONE` | `done` | 已完成 | 分片合并完成 |
+| `INSTANT` | `instant` | 秒传成功 | 服务端已存在同内容文件，未传字节 |
+| `ERROR` | `error` | 上传失败 | 终态失败，需显式「重试」 |
+
+`UploadFile` 常用字段：`id` / `fileName` / `fileSize` / `fileType` / `status` / `progress`(0-100)
+/ `hash` / `chunkSize` / `chunkCount` / `uploadedChunks` / `errorMessage` / `speed` / `eta`
+/ `awaitingReselect`（刷新后缓存缺失，需用户重新选择同一文件）。
+
+**自动上传只会带上 `QUEUED` / `QUEUED_FOR_UPLOAD` / `PREPARING_UPLOAD` / `UPLOADING` 的记录**；
+`PAUSED` 与 `ERROR` 需要用户显式操作，避免刷新后被顺带重跑。
+
+---
+
+## 自定义校验示例
+
+```tsx
+const validator = (file: File) => {
+  if (file.name.includes("test")) {
+    return { valid: false, message: "文件名包含 test 时不允许上传" };
+  }
+  if (file.size > 500 * 1024 * 1024) {
+    return { valid: false, message: "文件大小不能超过 500MB" };
+  }
+  return { valid: true };
+};
+
+<ZustandFileUpload customFileValidator={validator} />
+```
+
+校验不通过的文件不会入队，`message` 直接作为提示文案展示。
+
+## 多实例
+
+同页需要多个上传区域时，传入不同 `instanceId`，各自的队列快照与分片缓存互不干扰：
+
+```tsx
+<ZustandFileUpload instanceId="invoice" />
+<ZustandFileUpload instanceId="contract" />
+```
+
+## 自定义表格列
 
 ```tsx
 <ZustandFileUpload
-  baseURL=""
-  uploadApi="/api/file/upload"
-  checkApi="/api/file/instant"
-  mergeApi="/api/file/merge"
+  visibleColumns={["fileName", "status", "progress"]} // 隐藏「操作」列后行内按钮消失
 />
 ```
 
-开发代理目标可用 `VITE_DEV_API_PROXY_TARGET` 覆盖，默认 `http://localhost:3000`。
+---
 
-## 后端接口
+## 后端接口契约
 
-统一前缀 `/api/file`，响应格式 `{ code, message, data }`。
+统一前缀 `/api/file`，响应体 `{ code, message, data }`（参考实现成功为 `code: 200`）。
+**客户端以 HTTP 状态码判定成功**，`message` 会被直接用于错误提示，请写成用户可读的中文。
 
-| 方法 | 路径                | 说明                                                                                               |
-| ---- | ------------------- | -------------------------------------------------------------------------------------------------- |
-| POST | `/api/file/instant` | 秒传预检 + 已上传分片校验（请求体含 `file_id`、`md5`、`name`、`size`、`chunk_md5s`、`chunk_size`） |
-| GET  | `/api/file/status`  | 查询某分片键已成功上传的分片索引（`file_id`、`md5`）                                               |
-| POST | `/api/file/upload`  | 上传单个分片，`multipart/form-data` 字段 `file_id`、`index`、`chunk_md5`、`chunk`                  |
-| POST | `/api/file/merge`   | 合并分片并落库，字段 `file_id`、`md5`、`name`、`size`、`total`                                     |
-| GET  | `/api/health`       | 健康检查                                                                                           |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/file/instant` | 秒传预检 + 已上传分片查询。请求体：`file_id`、`md5`、`name`、`size`、`chunk_md5s`、`chunk_size` |
+| GET | `/api/file/status` | 查询某文件已成功上传的分片索引（`file_id`、`md5`） |
+| POST | `/api/file/upload` | 上传单个分片，`multipart/form-data`：`file_id`、`index`、`chunk_md5`、`chunk` |
+| POST | `/api/file/merge` | 合并分片并落库：`file_id`、`md5`、`name`、`size`、`total` |
+| POST | `/api/file/abort` | **删除记录时清理服务端分片**。请求体：`{ file_id }`。由 `uploadApi` 自动推导（`/xxx/upload` → `/xxx/abort`），推导失败回落 `/api/file/abort` |
+| GET | `/api/health` | 健康检查 |
 
-鉴权：默认 `AUTH_MODE=secure`（fail-closed），需配置 `FILE_AUTH_TOKEN` 或 Cookie 白名单；仅本地演示/测试可设 `AUTH_MODE=demo`。详见 [server/README.md](server/README.md)。
+`baseURL` 与三个接口路径均可通过 props 覆盖，无需改组件源码。
+`/abort` 属于 best-effort：失败不阻塞本地删除，但缺了它会残留孤儿分片，建议实现。
 
-## 断点续传与 IndexedDB
+---
 
-- 上传队列快照写入 `localforage`（默认 IndexedDB 存储），按 `instanceId` 隔离多实例。
-- 未确认成功的分片字节写入独立的 `react-upload-chunks` IndexedDB：每片上传成功即删除对应缓存，占用随进度下降；分片元信息最后写入作为「缓存就绪」提交标记。
-- 页面刷新后，未完成记录恢复为待上传；若分片缓存就绪则**零点击自动续传**（沿用持久化的 hash / chunkSize / chunkCount），不再要求重新选择文件。
-- 缓存准入按真实可用空间判断：读取 `navigator.storage.estimate()` 的 `quota - usage`，预留 20% 安全余量后，只要足够容纳「尚未确认上传的分片字节」就写入缓存（无固定 512 MB 门槛）；同时尝试 `navigator.storage.persist()` 申请持久化存储以降低被驱逐概率，失败不影响上传。
-- `chunkCacheMaxFileSize` 为可选上限，默认不限制（`Infinity`）；显式配置后同样按待缓存分片字节判断，超过则不缓存。
-- 缓存不可用时降级：可用空间不足、超过显式上限、隐私模式或 IndexedDB 写入失败时，记录标记为 `awaitingReselect` 并明确提示「需重新选择文件」，不会伪装成正在续传。
-- 清理时机：上传完成、整批取消（`cancelUpload`）、删除记录、合并失败且不再重试时，同步清除该文件的分片缓存；**单个文件「取消」不清缓存**——它只中止传输并把记录置为已暂停（可点「继续」重新开始，刷新后仍可续传），与「删除」（移除记录 + 清理服务端分片与本地缓存）职责分离。
-- 分片键为 `${md5}_${size}_${chunkSize}`，网络自适应改变分片大小时新旧分片天然隔离。
+## 常见问题
 
-## 测试与校验
+**Q：为什么 `onUploadStart` 没触发？**
+只在「上传文件 / 自动上传」真正开启一批时触发。批量重试、单行重试、继续都不触发。
+
+**Q：为什么取消后没有任何回调？**
+设计如此。暂停 / 取消 / 删除只改状态，避免把用户主动操作误报成错误。整批取消也不会触发 `onBatchComplete`。
+
+**Q：`maxFiles` 和 `fileConcurrency` 有什么区别？**
+`maxFiles` 是**总数上限**（超出整批拒绝），`fileConcurrency` 是**同时上传几个**（其余排队，自动接续）。
+
+**Q：上传成功后记录很快就消失了？**
+`autoCleanup` 默认 `true`，完成记录会在 `cleanupDelay`（默认 10）秒后被自动移除。
+需要保留结果展示请设 `autoCleanup={false}`。
+
+**Q：`customUploadHandler` 有用吗？**
+**当前版本未接线**，传了不生效（仅类型声明）。需要接管上传逻辑请等后续版本，或用 `uploadApi` + 自定义后端协议。
+
+**Q：组件样式没生效？**
+必须显式引入 `vane-upload/style.css`；库已把样式标为 `sideEffects`，不会被摇树误删。
+
+**Q：能上传到七牛 / OSS 等直传吗？**
+当前版本只走本仓库约定的「预检 → 分片 → 合并」协议，直传需要后端做适配层。
+
+---
+
+## 本地开发
 
 ```bash
-npm test           # 前端单元测试（vitest）
-npm run test:server # 后端接口测试（node:test + supertest）
-npm run typecheck  # TypeScript 类型检查
-npm run lint       # ESLint
-npm run ci         # 一条命令跑完上述全部 + build（demo + lib）
+npm install
+
+npm run dev:server   # 后端 http://localhost:3000（本地演示用 AUTH_MODE=demo 关闭鉴权）
+npm run dev          # 前端 http://localhost:5173，/api 代理到 3000
 ```
 
-GitHub Actions 的 `.github/workflows/ci.yml` 直接调用 `npm run ci`，并额外执行一次
-`docker build` 冒烟，保证 CI 与本地门禁不会漂移。覆盖率阈值（`VU-62`）尚未接入，
-需要单独引入 `@vitest/coverage-v8` 后再补。
-
-## 容器与部署基线
+构建：
 
 ```bash
-docker build -t vane-upload-server .
-docker run --rm -p 3000:3000 \
-  -e FILE_AUTH_TOKEN='replace-with-a-long-random-token' \
-  -e TRUST_PROXY_HOPS=1 \
-  -v "$(pwd)/.data:/app/server/data" \
-  -v "$(pwd)/.tmp:/app/server/tmp/upload" \
-  -v "$(pwd)/.uploads:/app/server/uploads" \
-  vane-upload-server
+npm run build        # demo（dist/）+ 库产物（dist/lib/）
+npm run build:lib    # 仅库：index.js / index.cjs / index.d.ts / style.css
 ```
 
-- 镜像以非 root 用户运行，`CMD` 用 exec form 让 PID 1 是 node，能收到 `SIGTERM`
-  并走优雅停机（flush 分片状态 + checkpoint WAL）。
-- `HEALTHCHECK` 同时检查 `/api/health` 的状态码与 `degraded` 标记，落库队列
-  持续失败时容器会被判定不健康。
-- 生产必须注入 `FILE_AUTH_TOKEN`（或替换鉴权中间件）；`AUTH_MODE=secure` 默认
-  fail-closed，缺凭据时所有 `/api/file` 请求一律 401。
-- 反代按真实跳数设置 `TRUST_PROXY_HOPS`，不要设 `true`；Cookie 鉴权还需由部署方
-  配置 `SameSite` / `Secure` / CSRF。日志轮转与 stdout 采集由部署方负责。
-- 更完整的环境变量清单见 `server/.env.example`，后端部署说明见 `server/README.md`。
+校验：
 
-## 调试日志
+```bash
+npm test             # 前端单测（vitest）
+npm run test:server  # 后端接口测试
+npm run typecheck    # TypeScript
+npm run lint         # ESLint
+npm run ci           # 以上全部 + build
+```
 
-上传链路内部使用 `src/shared/debugLogger.ts` 统一输出：
+浏览器端到端与人工回归：见 [`docs/浏览器功能回归手册.md`](docs/浏览器功能回归手册.md)
+（含 30 分钟全功能复测路径）与 [`docs/浏览器E2E测试报告-2026-11-08.md`](docs/浏览器E2E测试报告-2026-11-08.md)。
 
-- 默认静默，只透出真实错误；
-- 需要排查时调用 `configureDebug({ silent: false })` 打开全部日志；
-- `getDebugLog()` / `clearDebugLog()` 用于取用和清空环形缓冲。
+## 调试
 
-组件 `debug` prop 可额外开启 Worker 分片级日志（200ms 节流），不影响上传逻辑。
+上传链路默认静默，只输出真实错误：
+
+```ts
+import { configureDebug, getDebugLog } from "vane-upload";
+
+configureDebug({ silent: false }); // 打开全量日志
+console.log(getDebugLog());        // 取环形缓冲
+```
+
+组件 `debug` prop 可额外开启 Worker 分片级日志（200ms 节流）。
+
+## 浏览器要求
+
+- 需要 Web Worker、`Blob` / `slice`、`fetch`（现代浏览器均满足）
+- 断点续传能力依赖 IndexedDB；隐私模式或空间不足时自动降级为「需重新选择文件」，不会伪装成正在续传
