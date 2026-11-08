@@ -281,15 +281,21 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               }
               notifiedCacheIssues.add(status);
               if (status === "skipped") {
-                const maxMB = Math.round(
-                  (chunkCacheOptions.maxFileSize ?? 0) / 1024 / 1024
-                );
+                const limit = chunkCacheOptions.maxFileSize;
+                const limitText =
+                  limit && Number.isFinite(limit) && limit > 0
+                    ? `${Math.round(limit / 1024 / 1024)}MB`
+                    : "配置";
                 messageApi.warning(
-                  `部分文件超过 ${maxMB}MB，未启用刷新续传缓存，刷新后需重新选择文件`
+                  `部分文件待缓存分片超过${limitText}上限，未启用刷新续传缓存，刷新后需重新选择文件`
+                );
+              } else if (status === "insufficient-space") {
+                messageApi.warning(
+                  "浏览器可用空间不足，未启用刷新续传缓存，刷新后需重新选择文件"
                 );
               } else {
                 messageApi.warning(
-                  "浏览器存储不可用或空间不足，刷新后需重新选择文件继续上传"
+                  "浏览器存储不可用（如隐私模式）或写入失败，刷新后需重新选择文件继续上传"
                 );
               }
             };

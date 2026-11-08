@@ -152,7 +152,9 @@ import "vane-upload/style.css";
 - 上传队列快照写入 `localforage`（默认 IndexedDB 存储），按 `instanceId` 隔离多实例。
 - 未确认成功的分片字节写入独立的 `react-upload-chunks` IndexedDB：每片上传成功即删除对应缓存，占用随进度下降；分片元信息最后写入作为「缓存就绪」提交标记。
 - 页面刷新后，未完成记录恢复为待上传；若分片缓存就绪则**零点击自动续传**（沿用持久化的 hash / chunkSize / chunkCount），不再要求重新选择文件。
-- 缓存不可用时降级：单文件超过 `chunkCacheMaxFileSize`（默认 512 MB）、存储配额不足、隐私模式或 IndexedDB 写入失败时，记录标记为 `awaitingReselect` 并明确提示「需重新选择文件」，不会伪装成正在续传。
+- 缓存准入按真实可用空间判断：读取 `navigator.storage.estimate()` 的 `quota - usage`，预留 20% 安全余量后，只要足够容纳「尚未确认上传的分片字节」就写入缓存（无固定 512 MB 门槛）；同时尝试 `navigator.storage.persist()` 申请持久化存储以降低被驱逐概率，失败不影响上传。
+- `chunkCacheMaxFileSize` 为可选上限，默认不限制（`Infinity`）；显式配置后同样按待缓存分片字节判断，超过则不缓存。
+- 缓存不可用时降级：可用空间不足、超过显式上限、隐私模式或 IndexedDB 写入失败时，记录标记为 `awaitingReselect` 并明确提示「需重新选择文件」，不会伪装成正在续传。
 - 清理时机：上传完成、用户取消、删除记录、合并失败且不再重试时，同步清除该文件的分片缓存。
 - 分片键为 `${md5}_${size}_${chunkSize}`，网络自适应改变分片大小时新旧分片天然隔离。
 

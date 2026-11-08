@@ -118,8 +118,13 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
   debug?: boolean;
 
   /**
-   * 分片缓存单文件上限（字节），默认 512MB。
-   * 超过上限的文件不写入分片缓存（刷新后需重新选择文件），并给出明确提示。
+   * 分片缓存上限（字节），默认不限制（`Infinity`）。
+   *
+   * 默认按浏览器真实可用空间判断：`navigator.storage.estimate()` 的
+   * `quota - usage` 留出 20% 安全余量后，足够容纳「尚未确认上传的分片字节」
+   * 即写入缓存——不再用固定阈值把大文件直接拒之门外。
+   * 此配置仅作为可选保险（判定口径同样是待缓存分片字节，非整个文件大小）；
+   * `<=0` 或 `Infinity` 表示不限制。超过上限时不写缓存并明确提示。
    */
   chunkCacheMaxFileSize?: number;
 
@@ -193,8 +198,9 @@ export interface UploadConfig {
   /** 调试日志开关（Worker 内分片级日志，200ms 节流）。默认 false。 */
   debug?: boolean;
   /**
-   * 分片缓存单文件上限（字节）：尚未确认上传成功的分片会写入 IndexedDB，
-   * 使刷新后可零点击续传；超过该上限不缓存并提示。
+   * 分片缓存上限（字节，可选）：尚未确认上传成功的分片会写入 IndexedDB，
+   * 使刷新后可零点击续传。默认不限制，按浏览器可用空间判断；显式配置后
+   * 超过该上限不缓存并提示（判定口径为待缓存分片字节）。
    */
   chunkCacheMaxFileSize?: number;
 }

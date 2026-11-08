@@ -23,17 +23,36 @@ import {
   type ChunkCacheKey,
 } from "./chunkCacheStore";
 
-/** 单文件缓存上限默认值（512MB）：超过则不缓存，并明确提示刷新后需重选。 */
-export const DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE = 512 * 1024 * 1024;
+/**
+ * 单文件缓存上限默认值：不限制（Infinity）。
+ *
+ * 默认策略改为「按浏览器真实可用空间判断」：只要 quota - usage 的 80%
+ * 足以容纳本次待缓存分片，就写入缓存；固定上限仅作为可选保险，供确实
+ * 需要限制单文件落盘量的场景显式配置（判定口径同样按待缓存分片字节）。
+ */
+export const DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE = Number.POSITIVE_INFINITY;
 const DEFAULT_CHUNK_SIZE = 1024 * 1024;
-/** 配额预检留白：预计占用超过可用配额 90% 时放弃缓存，避免写一半失败。 */
-const QUOTA_SAFETY_RATIO = 0.9;
+/**
+ * 空间预检安全余量：待缓存字节不得超过「quota - usage」的 80%（预留 20%）。
+ * 相较旧版贴着 90% 配额写入，给浏览器自身与其他数据留出更多缓冲，
+ * 避免写到中途触发 QuotaExceededError 才降级。
+ */
+const QUOTA_HEADROOM_RATIO = 0.2;
 
-export type ChunkCacheStatus = "ready" | "skipped" | "unavailable";
+export type ChunkCacheStatus =
+  | "ready"
+  | "skipped"
+  /** 浏览器可用空间不足以容纳本次待缓存分片 */
+  | "insufficient-space"
+  /** IndexedDB 不可用（隐私模式）或写入失败 */
+  | "unavailable";
 
 export interface ChunkCacheOptions {
   instanceId: string;
-  /** 单文件缓存上限（字节），缺省 {@link DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE} */
+  /**
+   * 待缓存分片的字节上限（可选，缺省不限制）。
+   * <=0 或 Infinity 表示不限制；判定对象是「尚未确认上传的分片字节」。
+   */
   maxFileSize?: number;
 }
 
@@ -71,6 +90,27 @@ const readQuota = async (): Promise<{
   }
 };
 
+/**
+ * 申请持久化存储（best-effort，只尝试一次）。
+ * 成功可显著降低浏览器在空间紧张时驱逐缓存的概率；失败/不支持不影响主流程。
+ */
+let persistPromise: Promise<boolean> | null = null;
+const requestPersistentStorage = (): void => {
+  if (persistPromise) {
+    return;
+  }
+  try {
+    const storage = typeof navigator !== "undefined" ? navigator.storage : null;
+    if (!storage || typeof storage.persist !== "function") {
+      // 不缓存“不可用”结果：后续环境具备 persist 时仍可尝试一次
+      return;
+    }
+    persistPromise = Promise.resolve(storage.persist()).catch(() => false);
+  } catch {
+    // 忽略：隐私模式/权限拒绝时直接继续
+  }
+};
+
 const resolveChunkSize = (file: UploadFile): number =>
   file.chunkSize && file.chunkSize > 0 ? file.chunkSize : DEFAULT_CHUNK_SIZE;
 
@@ -79,6 +119,23 @@ const resolveChunkCount = (file: UploadFile, chunkSize: number): number =>
     ? file.chunkCount
     : Math.ceil(file.fileSize / chunkSize);
 
+/**
+ * 本次实际需要缓存的字节数 = 文件大小 - 已确认上传分片字节。
+ * 分片级缓存“传完即删”，已确认分片不需要再占空间；这也是空间预检与
+ * 上限判断的统一口径（而不是整个文件大小）。
+ */
+const resolvePendingBytes = (
+  file: UploadFile,
+  chunkSize: number,
+  chunkCount: number
+): number => {
+  const confirmedChunks = Math.min(
+    Math.max(file.uploadedChunks ?? 0, 0),
+    chunkCount
+  );
+  return Math.max(file.fileSize - confirmedChunks * chunkSize, 0);
+};
+
 const runPrime = async (
   file: UploadFile,
   fileRef: File,
@@ -86,18 +143,28 @@ const runPrime = async (
   entry: PrimeEntry
 ): Promise<ChunkCacheStatus> => {
   const keys = toKeys(options.instanceId, file.id);
-  const maxFileSize = options.maxFileSize ?? DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE;
+  const maxPendingBytes =
+    options.maxFileSize ?? DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE;
 
-  // 超过上限：不缓存，由调用方提示「刷新后需重新选择文件」。
-  if (file.fileSize > maxFileSize) {
-    return "skipped";
-  }
   if (!isChunkCacheSupported()) {
     return "unavailable";
   }
 
+  // 尽量申请持久化存储，降低缓存被浏览器驱逐的概率（失败不影响主流程）。
+  requestPersistentStorage();
+
   const chunkSize = resolveChunkSize(file);
   const chunkCount = resolveChunkCount(file, chunkSize);
+  const pendingBytes = resolvePendingBytes(file, chunkSize, chunkCount);
+
+  // 可选的固定上限：按「待缓存分片字节」判断，默认不限制。
+  if (
+    Number.isFinite(maxPendingBytes) &&
+    maxPendingBytes > 0 &&
+    pendingBytes > maxPendingBytes
+  ) {
+    return "skipped";
+  }
 
   try {
     // 已就绪（例如同一文件重复触发预热）：直接复用，不重复写。
@@ -105,13 +172,14 @@ const runPrime = async (
       return "ready";
     }
 
+    // 按真实可用空间判断：待缓存字节不得超过 (quota - usage) 的 80%。
     const quota = await readQuota();
-    if (
-      quota &&
-      quota.quota > 0 &&
-      quota.usage + file.fileSize > quota.quota * QUOTA_SAFETY_RATIO
-    ) {
-      return "unavailable";
+    if (quota && quota.quota > 0) {
+      const available = Math.max(quota.quota - quota.usage, 0);
+      const cacheable = available * (1 - QUOTA_HEADROOM_RATIO);
+      if (pendingBytes > cacheable) {
+        return "insufficient-space";
+      }
     }
 
     let index = 0;
@@ -165,7 +233,11 @@ const runPrime = async (
 /**
  * 预热分片缓存（幂等，同一文件共享一次写入）。
  *
- * @returns ready=已完整落盘可刷新续传；skipped=超过大小上限；unavailable=环境/配额不可用
+ * 判定顺序：IndexedDB 可用性 → 可选固定上限（按待缓存分片字节）→
+ * 浏览器可用空间（`quota - usage` 的 80%）→ 实际写入。
+ *
+ * @returns ready=已完整落盘可刷新续传；skipped=超过显式配置的上限；
+ *          insufficient-space=可用空间不足；unavailable=环境不可用或写入失败
  */
 export const primeChunkCache = (
   file: UploadFile,

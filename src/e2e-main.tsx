@@ -19,7 +19,7 @@ const E2EApp: React.FC = () => (
     fileConcurrency={2}
     chunkConcurrency={2}
     maxRetries={3}
-    maxFileSize={100 * 1024 * 1024}
+    maxFileSize={2048 * 1024 * 1024}
     allowedFileTypes={ALLOWED_FILE_TYPES}
     maxFiles={10}
     autoUpload={true}

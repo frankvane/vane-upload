@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { UploadStatus, type UploadFile } from "../types/upload";
 import {
   clearFileChunkCache,
+  DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE,
   isFileCacheReady,
   primeChunkCache,
 } from "./chunkCache";
@@ -121,7 +122,81 @@ describe("chunkCache（方案 A）", () => {
     expect(status).toBe("unavailable");
   });
 
-  it("存储配额不足时降级为 unavailable，且不留下半成品", async () => {
+  it("默认不设固定上限（Infinity），上限为 0 也视为不限制", async () => {
+    expect(DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE).toBe(
+      Number.POSITIVE_INFINITY
+    );
+
+    const { file, fileRef } = createFixture("cache-unlimited", 10, 4);
+    const status = await primeChunkCache(file, fileRef, {
+      instanceId: "inst",
+      maxFileSize: 0,
+    });
+
+    expect(status).toBe("ready");
+    expect(await isFileCacheReady("inst", file.id)).toBe(true);
+  });
+
+  it("固定上限按「待缓存分片字节」判断，而非整个文件大小", async () => {
+    const { file, fileRef } = createFixture("cache-pending", 10, 4);
+    // 3 片里已确认 2 片 → 待缓存 2 字节；文件总大小 10 字节
+    file.uploadedChunks = 2;
+
+    const status = await primeChunkCache(file, fileRef, {
+      instanceId: "inst",
+      maxFileSize: 5,
+    });
+
+    expect(status).toBe("ready");
+    expect(await isFileCacheReady("inst", file.id)).toBe(true);
+  });
+
+  it("按可用空间的 80% 预检：够则缓存，不足降级为 insufficient-space", async () => {
+    const enough = createFixture("cache-space-ok", 10, 4);
+    vi.stubGlobal("navigator", {
+      storage: {
+        estimate: async () => ({ quota: 100, usage: 20 }),
+      },
+    });
+    expect(
+      await primeChunkCache(enough.file, enough.fileRef, {
+        instanceId: "inst",
+      })
+    ).toBe("ready");
+
+    const tight = createFixture("cache-space-tight", 10, 4);
+    vi.stubGlobal("navigator", {
+      storage: {
+        estimate: async () => ({ quota: 100, usage: 90 }),
+      },
+    });
+    expect(
+      await primeChunkCache(tight.file, tight.fileRef, {
+        instanceId: "inst",
+      })
+    ).toBe("insufficient-space");
+    expect(await isFileCacheReady("inst", tight.file.id)).toBe(false);
+  });
+
+  it("成功预热时尝试申请持久化存储，失败不影响就绪", async () => {
+    const { file, fileRef } = createFixture("cache-persist", 10, 4);
+    const persist = vi.fn(async () => false);
+    vi.stubGlobal("navigator", {
+      storage: {
+        estimate: async () => ({ quota: 1_000_000, usage: 0 }),
+        persist,
+      },
+    });
+
+    const status = await primeChunkCache(file, fileRef, {
+      instanceId: "inst",
+    });
+
+    expect(status).toBe("ready");
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+  });
+
+  it("存储配额不足时降级为 insufficient-space，且不留下半成品", async () => {
     const { file, fileRef } = createFixture("cache-quota", 10, 4);
     vi.stubGlobal("navigator", {
       storage: {
@@ -133,7 +208,7 @@ describe("chunkCache（方案 A）", () => {
       instanceId: "inst",
     });
 
-    expect(status).toBe("unavailable");
+    expect(status).toBe("insufficient-space");
     expect(await isFileCacheReady("inst", file.id)).toBe(false);
   });
 
