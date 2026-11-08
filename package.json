@@ -36,16 +36,19 @@
     "test:watch": "vitest",
     "dev:server": "npm run dev -w server",
     "test:server": "npm test -w server",
-    "ci": "npm run typecheck && npm run lint && npm run test:coverage && npm run test:server:coverage && npm run build",
+    "size:check": "node scripts/size-check.mjs",
+    "ci": "npm run typecheck && npm run lint && npm run test:coverage && npm run test:server:coverage && npm run build && npm run size:check",
     "test:e2e": "playwright test",
     "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
     "localforage": "^1.10.0",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
     "spark-md5": "^3.0.2",
     "zustand": "^5.1.0"
+  },
+  "peerDependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
@@ -65,6 +68,8 @@
     "fake-indexeddb": "^6.2.7",
     "globals": "^16.5.0",
     "jsdom": "^26.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.1",
     "vite": "^8.3.6",

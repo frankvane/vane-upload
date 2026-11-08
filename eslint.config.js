@@ -55,4 +55,13 @@ export default tseslint.config(
       "react-hooks/globals": "off",
     },
   },
+  {
+    // 零依赖的构建/门禁脚本（Node 运行环境），需识别 process/console 等 Node 全局。
+    files: ["scripts/**/*.mjs", "scripts/**/*.js"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
 );
