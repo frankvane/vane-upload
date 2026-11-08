@@ -1,6 +1,5 @@
-import { Progress, Statistic, Tag } from "../../../ui";
-
-import { ClockCircleOutlined } from "../../../ui";
+import { Progress, Statistic, Tag } from "../../../ui/primitives";
+import { ClockCircleOutlined } from "../../../ui/icons";
 import { ProcessProgress } from "../types/upload";
 import React from "react";
 

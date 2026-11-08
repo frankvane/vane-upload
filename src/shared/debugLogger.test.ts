@@ -72,4 +72,20 @@ describe("debugLogger（F7：限长环形缓冲）", () => {
     expect(log.some((l) => l.includes("d1"))).toBe(true);
     expect(log.some((l) => l.includes("e1"))).toBe(true);
   });
+
+  it("VU-05：环形缓冲对 Bearer / JSON 头 / Cookie 一律脱敏", () => {
+    configureDebug({ silent: false });
+    clearDebugLog();
+    debugLog("headers", {
+      Authorization: "Bearer SUPER_SECRET_TOKEN_XYZ",
+      Cookie: "session=SUPER_SECRET_COOKIE_XYZ",
+      "Content-Type": "application/json",
+    });
+    debugLog("raw JSON", '{"authorization":"Bearer ANOTHER_SECRET_TOKEN"}');
+    const log = getDebugLog().join("\n");
+    expect(log).not.toContain("SUPER_SECRET_TOKEN_XYZ");
+    expect(log).not.toContain("SUPER_SECRET_COOKIE_XYZ");
+    expect(log).not.toContain("ANOTHER_SECRET_TOKEN");
+    expect(log).toContain("application/json");
+  });
 });

@@ -59,4 +59,5 @@ describe("safeStorage（F1）", () => {
     expect(localStorage.getItem("rui:k")).toBeNull();
     expect(localStorage.getItem("k")).toBeNull();
   });
+
 });

@@ -18,7 +18,10 @@ const app = require("../src/app");
 const { syncModels, sequelize, File, FileChunk } = require("../src/models");
 const { TMP_UPLOAD_DIR, UPLOADS_DIR, ensureBaseDirs } = require("../src/config/paths");
 const { md5Buffer } = require("../src/utils/hash");
-const { buildChunkPath } = require("../src/utils/fileSecurity");
+const { buildChunkPath, buildScopedFileId } = require("../src/utils/fileSecurity");
+
+// demo 模式下 userId 固定为 "test"；存储键已按用户命名空间隔离（VU-01/02）。
+const scoped = (fileId) => buildScopedFileId("test", fileId);
 const {
   flushPendingChunkStates,
   resetChunkStateQueueForTests,
@@ -77,7 +80,7 @@ test.after(async () => {
   if (fs.existsSync(testDbStorage)) fs.unlinkSync(testDbStorage);
 });
 
-test("POST /api/file/instant returns standard response shape", async () => {
+test("POST /api/file/instant 返回标准三段式响应（code/message/data），且未上传文件 uploaded=false", async () => {
   const res = await request(app).post("/api/file/instant").send({
     file_id: "demo_file_1",
     md5: "abc",
@@ -90,6 +93,7 @@ test("POST /api/file/instant returns standard response shape", async () => {
   assert.equal(res.body.code, 200);
   assert.equal(typeof res.body.message, "string");
   assert.equal(typeof res.body.data, "object");
+  // 该 file_id 尚未上传任何分片，应判定为未秒传
   assert.equal(res.body.data.uploaded, false);
 });
 
@@ -166,10 +170,12 @@ test("merge flushes queued chunk states before merge validation", async () => {
   assert.equal(uploadRes.status, 200);
   assert.equal(uploadRes.body.code, 200);
 
+  // VU-04：uploadChunk 现在写盘后同步落库（await flushFileChunkStates），
+  // 因此上传完成即可在 DB 查到 status=1 的分片，无需等待合并时的 flush。
   const queuedCount = await FileChunk.count({
-    where: { file_id: fileId, status: 1 },
+    where: { file_id: scoped(fileId), status: 1 },
   });
-  assert.equal(queuedCount, 0);
+  assert.equal(queuedCount, 1);
 
   const mergeRes = await request(app).post("/api/file/merge").send({
     file_id: fileId,
@@ -183,7 +189,7 @@ test("merge flushes queued chunk states before merge validation", async () => {
   assert.equal(mergeRes.body.code, 200);
 
   const mergedChunkCount = await FileChunk.count({
-    where: { file_id: fileId, status: 2 },
+    where: { file_id: scoped(fileId), status: 2 },
   });
   assert.equal(mergedChunkCount, 1);
 });
@@ -203,7 +209,7 @@ test("stale chunks are excluded by /instant and /status", async () => {
   assert.equal(uploadRes.status, 200);
   assert.equal(uploadRes.body.code, 200);
 
-  const chunkPath = buildChunkPath(fileId, 0);
+  const chunkPath = buildChunkPath(scoped(fileId), 0);
   assert.equal(fs.existsSync(chunkPath), true);
   fs.unlinkSync(chunkPath);
 
@@ -255,8 +261,9 @@ test("merge stores same-name uploads with distinct physical files", async () => 
   const secondPhysical = mergedFiles[1].file_path;
   assert.notEqual(firstPhysical, secondPhysical);
 
-  const firstAbsolute = path.join(__dirname, "..", firstPhysical);
-  const secondAbsolute = path.join(__dirname, "..", secondPhysical);
+  // VU-61：目录已隔离到临时卷，不能再用 __dirname/../uploads 硬拼。
+  const firstAbsolute = path.join(UPLOADS_DIR, path.basename(firstPhysical));
+  const secondAbsolute = path.join(UPLOADS_DIR, path.basename(secondPhysical));
   assert.equal(fs.existsSync(firstAbsolute), true);
   assert.equal(fs.existsSync(secondAbsolute), true);
 

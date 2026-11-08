@@ -37,12 +37,16 @@ class FakeUploadWorker {
   }
 }
 
-vi.mock("../worker/uploadWorker.ts?worker&inline", () => ({
+vi.mock("../worker/uploadWorker.ts?worker", () => ({
   default: FakeUploadWorker,
 }));
 
-// 全量套件使用 --no-isolate 共享模块缓存：若其他测试先加载过 bridge，真实的
-// inline worker 模块会被缓存，本文件的 vi.mock 就无法生效。先清缓存再导入。
+// VU-25：mock 路径随源码同步改为 `?worker`（库构建时的 `&inline` 由 config 插件重写，
+// 不影响测试）。测试 runner 使用 pool:"forks"（见 vite.config.ts），每个测试文件在独立
+// 进程内运行、模块缓存不跨文件共享；本文件先 vi.resetModules() 重置本进程模块注册表，
+// 再经下方 vi.mock("../worker/uploadWorker.ts?worker") 注入 FakeUploadWorker，
+// 确保 bridge 拿到的永远是 mock 而非真实 Worker 实现。旧注释提及的「--no-isolate 共享
+// 缓存」已不再适用（VU-60 校正：forks 进程天然隔离）。
 vi.resetModules();
 const { createUploadWorkerPool } = await import("./uploadWorkerBridge");
 
@@ -209,8 +213,11 @@ describe("cancelUploadTask（T2.3 Worker CANCEL 协议）", () => {
     }
   });
 
-  it("对不在执行中的 fileId 调用是安全的 no-op", () => {
-    expect(() => pool.cancelUploadTask("not-running")).not.toThrow();
+  it("对不在执行中的 fileId 调用 cancelUploadTask 是显式 no-op（返回 undefined，不改变任何任务状态）", () => {
+    // 任务未启动：taskWorkerMap 无该 fileId，cancel 应直接返回 undefined，
+    // 且不向任何 worker 投递 cancel 消息（无副作用）。
+    const result = pool.cancelUploadTask("not-running");
+    expect(result).toBeUndefined();
   });
 });
 
@@ -413,8 +420,10 @@ describe("pauseUploadTask / resumeUploadTask（T3.3）", () => {
     expect(alive).toBe(false);
   });
 
-  it("pauseUploadTask 对不存在的任务调用安全 no-op", () => {
-    expect(() => pool.pauseUploadTask("ghost-file")).not.toThrow();
+  it("pauseUploadTask 对不存在/已释放的任务调用是显式 no-op（返回 undefined）", () => {
+    // 任务未运行或已 paused 收尾（fileId 从 taskWorkerMap 移除）：直接返回 undefined。
+    const result = pool.pauseUploadTask("ghost-file");
+    expect(result).toBeUndefined();
   });
 
   it("paused 后再 resume 同一 fileId：因 Worker 已销毁，resumeUploadTask 返回 false", async () => {

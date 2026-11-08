@@ -29,8 +29,9 @@ export {
 } from "./shared/debugLogger";
 
 // UI 套件类型：消费方实现 setMessageApi 注入时需要 MessageInstance 签名
-export type { MessageInstance } from "./ui";
+// VU-46：从具体模块导出，避免公共入口把整个 ui barrel 拉进库产物。
+export type { MessageInstance } from "./ui/message";
 
 // 顶层错误边界，避免旧 chunk 404 导致整页白屏
-export { ErrorBoundary } from "./ui";
-export type { ErrorBoundaryProps } from "./ui";
+export { ErrorBoundary } from "./ui/ErrorBoundary";
+export type { ErrorBoundaryProps } from "./ui/ErrorBoundary";

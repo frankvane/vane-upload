@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      # 与本地 `npm run ci` 完全同一条命令，避免 CI 与本地门禁漂移。
+      - name: Full gate (typecheck / lint / tests / build)
+        run: npm run ci
+      - name: Container image smoke
+        run: docker build -t vane-upload-server:ci .

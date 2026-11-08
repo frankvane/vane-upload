@@ -18,11 +18,15 @@ const app = require("../src/app");
 const { syncModels, sequelize, File, FileChunk } = require("../src/models");
 const { TMP_UPLOAD_DIR, UPLOADS_DIR, ensureBaseDirs } = require("../src/config/paths");
 const { md5Buffer } = require("../src/utils/hash");
-const { buildChunkPath } = require("../src/utils/fileSecurity");
+const { buildChunkPath, buildScopedFileId } = require("../src/utils/fileSecurity");
+
+// demo 模式下 userId 固定为 "test"；存储键已按用户命名空间隔离（VU-01/02）。
+const scoped = (fileId) => buildScopedFileId("test", fileId);
 const { resetChunkStateQueueForTests } = require("../src/services/chunkStateQueue");
 
-// 与客户端 src/shared/chunkKey.ts 保持一致
-const buildChunkKey = (md5, size, chunkSize) => `${md5}_${size}_${chunkSize}`;
+// VU-63：不再在本文件硬编码第三份实现，统一引用服务端契约模块；
+// 前后端一致性由 src/shared/chunkKey.contract.test.ts 自动校验。
+const { buildChunkKey } = require("../src/utils/chunkKeyContract");
 
 const uploadChunk = async (fileId, index, buffer) => {
   const res = await request(app)
@@ -104,8 +108,8 @@ test("同一文件不同 chunkSize 的两轮上传互不污染，均能合并成
   assert.equal(mergeSmall.body.code, 200);
 
   // 第一轮的分片仍然完好、未被第二轮污染（键隔离，孤儿分片由 janitor 兜底清理）
-  assert.equal(fs.existsSync(buildChunkPath(keyBig, 0)), true);
-  assert.equal(fs.existsSync(buildChunkPath(keyBig, 1)), true);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(keyBig),0)), true);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(keyBig),1)), true);
 
   // 第一轮再合并：同 md5+size 秒传复用，返回 alreadyMerged（不再重复落盘）
   const mergeBig = await mergeFile(keyBig, md5, "decoupled.bin", size, 2);
@@ -116,13 +120,14 @@ test("同一文件不同 chunkSize 的两轮上传互不污染，均能合并成
   const files = await File.findAll({ where: { md5, size, status: 1 } });
   assert.equal(files.length, 1);
 
-  const absolute = path.join(__dirname, "..", files[0].file_path);
+  // VU-61：目录已隔离到临时卷，不能再用 __dirname/../uploads 硬拼。
+  const absolute = path.join(UPLOADS_DIR, path.basename(files[0].file_path));
   const buffer = fs.readFileSync(absolute);
   assert.equal(md5Buffer(buffer), md5);
   assert.equal(buffer.length, size);
 
   // 第二轮的分片文件已随合并清理
-  assert.equal(fs.existsSync(buildChunkPath(keySmall, 0)), false);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(keySmall),0)), false);
 });
 
 test("秒传按 md5+size 判定：chunkSize 变化不影响秒传命中（P1-6/P1-7）", async () => {
@@ -157,7 +162,7 @@ test("复合键与请求参数不一致时清空旧分片结果（P1-6）", asyn
   const key = buildChunkKey(md5, size, 2048);
 
   await uploadChunk(key, 0, content);
-  assert.equal(fs.existsSync(buildChunkPath(key, 0)), true);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(key),0)), true);
 
   // 请求体 size 与键内 size 不符 → 旧分片被清空
   const instantRes = await request(app).post("/api/file/instant").send({
@@ -170,9 +175,11 @@ test("复合键与请求参数不一致时清空旧分片结果（P1-6）", asyn
   assert.equal(instantRes.status, 200);
   assert.equal(instantRes.body.data.reset, true);
   assert.equal(instantRes.body.data.clearedChunks, 1);
-  assert.equal(fs.existsSync(buildChunkPath(key, 0)), false);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(key),0)), false);
 
-  const remaining = await FileChunk.count({ where: { file_id: key, status: 1 } });
+  const remaining = await FileChunk.count({
+    where: { file_id: scoped(key), status: 1 },
+  });
   assert.equal(remaining, 0);
 
   // 请求体 chunk_size 与键内 chunkSize 不符 → 同样清空
@@ -187,7 +194,7 @@ test("复合键与请求参数不一致时清空旧分片结果（P1-6）", asyn
   });
   assert.equal(instantRes2.status, 200);
   assert.equal(instantRes2.body.data.reset, true);
-  assert.equal(fs.existsSync(buildChunkPath(key, 0)), false);
+  assert.equal(fs.existsSync(buildChunkPath(scoped(key),0)), false);
 });
 
 test("旧版纯 md5 键保持兼容（不走一致性清空逻辑）", async () => {

@@ -41,6 +41,19 @@ const noticeStyleMap: Record<NoticeLevel, CSSProperties> = {
   },
 };
 
+/** VU-45：内联 [] 与内联回调会让 UploadContext / useEffectiveConfig 的 memo 全部失效。 */
+const ALLOWED_FILE_TYPES: string[] = [];
+
+const customFileValidator = (file: File) => {
+  if (file.name.includes("test")) {
+    return { valid: false, message: "文件名包含 test 时不允许上传" };
+  }
+  if (file.size > 500 * 1024 * 1024) {
+    return { valid: false, message: "文件大小不能超过 500MB" };
+  }
+  return { valid: true };
+};
+
 const App = () => {
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const noticeTimersRef = useRef<Map<number, number>>(new Map());
@@ -97,39 +110,39 @@ const App = () => {
     };
   }, []);
 
-  const handleUploadStart = (files: UploadFile[]) => {
-    notify("info", `开始上传 ${files.length} 个文件`);
-  };
+  const handleUploadStart = useCallback(
+    (files: UploadFile[]) => {
+      notify("info", `开始上传 ${files.length} 个文件`);
+    },
+    [notify],
+  );
 
-  const handleUploadComplete = (file: UploadFile, success: boolean) => {
-    if (success) {
-      notify("success", `上传成功: ${file.fileName}`);
-      return;
-    }
+  const handleUploadComplete = useCallback(
+    (file: UploadFile, success: boolean) => {
+      notify(
+        success ? "success" : "error",
+        `${success ? "上传成功" : "上传失败"}: ${file.fileName}`,
+      );
+    },
+    [notify],
+  );
 
-    notify("error", `上传失败: ${file.fileName}`);
-  };
+  const handleUploadError = useCallback(
+    (file: UploadFile, error: string) => {
+      notify("error", `${file.fileName} 上传错误: ${error}`);
+    },
+    [notify],
+  );
 
-  const handleUploadError = (file: UploadFile, error: string) => {
-    notify("error", `${file.fileName} 上传错误: ${error}`);
-  };
-
-  const handleUploadBatchComplete = (results: UploadBatchResult) => {
-    notify(
-      "success",
-      `批量上传完成: 成功 ${results.success} 个, 失败 ${results.failed} 个`,
-    );
-  };
-
-  const customFileValidator = (file: File) => {
-    if (file.name.includes("test")) {
-      return { valid: false, message: "文件名包含 test 时不允许上传" };
-    }
-    if (file.size > 500 * 1024 * 1024) {
-      return { valid: false, message: "文件大小不能超过 500MB" };
-    }
-    return { valid: true };
-  };
+  const handleUploadBatchComplete = useCallback(
+    (results: UploadBatchResult) => {
+      notify(
+        "success",
+        `批量上传完成: 成功 ${results.success} 个, 失败 ${results.failed} 个`,
+      );
+    },
+    [notify],
+  );
 
   return (
     <div
@@ -190,7 +203,7 @@ const App = () => {
           chunkConcurrency={2}
           maxRetries={3}
           maxFileSize={100 * 1024 * 1024}
-          allowedFileTypes={[]}
+          allowedFileTypes={ALLOWED_FILE_TYPES}
           maxFiles={10}
           autoUpload={true}
           autoCleanup={true}

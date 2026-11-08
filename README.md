@@ -1,10 +1,8 @@
 # vane-upload
 
-独立的上传项目：只负责文件上传，不包含任何下载能力。从 `E:\react-upload-indexeddb` 中迁移上传链路与后端上传接口而来。
+独立的上传项目：只负责文件上传。
 
 ## 范围
-
-包含：
 
 - 上传组件 `ZustandFileUpload`（文件选择、校验、队列、暂停/继续、重试、删除）
 - 分片上传与断点续传（服务端分片状态查询 + 秒传预检）
@@ -15,19 +13,14 @@
 - 内置 UI 套件与上传相关样式
 - 后端上传接口：秒传预检、分片状态、分片上传、合并
 
-不包含：
-
-- 下载页面、组件、路由、hooks、下载 Worker
-- 后端列表/下载/缩略图接口
-- 下载相关类型、测试、样式、文档
-
 ## 目录结构
 
 ```
 vane-upload/
 ├── index.html
-├── vite.config.ts
-├── tsconfig*.json
+├── vite.config.ts               # demo 应用 / Vitest 配置
+├── vite.lib.config.ts           # 组件库构建配置（VU-24）
+├── tsconfig*.json               # 含 tsconfig.lib.json（声明文件产出）
 ├── eslint.config.js
 ├── package.json                 # 根工程 + workspaces
 ├── src/
@@ -98,6 +91,33 @@ npm run build
 npm run preview
 ```
 
+## 作为组件库使用
+
+`npm run build` 依次产出演示应用（`dist/`）与可发布的库产物（`dist/lib/`），也可单独执行：
+
+```bash
+npm run build:demo   # vite build：dist/index.html + assets，两个 Worker 为独立 asset
+npm run build:lib    # vite build --config vite.lib.config.ts + tsc -p tsconfig.lib.json
+```
+
+`dist/lib/` 内容：
+
+| 文件 | 用途 |
+| ---- | ---- |
+| `index.js` / `index.cjs` | ESM / CJS 入口，由 `package.json` 的 `exports` 指向 |
+| `index.d.ts` 及子模块声明 | TypeScript 类型（`tsc --emitDeclarationOnly` 产出，无额外依赖） |
+| `style.css` | 组件样式，需消费方显式引入 |
+
+消费示例（React 19 项目）：
+
+```tsx
+import { ZustandFileUpload, type UploadFile } from "vane-upload";
+import "vane-upload/style.css";
+```
+
+- `react` / `react-dom` / `zustand` / `localforage` / `spark-md5` 在库构建中为 external，由消费方提供，不会重复打包。
+- 库产物中的两个 Web Worker 以内联 Blob 形式自包含，消费方无需配置额外资产路径；演示应用构建则拆为独立 Worker asset，便于缓存与并行加载。
+
 ## 前端配置
 
 `src/config/api.ts` 读取 `VITE_API_BASE_URL`（可选），未设置时使用同源相对路径。组件 props 也可覆盖：
@@ -117,13 +137,13 @@ npm run preview
 
 统一前缀 `/api/file`，响应格式 `{ code, message, data }`。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
+| 方法 | 路径                | 说明                                                                                               |
+| ---- | ------------------- | -------------------------------------------------------------------------------------------------- |
 | POST | `/api/file/instant` | 秒传预检 + 已上传分片校验（请求体含 `file_id`、`md5`、`name`、`size`、`chunk_md5s`、`chunk_size`） |
-| GET | `/api/file/status` | 查询某分片键已成功上传的分片索引（`file_id`、`md5`） |
-| POST | `/api/file/upload` | 上传单个分片，`multipart/form-data` 字段 `file_id`、`index`、`chunk_md5`、`chunk` |
-| POST | `/api/file/merge` | 合并分片并落库，字段 `file_id`、`md5`、`name`、`size`、`total` |
-| GET | `/api/health` | 健康检查 |
+| GET  | `/api/file/status`  | 查询某分片键已成功上传的分片索引（`file_id`、`md5`）                                               |
+| POST | `/api/file/upload`  | 上传单个分片，`multipart/form-data` 字段 `file_id`、`index`、`chunk_md5`、`chunk`                  |
+| POST | `/api/file/merge`   | 合并分片并落库，字段 `file_id`、`md5`、`name`、`size`、`total`                                     |
+| GET  | `/api/health`       | 健康检查                                                                                           |
 
 鉴权：默认 `AUTH_MODE=secure`（fail-closed），需配置 `FILE_AUTH_TOKEN` 或 Cookie 白名单；仅本地演示/测试可设 `AUTH_MODE=demo`。详见 [server/README.md](server/README.md)。
 
@@ -140,7 +160,35 @@ npm test           # 前端单元测试（vitest）
 npm run test:server # 后端接口测试（node:test + supertest）
 npm run typecheck  # TypeScript 类型检查
 npm run lint       # ESLint
+npm run ci         # 一条命令跑完上述全部 + build（demo + lib）
 ```
+
+GitHub Actions 的 `.github/workflows/ci.yml` 直接调用 `npm run ci`，并额外执行一次
+`docker build` 冒烟，保证 CI 与本地门禁不会漂移。覆盖率阈值（`VU-62`）尚未接入，
+需要单独引入 `@vitest/coverage-v8` 后再补。
+
+## 容器与部署基线
+
+```bash
+docker build -t vane-upload-server .
+docker run --rm -p 3000:3000 \
+  -e FILE_AUTH_TOKEN='replace-with-a-long-random-token' \
+  -e TRUST_PROXY_HOPS=1 \
+  -v "$(pwd)/.data:/app/server/data" \
+  -v "$(pwd)/.tmp:/app/server/tmp/upload" \
+  -v "$(pwd)/.uploads:/app/server/uploads" \
+  vane-upload-server
+```
+
+- 镜像以非 root 用户运行，`CMD` 用 exec form 让 PID 1 是 node，能收到 `SIGTERM`
+  并走优雅停机（flush 分片状态 + checkpoint WAL）。
+- `HEALTHCHECK` 同时检查 `/api/health` 的状态码与 `degraded` 标记，落库队列
+  持续失败时容器会被判定不健康。
+- 生产必须注入 `FILE_AUTH_TOKEN`（或替换鉴权中间件）；`AUTH_MODE=secure` 默认
+  fail-closed，缺凭据时所有 `/api/file` 请求一律 401。
+- 反代按真实跳数设置 `TRUST_PROXY_HOPS`，不要设 `true`；Cookie 鉴权还需由部署方
+  配置 `SameSite` / `Secure` / CSRF。日志轮转与 stdout 采集由部署方负责。
+- 更完整的环境变量清单见 `server/.env.example`，后端部署说明见 `server/README.md`。
 
 ## 调试日志
 

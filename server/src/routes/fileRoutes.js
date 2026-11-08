@@ -4,9 +4,15 @@ const { uploadChunk } = require("../middleware/uploadChunk");
 
 const router = express.Router();
 
-router.post("/instant", uploadController.instantCheck);
-router.get("/status", uploadController.statusQuery);
-router.post("/upload", uploadChunk, uploadController.uploadChunk);
-router.post("/merge", uploadController.mergeChunks);
+// VU-31：Express 4 不会自动捕获 async handler 的 rejected Promise。
+// 控制器内部虽有 try/catch，但 catch 里的 rollback / unlink 仍可能二次抛错，
+// 那会变成 unhandledRejection 并让请求悬挂。统一包一层把错误交给 errorHandler。
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
+
+router.post("/instant", asyncHandler(uploadController.instantCheck));
+router.get("/status", asyncHandler(uploadController.statusQuery));
+router.post("/upload", uploadChunk, asyncHandler(uploadController.uploadChunk));
+router.post("/merge", asyncHandler(uploadController.mergeChunks));
 
 module.exports = router;

@@ -3,9 +3,13 @@ import {
   UploadWorkerRequest,
   UploadWorkerResponse,
 } from "../types/workerProtocol";
-// 内联 worker（见 useFileProcessor 注释）：避免发布后被消费方当作外部资产 404。
-import UploadWorker from "../worker/uploadWorker.ts?worker&inline";
+// VU-25：demo/应用构建下产出独立 worker asset，不再把 ~900 行 worker 源码
+// base64 内联进主 bundle（独立 chunk 可缓存、可并行加载）。
+// 库构建由 vite.lib.config.ts 的插件把 `?worker` 重写为 `?worker&inline`，
+// 保证发布产物自包含、消费方无需解析外部 worker 资产。
+import UploadWorker from "../worker/uploadWorker.ts?worker";
 import { buildChunkKey } from "../../../shared/chunkKey";
+import { createProgressThrottle } from "./progressThrottle";
 
 interface UploadWorkerNetworkParams {
   networkType: string;
@@ -185,6 +189,12 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
       let settled = false;
       let shouldRecycleWorker = true;
 
+      // VU-40：同一帧内的多条 progress 合并为最后一条，避免高频消息
+      // 把 store 更新 / 宿主回调放大成每条一次。收尾时 flush 保证不丢 100%。
+      const progressThrottle = createProgressThrottle<UploadProgressDetail>(
+        (detail) => options.onProgress?.(detail)
+      );
+
       // P1-8 看门狗：worker 长时间无任何消息 → 判定失联，终止并让上层可重试续传
       const idleTimeoutMs = options.idleTimeoutMs ?? TASK_IDLE_TIMEOUT_MS;
       let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -224,6 +234,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
           return;
         }
         settled = true;
+        progressThrottle.flush();
         taskWorkerMap.delete(options.file.id);
         cleanup();
         resolve(result);
@@ -254,6 +265,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
 
       const cleanup = () => {
         clearIdleTimer();
+        progressThrottle.cancel();
         if (options.signal) {
           options.signal.removeEventListener("abort", handleAbort);
         }
@@ -291,7 +303,8 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
 
         if (payload.type === "progress") {
           // T3.4：进度载荷升级为字节级详情（progress/speed/eta）
-          options.onProgress?.({
+          // VU-40：交给节流器合并，任务收尾时由 finish() 强制 flush。
+          progressThrottle.push({
             progress: payload.progress,
             uploadedBytes: payload.uploadedBytes,
             totalBytes: payload.totalBytes,
@@ -315,6 +328,17 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         }
 
         if (payload.type === "error") {
+          // VU-07 双保险：若主线程已发出取消，即便 worker 先一步上报 error，
+          // 也必须以「已取消」收尾，绝不能渲染成失败或触发 onUploadError。
+          if (options.signal?.aborted) {
+            finish({
+              success: false,
+              skipped: false,
+              cancelled: true,
+              errorMessage: "上传已取消",
+            });
+            return;
+          }
           finish({
             success: false,
             skipped: false,

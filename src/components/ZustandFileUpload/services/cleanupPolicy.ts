@@ -1,6 +1,6 @@
 ﻿import { UploadFile, UploadStatus } from "../types/upload";
 import type { FileRegistry } from "./fileRegistry";
-import { listUploadFiles, readUploadFile } from "./uploadStorage";
+import { listUploadFiles } from "./uploadStorage";
 
 interface BatchInfo {
   current: number;
@@ -16,7 +16,8 @@ interface BatchInfo {
 interface CleanupPolicyOptions {
   getFiles: () => UploadFile[];
   setFiles: (files: UploadFile[]) => void;
-  refreshFiles: () => Promise<void>;
+  /** 传入已知快照时直接采用，避免再读一遍 IndexedDB（VU-50）。 */
+  refreshFiles: (knownFiles?: UploadFile[]) => Promise<void>;
   setBatchInfo: (
     updater:
       | BatchInfo
@@ -49,6 +50,8 @@ const isUploadInFlight = (status: UploadStatus) =>
 export class UploadCleanupPolicy {
   private readonly completedFileIds = new Set<string>();
   private countdownTimer: number | null = null;
+  // VU-50：延迟清空批次信息的定时器必须可取消，否则卸载后仍会写 store。
+  private clearBatchInfoTimer: number | null = null;
   private countdownValue = 0;
 
   constructor(private readonly options: CleanupPolicyOptions) {}
@@ -57,6 +60,10 @@ export class UploadCleanupPolicy {
     if (this.countdownTimer !== null) {
       clearInterval(this.countdownTimer);
       this.countdownTimer = null;
+    }
+    if (this.clearBatchInfoTimer !== null) {
+      clearTimeout(this.clearBatchInfoTimer);
+      this.clearBatchInfoTimer = null;
     }
   }
 
@@ -119,10 +126,29 @@ export class UploadCleanupPolicy {
   }
 
   async cleanupCompletedFilesFromIndexedDB() {
-    const ids = Array.from(this.completedFileIds);
+    // VU-43 / VU-50：一次 iterate 拿全量快照，替代「每个 id 各读一次」；
+    // 删除并发执行，并把过滤后的快照直接交给 refreshFiles，避免第二次全表读。
+    const snapshot = await listUploadFiles(this.options.storage);
+    const byId = new Map(snapshot.map((file) => [file.id, file]));
+    // P2-2：倒计时期间用户可能重新发起上传，store 内存态会先于 / 同步于
+    // IDB 变化。用零 IO 的内存态复核一次，避免快照滞后导致误删在途文件。
+    const liveStatusById = new Map(
+      this.options.getFiles().map((file) => [file.id, file.status])
+    );
+    const removedIds = new Set<string>();
 
-    for (const id of ids) {
-      const file = await readUploadFile(this.options.storage, id);
+    for (const id of this.completedFileIds) {
+      const liveStatus = liveStatusById.get(id);
+      if (
+        liveStatus !== undefined &&
+        (liveStatus === UploadStatus.ERROR ||
+          isUploadInFlight(liveStatus))
+      ) {
+        this.completedFileIds.delete(id);
+        continue;
+      }
+
+      const file = byId.get(id);
       if (!file) {
         this.completedFileIds.delete(id);
         continue;
@@ -135,14 +161,25 @@ export class UploadCleanupPolicy {
       }
 
       if (canCleanup(file.status)) {
-        await this.options.storage.removeItem(id);
-        this.options.fileRegistry.releaseFileRef(id);
+        removedIds.add(id);
       }
-      // 不可识别的历史状态保守保留在 DB 与 UI，避免"文件凭空消失"
-      this.completedFileIds.delete(id);
+      // 可清理的 id 留在集合里，供 cleanupCompletedFilesFromUI 同步 UI；
+      // 不可识别的历史状态保守保留在 DB 与 UI，避免「文件凭空消失」。
     }
 
-    await this.options.refreshFiles();
+    await Promise.all(
+      Array.from(removedIds, (id) => this.options.storage.removeItem(id))
+    );
+    for (const id of removedIds) {
+      this.options.fileRegistry.releaseFileRef(id);
+    }
+
+    // 用已知快照刷新：整个清理流程只发生 1 次 iterate。
+    const nextFiles =
+      removedIds.size > 0
+        ? snapshot.filter((file) => !removedIds.has(file.id))
+        : snapshot;
+    await this.options.refreshFiles(nextFiles);
   }
 
   cleanupCompletedFilesFromUI() {
@@ -172,14 +209,11 @@ export class UploadCleanupPolicy {
   }
 
   async forceCleanupUI() {
-    if (this.countdownTimer !== null) {
-      clearInterval(this.countdownTimer);
-      this.countdownTimer = null;
-    }
+    this.dispose();
 
     await this.cleanupCompletedFilesFromIndexedDB();
     this.cleanupCompletedFilesFromUI();
-    await this.options.refreshFiles();
+    // VU-50：cleanupCompletedFilesFromIndexedDB 已用快照刷新过一次，不再重复。
   }
 
   private startCountdown(seconds: number) {
@@ -222,19 +256,14 @@ export class UploadCleanupPolicy {
   private async executeCleanup() {
     this.dispose();
 
-    const ids = Array.from(this.completedFileIds);
-    for (const id of ids) {
-      const file = await readUploadFile(this.options.storage, id);
-      if (file?.status === UploadStatus.ERROR) {
-        this.completedFileIds.delete(id);
-      }
-    }
-
+    // VU-43：ERROR 状态的筛选已在 cleanupCompletedFilesFromIndexedDB 的
+    // 单次快照里完成，不再为每个 id 单独读一遍。
     await this.cleanupCompletedFilesFromIndexedDB();
     this.cleanupCompletedFilesFromUI();
-    await this.options.refreshFiles();
-
-    setTimeout(() => {
+    // VU-50：refreshFiles 收敛到上面的快照刷新一次；延迟清空的 timer 纳入
+    // dispose 管理，组件卸载后不再写 store。
+    this.clearBatchInfoTimer = window.setTimeout(() => {
+      this.clearBatchInfoTimer = null;
       this.options.clearBatchInfo();
     }, 1000);
   }

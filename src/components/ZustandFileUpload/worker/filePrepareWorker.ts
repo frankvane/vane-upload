@@ -1,5 +1,6 @@
 import SparkMD5 from "spark-md5";
 import { buildQueueId } from "../../../shared/fileId";
+import { mapWithConcurrency } from "../../../shared/concurrency";
 import {
   UploadStatus,
   type UploadHashMode,
@@ -13,6 +14,11 @@ const FULL_HASH_READ_BLOCK = 1024 * 1024; // 1MB
 const SAMPLE_BLOCK = 4 * 1024 * 1024; // 4MB
 /** 采样哈希的中间采样点数量（不含首尾块） */
 const SAMPLE_MIDDLE_POINTS = 3;
+/**
+ * VU-43：哈希是彼此独立的 IO，用受控并发池替代逐文件串行 await。
+ * 2 是保守值：每个大文件内部已按 1MB 顺序读，并发过高会放大磁盘争用与内存峰值。
+ */
+export const HASH_CONCURRENCY = 2;
 
 interface FilePrepareRequest {
   files: File[];
@@ -23,31 +29,42 @@ interface FilePrepareRequest {
   hashMode?: UploadHashMode;
 }
 
-/**
- * @typedef {Object} NetworkParams
- * @property {number} chunkSize - 分片大小
- */
+type PreparedFile = UploadFile & { fileRef: File };
 
-/**
- * @typedef {Object} UploadFile
- * @property {string} id
- * @property {string} fileName
- * @property {number} fileSize
- * @property {string} fileType
- * @property {number} lastModified
- * @property {string} status
- * @property {number} progress
- * @property {string=} hash
- * @property {number=} chunkSize
- * @property {number=} chunkCount
- * @property {number=} uploadedChunks
- * @property {number[]=} pausedChunks
- * @property {string=} errorMessage
- * @property {number} createdAt
- * @property {number} order
- * @property {File=} fileRef - 运行时文件引用（回传主线程入注册表，不持久化）
- * @property {string=} hashMode
- */
+interface ProgressPayload {
+  type: "progress";
+  processed: number;
+  total: number;
+  success: number;
+  failed: number;
+  oversized: number;
+  fileDetails: {
+    id: string;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+    index: number;
+    total: number;
+    error?: boolean;
+    errorMessage?: string;
+  };
+}
+
+export interface FilePrepareStats {
+  processed: number;
+  total: number;
+  success: number;
+  failed: number;
+  oversized: number;
+}
+
+export interface PrepareFilesOptions {
+  chunkSize?: number;
+  hashMode?: UploadHashMode;
+  /** 可注入哈希实现，便于在单测里确定性地验证并发时序。 */
+  hashFile?: (file: File, mode: UploadHashMode) => Promise<string>;
+  onProgress?: (payload: ProgressPayload) => void;
+}
 
 /**
  * 全量流式哈希（T3.1）：按 1MB 顺序 slice 读入并增量喂给 spark-md5，
@@ -109,81 +126,80 @@ async function hashFileSample(file: File): Promise<string> {
 const hashFile = (file: File, mode: UploadHashMode): Promise<string> =>
   mode === "sample" ? hashFileSample(file) : hashFileFull(file);
 
-self.onmessage = async (e: MessageEvent<FilePrepareRequest>) => {
-  const files = e.data.files;
-  // 从传入的网络参数中获取分片大小，如果没有则使用默认值
-  const networkParams = e.data.networkParams || {};
-  const CHUNK_SIZE = networkParams.chunkSize || 1024 * 1024; // 默认1MB
-  // 哈希模式：默认全量流式（T3.1）
+/**
+ * VU-43：受控并发哈希 + 按原 index 归并。
+ * 单个文件失败只影响该文件，其余继续；返回数组仍按选择顺序排列（order = index）。
+ */
+export const prepareFiles = async (
+  files: File[],
+  options: PrepareFilesOptions = {},
+): Promise<{ uploadFiles: PreparedFile[]; stats: FilePrepareStats }> => {
+  const chunkSize = options.chunkSize || 1024 * 1024;
   const hashMode: UploadHashMode =
-    e.data.hashMode === "sample" ? "sample" : "full";
-
-  // 记录处理进度
-  let processed = 0;
+    options.hashMode === "sample" ? "sample" : "full";
+  const computeHash = options.hashFile ?? hashFile;
   const total = files.length;
+  const oversized = 0;
+  let processed = 0;
   let success = 0;
   let failed = 0;
-  const oversized = 0;
 
-  const uploadFiles: Array<UploadFile & { fileRef: File }> = [];
-  for (let i = 0; i < files.length; i++) {
-    try {
-      const file = files[i]!;
-      const chunkSize = CHUNK_SIZE;
-      const chunkCount = Math.ceil(file.size / chunkSize);
+  const emitProgress = (payload: ProgressPayload) => options.onProgress?.(payload);
 
-      // 发送进度更新，包含当前处理的文件信息
-      processed++;
-      self.postMessage({
-        type: "progress",
-        processed,
-        total,
-        success,
-        failed,
-        oversized,
-        fileDetails: {
+  const results = await mapWithConcurrency<File, PreparedFile>(
+    files,
+    HASH_CONCURRENCY,
+    async (file, i) => {
+      try {
+        processed += 1;
+        const hash = await computeHash(file, hashMode);
+        // 队列 id 含随机后缀：同内容文件不再互相覆盖（P1-7）
+        const id = buildQueueId(hash, file.size, file.lastModified);
+
+        emitProgress({
+          type: "progress",
+          processed,
+          total,
+          success,
+          failed,
+          oversized,
+          // VU-17：进度消息带上 id，供主线程以 id 作计时键（避免同名文件碰撞）
+          fileDetails: {
+            id,
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
+            index: i + 1,
+            total,
+          },
+        });
+
+        const uploadFile: PreparedFile = {
+          id,
           fileName: file.name,
           fileSize: file.size,
           fileType: file.type,
-          index: i + 1,
-          total: files.length,
-        },
-      });
-
-      const hash = await hashFile(file, hashMode);
-      // 队列 id 含随机后缀：同内容文件不再互相覆盖（P1-7）
-      const id = buildQueueId(hash, file.size, file.lastModified);
-
-      const uploadFile: UploadFile & { fileRef: File } = {
-        id,
-        fileName: file.name,
-        fileSize: file.size,
-        fileType: file.type,
-        lastModified: file.lastModified,
-        status: UploadStatus.QUEUED,
-        progress: 0,
-        hash,
-        chunkSize,
-        chunkCount,
-        uploadedChunks: 0,
-        pausedChunks: [],
-        createdAt: Date.now(),
-        order: i,
-        hashMode,
-        // 文件引用回传主线程注册表（T3.1）：不整文件序列化，
-        // File 结构化克隆为句柄，主线程据此在上传时按需切片
-        fileRef: file,
-      };
-      uploadFiles.push(uploadFile);
-      success++;
-    } catch (error) {
-      debugError("Error processing file:", error);
-      failed++;
-
-      // 发送错误文件的信息
-      const failedFile = files[i];
-      if (failedFile) {
-        self.postMessage({
+          lastModified: file.lastModified,
+          status: UploadStatus.QUEUED,
+          progress: 0,
+          hash,
+          chunkSize,
+          chunkCount: Math.ceil(file.size / chunkSize),
+          uploadedChunks: 0,
+          pausedChunks: [],
+          createdAt: Date.now(),
+          order: i,
+          hashMode,
+          // 文件引用回传主线程注册表（T3.1）：不整文件序列化，
+          // File 结构化克隆为句柄，主线程据此在上传时按需切片
+          fileRef: file,
+        };
+        success += 1;
+        return uploadFile;
+      } catch (error) {
+        debugError("Error processing file:", error);
+        failed += 1;
+        emitProgress({
           type: "progress",
           processed,
           total,
@@ -191,30 +207,37 @@ self.onmessage = async (e: MessageEvent<FilePrepareRequest>) => {
           failed,
           oversized,
           fileDetails: {
-            fileName: failedFile.name,
-            fileSize: failedFile.size,
-            fileType: failedFile.type,
+            id: "",
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
             index: i + 1,
-            total: files.length,
+            total,
             error: true,
-            errorMessage:
-              error instanceof Error ? error.message : String(error),
+            errorMessage: error instanceof Error ? error.message : String(error),
           },
         });
+        return undefined;
       }
-    }
-  }
-
-  // 发送完成信息
-  self.postMessage({
-    type: "complete",
-    uploadFiles,
-    stats: {
-      processed,
-      total,
-      success,
-      failed,
-      oversized,
     },
+  );
+
+  const uploadFiles = results.filter(
+    (file): file is PreparedFile => file !== undefined,
+  );
+
+  return {
+    uploadFiles,
+    stats: { processed, total, success, failed, oversized },
+  };
+};
+
+self.onmessage = async (e: MessageEvent<FilePrepareRequest>) => {
+  const { uploadFiles, stats } = await prepareFiles(e.data.files, {
+    chunkSize: e.data.networkParams?.chunkSize,
+    hashMode: e.data.hashMode,
+    onProgress: (payload) => self.postMessage(payload),
   });
+
+  self.postMessage({ type: "complete", uploadFiles, stats });
 };

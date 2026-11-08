@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 
 /**
  * 网络状态快照。
@@ -51,6 +51,104 @@ function readConnection(): Pick<
   };
 }
 
+const readSnapshot = (): NetworkState => ({
+  online: typeof navigator === "undefined" ? undefined : navigator.onLine,
+  ...readConnection(),
+});
+
+const SERVER_SNAPSHOT: NetworkState = {
+  online: undefined,
+  rtt: undefined,
+  type: undefined,
+  effectiveType: undefined,
+};
+
+/**
+ * VU-44：模块级单例订阅。
+ *
+ * 旧实现每个 `<FileUpload>` 实例都在 `useEffect` 里各注册一套 online/offline/change，
+ * N 个实例 = N 套监听 + N 次 setState 广播。改为 ref-count 订阅：
+ * 第一个订阅者注册一次事件源，最后一个订阅者卸载时注销，状态变更广播给所有监听器。
+ * 用 `useSyncExternalStore` 而非 `useState + useEffect`，天然避免「卸载后事件仍更新
+ * 已卸载组件」与并发渲染下的快照撕裂。
+ */
+let snapshot: NetworkState = readSnapshot();
+const listeners = new Set<() => void>();
+let detachEvents: (() => void) | null = null;
+
+const sameSnapshot = (a: NetworkState, b: NetworkState): boolean =>
+  a.online === b.online &&
+  a.rtt === b.rtt &&
+  a.type === b.type &&
+  a.effectiveType === b.effectiveType;
+
+const notify = () => {
+  for (const listener of listeners) {
+    listener();
+  }
+};
+
+const updateOnline = (online: boolean) => {
+  if (snapshot.online === online) {
+    return;
+  }
+  snapshot = { ...snapshot, online };
+  notify();
+};
+
+const onConnectionChange = () => {
+  const next = { ...snapshot, ...readConnection() };
+  if (!sameSnapshot(snapshot, next)) {
+    snapshot = next;
+    notify();
+  }
+};
+
+const attachEvents = () => {
+  if (detachEvents !== null || typeof window === "undefined") {
+    return;
+  }
+
+  // 冷启动（从 0 个订阅者恢复）时重新采样：覆盖无监听期间 onLine / connection
+  // 已经变化但没有事件可用的窗口，也让各组件实例与测试彼此不串状态。
+  const fresh = readSnapshot();
+  if (!sameSnapshot(snapshot, fresh)) {
+    snapshot = fresh;
+  }
+
+  const onOnline = () => updateOnline(true);
+  const onOffline = () => updateOnline(false);
+  // 这些处理器不调用 preventDefault，可以声明为 passive，让浏览器跳过
+  // 「是否会被取消默认行为」的等待。
+  const passive: AddEventListenerOptions = { passive: true };
+
+  window.addEventListener("online", onOnline, passive);
+  window.addEventListener("offline", onOffline, passive);
+  const connection = getConnection();
+  connection?.addEventListener("change", onConnectionChange, passive);
+
+  detachEvents = () => {
+    window.removeEventListener("online", onOnline);
+    window.removeEventListener("offline", onOffline);
+    connection?.removeEventListener("change", onConnectionChange);
+    detachEvents = null;
+  };
+};
+
+const subscribe = (listener: () => void): (() => void) => {
+  listeners.add(listener);
+  attachEvents();
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      detachEvents?.();
+    }
+  };
+};
+
+const getSnapshot = (): NetworkState => snapshot;
+const getServerSnapshot = (): NetworkState => SERVER_SNAPSHOT;
+
 /**
  * 监听网络状态变化（上线/下线/网络制式变化）。
  *
@@ -59,33 +157,5 @@ function readConnection(): Pick<
  * `typeof navigator === "undefined"` 时返回全 undefined 快照。
  */
 export function useNetwork(): NetworkState {
-  const [state, setState] = useState<NetworkState>(() => ({
-    online: typeof navigator === "undefined" ? undefined : navigator.onLine,
-    ...readConnection(),
-  }));
-
-  useEffect(() => {
-    const onOnline = () => {
-      setState((prev) => ({ ...prev, online: true }));
-    };
-    const onOffline = () => {
-      setState((prev) => ({ ...prev, online: false }));
-    };
-    const onConnectionChange = () => {
-      setState((prev) => ({ ...prev, ...readConnection() }));
-    };
-
-    window.addEventListener("online", onOnline);
-    window.addEventListener("offline", onOffline);
-    const connection = getConnection();
-    connection?.addEventListener("change", onConnectionChange);
-
-    return () => {
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("offline", onOffline);
-      connection?.removeEventListener("change", onConnectionChange);
-    };
-  }, []);
-
-  return state;
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }

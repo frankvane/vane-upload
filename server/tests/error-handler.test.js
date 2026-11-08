@@ -5,6 +5,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+// VU-61：必须在 require(app) 之前声明 test 环境，
+// 否则 paths.js 会把 DB / 目录解析到仓库内默认位置。
+process.env.NODE_ENV = "test";
+
 const { errorHandler } = require("../src/app");
 
 function makeRes() {

@@ -187,23 +187,28 @@ export const Spin: React.FC<SpinProps> = ({
 
 /* ============================ Empty ============================ */
 
+// VU-51：静态插画提到模块顶层，避免每次渲染重建整棵 SVG 子树。
+const EMPTY_IMAGE = (
+  <svg className="rui-empty-image" viewBox="0 0 64 41" aria-hidden="true">
+    <g fill="none" fillRule="evenodd">
+      <ellipse cx="32" cy="33" rx="32" ry="7" fill="#f5f5f5" />
+      <path
+        d="M55 12.76L44.85 1.2C44.367.474 43.656 0 42.907 0H21.093c-.749 0-1.46.474-1.945 1.2L9 12.76V22h46v-9.24z"
+        fill="#fafafa"
+      />
+      <path
+        d="M41.613 15.931c0-1.605.994-2.93 2.227-2.93H55v18.137c0 1.605-.994 2.946-2.227 2.946H11.227C9.994 34.084 9 32.743 9 31.139V13h11.16c1.233 0 2.227 1.325 2.227 2.931v.28c0 1.605.994 2.93 2.227 2.93h14.772c1.233 0 2.227-1.325 2.227-2.93v-.28z"
+        fill="#e6e6e6"
+      />
+    </g>
+  </svg>
+);
+
 export const Empty: React.FC<{ description?: React.ReactNode }> = ({
   description,
 }) => (
   <div className="rui-empty">
-    <svg className="rui-empty-image" viewBox="0 0 64 41" aria-hidden="true">
-      <g fill="none" fillRule="evenodd">
-        <ellipse cx="32" cy="33" rx="32" ry="7" fill="#f5f5f5" />
-        <path
-          d="M55 12.76L44.85 1.2C44.367.474 43.656 0 42.907 0H21.093c-.749 0-1.46.474-1.945 1.2L9 12.76V22h46v-9.24z"
-          fill="#fafafa"
-        />
-        <path
-          d="M41.613 15.931c0-1.605.994-2.93 2.227-2.93H55v18.137c0 1.605-.994 2.946-2.227 2.946H11.227C9.994 34.084 9 32.743 9 31.139V13h11.16c1.233 0 2.227 1.325 2.227 2.931v.28c0 1.605.994 2.93 2.227 2.93h14.772c1.233 0 2.227-1.325 2.227-2.93v-.28z"
-          fill="#e6e6e6"
-        />
-      </g>
-    </svg>
+    {EMPTY_IMAGE}
     <span>{description ?? "暂无数据"}</span>
   </div>
 );
@@ -299,18 +304,8 @@ export const Space: React.FC<SpaceProps> = ({
       }}
       {...rest}
     >
-      {React.Children.map(children, (child) =>
-        React.isValidElement(child)
-          ? React.cloneElement(
-              child as React.ReactElement<{ style?: React.CSSProperties }>,
-              {
-                style: {
-                  ...(child.props as { style?: React.CSSProperties }).style,
-                },
-              },
-            )
-          : child,
-      )}
+      {/* VU-51：旧实现用 cloneElement 把 style 浅拷贝成等价新对象，纯空操作却破坏子元素身份。 */}
+      {children}
     </div>
   );
 };

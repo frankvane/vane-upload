@@ -1,4 +1,5 @@
-﻿import { UploadFile, UploadStatus } from "../types/upload";
+﻿import { useCallback, useMemo } from "react";
+import { UploadFile, UploadStatus } from "../types/upload";
 
 import { loadAllUploadFiles, runConcurrentQueue } from "../services/uploadOrchestrator";
 import { useUploadStore } from "../store/upload";
@@ -37,6 +38,11 @@ export interface BatchUploaderActions {
   pendingCleanupCount: () => number;
 }
 
+/**
+ * VU-42：所有 action 用 useCallback 稳定身份、返回对象用 useMemo 稳定身份。
+ * 依赖只含 store 原语 / 稳定 action / 已稳定的 engine 与 config 对象，
+ * 因此每条进度消息引起的父级重渲染不再击穿下游 props 与 useEffect。
+ */
 export function useBatchUploader(): BatchUploaderActions {
   const {
     isNetworkOffline,
@@ -46,9 +52,7 @@ export function useBatchUploader(): BatchUploaderActions {
     chunkSize,
     maxRetries,
     refreshFiles,
-    setProgressMap,
-    setSpeedMap,
-    setEtaMap,
+    setProgressDetail,
     setBatchInfo,
     setIsUploading,
     getMessageApi,
@@ -61,9 +65,7 @@ export function useBatchUploader(): BatchUploaderActions {
       chunkSize: state.chunkSize,
       maxRetries: state.maxRetries,
       refreshFiles: state.refreshFiles,
-      setProgressMap: state.setProgressMap,
-      setSpeedMap: state.setSpeedMap,
-      setEtaMap: state.setEtaMap,
+      setProgressDetail: state.setProgressDetail,
       setBatchInfo: state.setBatchInfo,
       setIsUploading: state.setIsUploading,
       getMessageApi: state.getMessageApi,
@@ -71,7 +73,6 @@ export function useBatchUploader(): BatchUploaderActions {
   );
 
   const uploadConfig = useEffectiveUploadConfig();
-  const messageApi = getMessageApi();
   const engine = useUploadEngine();
 
   const {
@@ -79,8 +80,8 @@ export function useBatchUploader(): BatchUploaderActions {
     activeUploadAbortRef,
     beginBatchSession,
     endBatchSession,
+    syncFile,
     flushRefresh,
-    scheduleRefresh,
   } = useUploaderLifecycle({
     engine,
     refreshFiles,
@@ -88,157 +89,165 @@ export function useBatchUploader(): BatchUploaderActions {
     autoCleanup: uploadConfig.autoCleanup,
   });
 
-  const processFileUpload = async (
-    file: UploadFile,
-    signal?: AbortSignal
-  ): Promise<boolean> => {
-    if (signal?.aborted) {
-      return false;
-    }
-
-    // T3.1：文件字节不再驻留 IndexedDB，改由主线程 fileRegistry 持有运行时引用。
-    // 页面刷新后注册表清空 → 需用户重新选择同一文件方可续传（服务端分片检查决定跳过范围）。
-    const fileRef = engine.fileRegistry.getFileRef(file.id);
-    if (!fileRef) {
-      file.status = UploadStatus.ERROR;
-      file.progress = 0;
-      file.errorMessage = "文件引用已失效，请重新选择该文件以继续上传";
-      file.awaitingReselect = true;
-      await engine.storage.setItem(file.id, file);
-      scheduleRefresh();
-      return false;
-    }
-
-    file.status = UploadStatus.UPLOADING;
-    await engine.storage.setItem(file.id, file);
-    scheduleRefresh();
-
-    const result = await engine.workerPool.runUploadTask({
-      file,
-      fileRef,
-      signal,
-      networkParams: {
-        networkType,
-        fileConcurrency,
-        chunkConcurrency,
-        chunkSize,
-        maxRetries,
-      },
-      uploadConfig: {
-        baseURL: uploadConfig.baseURL,
-        uploadApi: uploadConfig.uploadApi,
-        checkApi: uploadConfig.checkApi,
-        mergeApi: uploadConfig.mergeApi,
-        authHeaders: await resolveAuthHeaders(uploadConfig),
-        withCredentials: uploadConfig.withCredentials,
-        debug: uploadConfig.debug,
-        hashMode: uploadConfig.hashMode,
-      },
-      onProgress: (detail) => {
-        setProgressMap((prev) => ({
-          ...prev,
-          [file.id]: detail.progress,
-        }));
-        setSpeedMap((prev) => ({
-          ...prev,
-          [file.id]: detail.speed,
-        }));
-        setEtaMap((prev) => ({
-          ...prev,
-          [file.id]: detail.eta,
-        }));
-
-        // 旧签名（number）保留兼容；新签名（detail）提供速率/剩余时间
-        uploadConfig.onUploadProgress?.(file, detail.progress);
-        uploadConfig.onUploadProgressDetail?.(file, detail);
-      },
-    });
-
-    const latest = (await engine.storage.getItem<UploadFile>(file.id)) ?? file;
-    const kind = classifyUploadResult(result);
-
-    if (kind.kind === "cancelled") {
-      // 取消语义：状态回 QUEUED 可重新入队（保留 fileRef 以便后续重传/续传）
-      latest.status = UploadStatus.QUEUED;
-      latest.errorMessage = undefined;
-      latest.awaitingReselect = false;
-      await engine.storage.setItem(file.id, latest);
-      scheduleRefresh();
-      return false;
-    }
-
-    if (kind.kind === "paused") {
-      // T3.3：分片边界暂停，状态置 PAUSED；保留 fileRef 以便续传，
-      // 记录已上传分片索引（pausedChunks）供 UI 展示。
-      latest.status = UploadStatus.PAUSED;
-      latest.progress =
-        engine.store.getState().progressMap[file.id] ?? latest.progress ?? 0;
-      latest.errorMessage = undefined;
-      latest.awaitingReselect = false;
-      if (typeof kind.pausedChunks === "number" && kind.pausedChunks > 0) {
-        latest.pausedChunks = Array.from(
-          { length: kind.pausedChunks },
-          (_, k) => k
-        );
+  const processFileUpload = useCallback(
+    async (file: UploadFile, signal?: AbortSignal): Promise<boolean> => {
+      if (signal?.aborted) {
+        return false;
       }
+
+      // T3.1：文件字节不再驻留 IndexedDB，改由主线程 fileRegistry 持有运行时引用。
+      // 页面刷新后注册表清空 → 需用户重新选择同一文件方可续传（服务端分片检查决定跳过范围）。
+      const fileRef = engine.fileRegistry.getFileRef(file.id);
+      if (!fileRef) {
+        file.status = UploadStatus.ERROR;
+        file.progress = 0;
+        file.errorMessage = "文件引用已失效，请重新选择该文件以继续上传";
+        file.awaitingReselect = true;
+        await engine.storage.setItem(file.id, file);
+        syncFile(file);
+        return false;
+      }
+
+      file.status = UploadStatus.UPLOADING;
+      await engine.storage.setItem(file.id, file);
+      syncFile(file);
+
+      const result = await engine.workerPool.runUploadTask({
+        file,
+        fileRef,
+        signal,
+        networkParams: {
+          networkType,
+          fileConcurrency,
+          chunkConcurrency,
+          chunkSize,
+          maxRetries,
+        },
+        uploadConfig: {
+          baseURL: uploadConfig.baseURL,
+          uploadApi: uploadConfig.uploadApi,
+          checkApi: uploadConfig.checkApi,
+          mergeApi: uploadConfig.mergeApi,
+          authHeaders: await resolveAuthHeaders(uploadConfig),
+          withCredentials: uploadConfig.withCredentials,
+          debug: uploadConfig.debug,
+          hashMode: uploadConfig.hashMode,
+        },
+        onProgress: (detail) => {
+          // VU-40：三张 map 一次原子更新，订阅者只收到 1 次通知。
+          setProgressDetail(file.id, {
+            progress: detail.progress,
+            speed: detail.speed,
+            eta: detail.eta,
+          });
+
+          // 旧签名（number）保留兼容；新签名（detail）提供速率/剩余时间
+          uploadConfig.onUploadProgress?.(file, detail.progress);
+          uploadConfig.onUploadProgressDetail?.(file, detail);
+        },
+      });
+
+      const latest = (await engine.storage.getItem<UploadFile>(file.id)) ?? file;
+      const kind = classifyUploadResult(result);
+
+      if (kind.kind === "cancelled") {
+        // 取消语义：状态回 QUEUED 可重新入队（保留 fileRef 以便后续重传/续传）
+        latest.status = UploadStatus.QUEUED;
+        latest.errorMessage = undefined;
+        latest.awaitingReselect = false;
+        await engine.storage.setItem(file.id, latest);
+        syncFile(latest);
+        return false;
+      }
+
+      if (kind.kind === "paused") {
+        // T3.3：分片边界暂停，状态置 PAUSED；保留 fileRef 以便续传，
+        // 记录已上传分片索引（pausedChunks）供 UI 展示。
+        latest.status = UploadStatus.PAUSED;
+        latest.progress =
+          engine.store.getState().progressMap[file.id] ?? latest.progress ?? 0;
+        latest.errorMessage = undefined;
+        latest.awaitingReselect = false;
+        if (typeof kind.pausedChunks === "number" && kind.pausedChunks > 0) {
+          latest.pausedChunks = Array.from(
+            { length: kind.pausedChunks },
+            (_, k) => k
+          );
+        }
+        await engine.storage.setItem(file.id, latest);
+        syncFile(latest);
+        return false;
+      }
+
+      if (isUploadSuccessKind(kind)) {
+        latest.status = kind.skipped ? UploadStatus.INSTANT : UploadStatus.DONE;
+        latest.progress = 100;
+        latest.errorMessage = undefined;
+        // 上传完成：释放文件引用，避免 File 句柄长期驻留
+        engine.fileRegistry.releaseFileRef(file.id);
+
+        await engine.storage.setItem(file.id, latest);
+        syncFile(latest);
+
+        uploadConfig.onUploadComplete?.(latest, true);
+        await cleanupPolicy.addCompletedFile(file.id);
+        return true;
+      }
+
+      // 失败分支
+      latest.status = UploadStatus.ERROR;
+      latest.errorMessage = kind.message;
       await engine.storage.setItem(file.id, latest);
-      scheduleRefresh();
+      syncFile(latest);
+
+      uploadConfig.onUploadError?.(latest, kind.message);
       return false;
-    }
+    },
+    [
+      engine,
+      syncFile,
+      networkType,
+      fileConcurrency,
+      chunkConcurrency,
+      chunkSize,
+      maxRetries,
+      setProgressDetail,
+      uploadConfig,
+      cleanupPolicy,
+    ]
+  );
 
-    if (isUploadSuccessKind(kind)) {
-      latest.status = kind.skipped ? UploadStatus.INSTANT : UploadStatus.DONE;
-      latest.progress = 100;
-      latest.errorMessage = undefined;
-      // 上传完成：释放文件引用，避免 File 句柄长期驻留
-      engine.fileRegistry.releaseFileRef(file.id);
+  const finalizeBatch = useCallback(
+    async (
+      summary: { successCount: number; failedCount: number },
+      total: number
+    ) => {
+      setIsUploading(false);
+      await flushRefresh();
 
-      await engine.storage.setItem(file.id, latest);
-      scheduleRefresh();
+      setBatchInfo((prev) =>
+        applyFinalized(prev, summary, total, {
+          autoCleanup: uploadConfig.autoCleanup,
+          cleanupDelay: uploadConfig.cleanupDelay,
+        })
+      );
 
-      uploadConfig.onUploadComplete?.(latest, true);
-      await cleanupPolicy.addCompletedFile(file.id);
-      return true;
-    }
+      uploadConfig.onBatchComplete?.({
+        success: summary.successCount,
+        failed: summary.failedCount,
+        total,
+      });
 
-    // 失败分支
-    latest.status = UploadStatus.ERROR;
-    latest.errorMessage = kind.message;
-    await engine.storage.setItem(file.id, latest);
-    scheduleRefresh();
+      if (uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
+        cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
+      }
+    },
+    [setIsUploading, flushRefresh, setBatchInfo, uploadConfig, cleanupPolicy]
+  );
 
-    uploadConfig.onUploadError?.(latest, kind.message);
-    return false;
-  };
-
-  const finalizeBatch = async (
-    summary: { successCount: number; failedCount: number },
-    total: number
-  ) => {
-    setIsUploading(false);
-    await flushRefresh();
-
-    setBatchInfo((prev) =>
-      applyFinalized(prev, summary, total, {
-        autoCleanup: uploadConfig.autoCleanup,
-        cleanupDelay: uploadConfig.cleanupDelay,
-      })
-    );
-
-    uploadConfig.onBatchComplete?.({
-      success: summary.successCount,
-      failed: summary.failedCount,
-      total,
-    });
-
-    if (uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
-      cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
-    }
-  };
-
-  const uploadAll = async (): Promise<boolean> => {
+  const uploadAll = useCallback(async (): Promise<boolean> => {
     if (isNetworkOffline) {
-      messageApi.error("网络已断开，无法上传文件");
+      getMessageApi().error("网络已断开，无法上传文件");
       return false;
     }
 
@@ -246,7 +255,7 @@ export function useBatchUploader(): BatchUploaderActions {
     const uploadableFiles = allFiles.filter((file) => isUploadableStatus(file.status));
 
     if (uploadableFiles.length === 0) {
-      messageApi.info("没有需要上传的文件");
+      getMessageApi().info("没有需要上传的文件");
       setIsUploading(false);
       return false;
     }
@@ -271,18 +280,18 @@ export function useBatchUploader(): BatchUploaderActions {
           file.status = UploadStatus.PREPARING_UPLOAD;
           file.progress = 0;
           await engine.storage.setItem(file.id, file);
-          scheduleRefresh();
+          syncFile(file);
 
           setBatchInfo(applyBeforeEach);
         },
         task: (file) => processFileUpload(file, batchController.signal),
-        onSettled: async ({ success }) => {
+        onSettled: async ({ item, success }) => {
           if (batchController.signal.aborted) {
             return;
           }
 
           setBatchInfo((prev) => applySettled(prev, success));
-          scheduleRefresh();
+          syncFile(item);
         },
       });
 
@@ -295,13 +304,26 @@ export function useBatchUploader(): BatchUploaderActions {
     } finally {
       endBatchSession(batchController);
     }
-  };
+  }, [
+    isNetworkOffline,
+    getMessageApi,
+    engine,
+    beginBatchSession,
+    endBatchSession,
+    setIsUploading,
+    uploadConfig,
+    fileConcurrency,
+    processFileUpload,
+    syncFile,
+    setBatchInfo,
+    finalizeBatch,
+  ]);
 
-  const cancelUpload = () => {
+  const cancelUpload = useCallback(() => {
     const activeController = activeUploadAbortRef.current;
     if (activeController && !activeController.signal.aborted) {
       activeController.abort();
-      messageApi.info("已取消当前上传任务");
+      getMessageApi().info("已取消当前上传任务");
     }
 
     // P1-8：abort 只会让主线程 Promise 落败，Worker 内在途 fetch 需显式
@@ -334,111 +356,129 @@ export function useBatchUploader(): BatchUploaderActions {
 
     setIsUploading(false);
     setBatchInfo(null);
-  };
+  }, [
+    activeUploadAbortRef,
+    getMessageApi,
+    engine,
+    setIsUploading,
+    setBatchInfo,
+  ]);
 
-  const pauseUploadFile = async (file: UploadFile) => {
-    if (file.status !== UploadStatus.UPLOADING) {
-      return;
-    }
-    // 乐观更新：立即在内存与持久化中置 PAUSED，并通知 Worker 分片边界暂停
-    engine.store.getState().patchFile(file.id, {
-      status: UploadStatus.PAUSED,
-      errorMessage: undefined,
-    });
-    await engine.storage.setItem(file.id, {
-      ...file,
-      status: UploadStatus.PAUSED,
-      errorMessage: undefined,
-    });
-    scheduleRefresh();
-    engine.workerPool.pauseUploadTask(file.id);
-  };
-
-  const resumeUploadFile = async (file: UploadFile) => {
-    if (file.status !== UploadStatus.PAUSED) {
-      return;
-    }
-    // 优先解除 Worker 内挂起（会话内暂停：不重传，从断点续传）
-    const alive = engine.workerPool.resumeUploadTask(file.id);
-    if (alive) {
+  const pauseUploadFile = useCallback(
+    async (file: UploadFile) => {
+      if (file.status !== UploadStatus.UPLOADING) {
+        return;
+      }
+      // 乐观更新：立即在内存与持久化中置 PAUSED，并通知 Worker 分片边界暂停
       engine.store.getState().patchFile(file.id, {
-        status: UploadStatus.UPLOADING,
+        status: UploadStatus.PAUSED,
         errorMessage: undefined,
       });
       await engine.storage.setItem(file.id, {
         ...file,
-        status: UploadStatus.UPLOADING,
+        status: UploadStatus.PAUSED,
         errorMessage: undefined,
       });
-      scheduleRefresh();
-      return;
-    }
+      // VU-18：上面的 patchFile 已即时同步 UI，无需再排队一次全量 IDB 读。
+      engine.workerPool.pauseUploadTask(file.id);
+    },
+    [engine]
+  );
 
-    // Worker 已释放（刷新/卸载后）：重新发起上传，服务端分片校验保证字节级续传
-    const fileRef = engine.fileRegistry.getFileRef(file.id);
-    if (!fileRef) {
-      engine.store.getState().patchFile(file.id, {
-        status: UploadStatus.ERROR,
-        errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
-        awaitingReselect: true,
-      });
-      await engine.storage.setItem(file.id, {
-        ...file,
-        status: UploadStatus.ERROR,
-        errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
-        awaitingReselect: true,
-      });
-      scheduleRefresh();
-      messageApi.warning("请重新选择文件以继续上传");
-      return;
-    }
-    // 复用上传链路：服务端 instant 校验已传分片并跳过，字节级续传
-    void processFileUpload(
-      { ...file, status: UploadStatus.UPLOADING, progress: file.progress ?? 0 },
-      undefined
-    );
-  };
-
-  const clearBatchInfo = () => {
-    setBatchInfo(null);
-  };
-
-  const retryUploadFile = async (
-    file: UploadFile
-  ): Promise<{ success: boolean; message: string }> => {
-    if (isNetworkOffline) {
-      return {
-        success: false,
-        message: "网络已断开，无法重试上传",
-      };
-    }
-
-    file.status = UploadStatus.PREPARING_UPLOAD;
-    file.progress = 0;
-    file.errorMessage = undefined;
-    await engine.storage.setItem(file.id, file);
-
-    try {
-      const success = await processFileUpload(file);
-      await flushRefresh();
-
-      if (success && uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
-        cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
+  const resumeUploadFile = useCallback(
+    async (file: UploadFile) => {
+      if (file.status !== UploadStatus.PAUSED) {
+        return;
+      }
+      // 优先解除 Worker 内挂起（会话内暂停：不重传，从断点续传）
+      const alive = engine.workerPool.resumeUploadTask(file.id);
+      if (alive) {
+        engine.store.getState().patchFile(file.id, {
+          status: UploadStatus.UPLOADING,
+          errorMessage: undefined,
+        });
+        await engine.storage.setItem(file.id, {
+          ...file,
+          status: UploadStatus.UPLOADING,
+          errorMessage: undefined,
+        });
+        return;
       }
 
-      return {
-        success,
-        message: success ? "重试上传成功" : "重试上传失败",
-      };
-    } catch {
-      return {
-        success: false,
-        message: "重试上传时发生错误",
-      };
-    }
-  };
+      // Worker 已释放（刷新/卸载后）：重新发起上传，服务端分片校验保证字节级续传
+      const fileRef = engine.fileRegistry.getFileRef(file.id);
+      if (!fileRef) {
+        engine.store.getState().patchFile(file.id, {
+          status: UploadStatus.ERROR,
+          errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
+          awaitingReselect: true,
+        });
+        await engine.storage.setItem(file.id, {
+          ...file,
+          status: UploadStatus.ERROR,
+          errorMessage: "文件引用已失效，请重新选择该文件以继续上传",
+          awaitingReselect: true,
+        });
+        getMessageApi().warning("请重新选择文件以继续上传");
+        return;
+      }
+      // 复用上传链路：服务端 instant 校验已传分片并跳过，字节级续传
+      void processFileUpload(
+        { ...file, status: UploadStatus.UPLOADING, progress: file.progress ?? 0 },
+        undefined
+      );
+    },
+    [engine, getMessageApi, processFileUpload]
+  );
 
-  const retryAllFailedFiles = async (): Promise<RetrySummary> => {
+  const clearBatchInfo = useCallback(() => {
+    setBatchInfo(null);
+  }, [setBatchInfo]);
+
+  const retryUploadFile = useCallback(
+    async (file: UploadFile): Promise<{ success: boolean; message: string }> => {
+      if (isNetworkOffline) {
+        return {
+          success: false,
+          message: "网络已断开，无法重试上传",
+        };
+      }
+
+      file.status = UploadStatus.PREPARING_UPLOAD;
+      file.progress = 0;
+      file.errorMessage = undefined;
+      await engine.storage.setItem(file.id, file);
+
+      try {
+        const success = await processFileUpload(file);
+        await flushRefresh();
+
+        if (success && uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
+          cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
+        }
+
+        return {
+          success,
+          message: success ? "重试上传成功" : "重试上传失败",
+        };
+      } catch {
+        return {
+          success: false,
+          message: "重试上传时发生错误",
+        };
+      }
+    },
+    [
+      isNetworkOffline,
+      engine,
+      processFileUpload,
+      flushRefresh,
+      uploadConfig,
+      cleanupPolicy,
+    ]
+  );
+
+  const retryAllFailedFiles = useCallback(async (): Promise<RetrySummary> => {
     if (isNetworkOffline) {
       return {
         success: false,
@@ -507,21 +547,49 @@ export function useBatchUploader(): BatchUploaderActions {
     } finally {
       endBatchSession(batchController);
     }
-  };
+  }, [
+    isNetworkOffline,
+    engine,
+    fileConcurrency,
+    beginBatchSession,
+    endBatchSession,
+    setIsUploading,
+    setBatchInfo,
+    processFileUpload,
+    finalizeBatch,
+  ]);
 
-  const forceCleanupUI = async () => {
+  const forceCleanupUI = useCallback(async () => {
     await cleanupPolicy.forceCleanupUI();
-  };
+  }, [cleanupPolicy]);
 
-  return {
-    uploadAll,
-    cancelUpload,
-    clearBatchInfo,
-    pauseUploadFile,
-    resumeUploadFile,
-    retryUploadFile,
-    retryAllFailedFiles,
-    forceCleanupUI,
-    pendingCleanupCount: () => cleanupPolicy.pendingCount(),
-  };
+  const pendingCleanupCount = useCallback(
+    () => cleanupPolicy.pendingCount(),
+    [cleanupPolicy]
+  );
+
+  return useMemo(
+    () => ({
+      uploadAll,
+      cancelUpload,
+      clearBatchInfo,
+      pauseUploadFile,
+      resumeUploadFile,
+      retryUploadFile,
+      retryAllFailedFiles,
+      forceCleanupUI,
+      pendingCleanupCount,
+    }),
+    [
+      uploadAll,
+      cancelUpload,
+      clearBatchInfo,
+      pauseUploadFile,
+      resumeUploadFile,
+      retryUploadFile,
+      retryAllFailedFiles,
+      forceCleanupUI,
+      pendingCleanupCount,
+    ]
+  );
 }

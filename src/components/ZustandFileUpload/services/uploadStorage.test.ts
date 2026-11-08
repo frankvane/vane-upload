@@ -21,6 +21,7 @@ const {
   listUploadFiles,
   removeUploadFilesByIds,
   recoverInterruptedUploadFiles,
+  recoverUploadQueueOnMount,
 } = await import("./uploadStorage");
 
 // T3.2：uploadStorage 服务改为接收显式 storage / fileRegistry 参数，
@@ -68,8 +69,8 @@ const createFile = (
 describe("uploadStorage（T2.8 补齐）", () => {
   beforeEach(() => {
     iterateMock.mockReset();
-    removeItemMock.mockClear();
-    setItemMock.mockClear();
+    removeItemMock.mockReset();
+    setItemMock.mockReset();
   });
 
   it("isUploadableStatus 覆盖全部分支（T3.3 状态机收敛后 PAUSED 需显式继续）", () => {
@@ -171,5 +172,69 @@ describe("uploadStorage（T2.8 补齐）", () => {
       missingFileRefCount: 0,
     });
     expect(setItemMock).not.toHaveBeenCalled();
+  });
+
+  describe("recoverUploadQueueOnMount（VU-39 单次快照恢复）", () => {
+    it("一次 iterate 同时完成中断恢复与历史 QUEUED 治理，返回最终有序快照", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("i1", UploadStatus.UPLOADING, { createdAt: 1 }), "i1");
+        callback(createFile("q1", UploadStatus.QUEUED, { createdAt: 2 }), "q1");
+        callback(createFile("d1", UploadStatus.DONE, { createdAt: 3 }), "d1");
+      });
+
+      const snapshot = await recoverUploadQueueOnMount(fakeStorage);
+
+      // 旧链路是「恢复读 + 治理读 + refreshFiles 读」共 3 次全表遍历。
+      expect(iterateMock).toHaveBeenCalledTimes(1);
+      expect(snapshot.files.map((file) => file.id)).toEqual(["i1", "q1", "d1"]);
+      // 缺 fileRef 的中断任务 → ERROR（保留缺缓存提示）
+      expect(snapshot.files[0]?.status).toBe(UploadStatus.ERROR);
+      expect(snapshot.files[0]?.errorMessage).toContain("上传中断");
+      // 历史 QUEUED 行 → awaitingReselect 的 ERROR
+      expect(snapshot.files[1]?.status).toBe(UploadStatus.ERROR);
+      expect(snapshot.files[1]?.awaitingReselect).toBe(true);
+      // 已完成文件完全不动
+      expect(snapshot.files[2]?.status).toBe(UploadStatus.DONE);
+      expect(snapshot.summary).toEqual({
+        totalInterrupted: 1,
+        recoveredCount: 0,
+        missingFileRefCount: 1,
+      });
+      // 只写发生变化的 2 条，且每条只写最终态一次
+      expect(snapshot.writeCount).toBe(2);
+      expect(setItemMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("写入并发发起，而不是逐个串行 await", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("a", UploadStatus.UPLOADING), "a");
+        callback(createFile("b", UploadStatus.QUEUED), "b");
+      });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      setItemMock.mockImplementation(async () => gate);
+
+      const pending = recoverUploadQueueOnMount(fakeStorage);
+      // gate 尚未 resolve 时两条写入都已发起 → 证明是 Promise.all 而非串行
+      await vi.waitFor(() => expect(setItemMock).toHaveBeenCalledTimes(2));
+
+      release();
+      await pending;
+      expect(iterateMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("没有需要恢复 / 治理的记录时零写入，快照仍可直接采用", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("done", UploadStatus.DONE), "done");
+      });
+
+      const snapshot = await recoverUploadQueueOnMount(fakeStorage);
+      expect(snapshot.writeCount).toBe(0);
+      expect(setItemMock).not.toHaveBeenCalled();
+      expect(snapshot.files.map((file) => file.id)).toEqual(["done"]);
+    });
   });
 });

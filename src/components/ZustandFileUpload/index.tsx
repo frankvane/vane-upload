@@ -1,10 +1,5 @@
-﻿import {
-  BatchInfoDisplay,
-  FileTable,
-  FileUploadActions,
-  StorageStatsDrawer,
-} from "./components";
-import React, { useEffect, useMemo, useRef } from "react";
+﻿import { BatchInfoDisplay, FileUploadActions } from "./components";
+import React, { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import {
   useBatchUploader,
   useFileOperations,
@@ -12,17 +7,21 @@ import {
   useNetworkDetection,
 } from "./hooks";
 
-import {
-  recoverInterruptedUploadFiles,
-} from "./services/uploadStorage";
-import { loadAllUploadFiles } from "./services/uploadOrchestrator";
+import { recoverUploadQueueOnMount } from "./services/uploadStorage";
 import { useUploadStore } from "./store/upload";
 import { useUploadEngine } from "./context/UploadEngineContext";
 import { UploadProvider } from "./context/UploadContext";
 import { useUploadContext } from "./context/useUploadContext";
-import { UploadStatus, ZustandFileUploadProps } from "./types/upload";
+import { ZustandFileUploadProps } from "./types/upload";
 import { useShallow } from "zustand/react/shallow";
-import { ErrorBoundary } from "../../ui";
+import { ErrorBoundary } from "../../ui/ErrorBoundary";
+
+// VU-64：重组件按路由/功能拆包，首屏主 JS 不再含 Table / 存储统计抽屉逻辑。
+// 二者均为默认导出，可直接 React.lazy；用法处各包一层 <Suspense> 提供降级。
+const LazyFileTable = lazy(() => import("./components/FileTable"));
+const LazyStorageStatsDrawer = lazy(() =>
+  import("./components/StorageStatsDrawer")
+);
 
 const ZustandFileUploadCore: React.FC = () => {
   const { refreshFiles, initSettings, setConfig } = useUploadStore(
@@ -34,18 +33,21 @@ const ZustandFileUploadCore: React.FC = () => {
   );
   const engine = useUploadEngine();
   const batchUploader = useBatchUploader();
+  // VU-42：uploadAll 身份已稳定，渲染期直接同步到 ref 即可；不再挂一个
+  // 「依赖恒变、每次渲染都执行」的 useEffect（原 VU-42 主症状）。
+  // VU-42：uploadAll 身份已稳定。VU-64：ref 镜像改在 effect 内更新
+  // （render 期写 ref 会触发 react-hooks/refs）；本 effect 注册在恢复 effect 之前，
+  // 故异步恢复读取时 ref 已是最新。
   const uploadAllRef = useRef(batchUploader.uploadAll);
+  useEffect(() => {
+    uploadAllRef.current = batchUploader.uploadAll;
+  });
   const fileOperations = useFileOperations(batchUploader);
   const { handleFileChange } = useFileProcessor({
     uploadAll: batchUploader.uploadAll,
   });
 
   const uploadConfig = useUploadContext();
-  const allowedFileTypesKey = uploadConfig.allowedFileTypes.join("|");
-  const normalizedAllowedFileTypes = useMemo(
-    () => (allowedFileTypesKey ? allowedFileTypesKey.split("|") : []),
-    [allowedFileTypesKey]
-  );
   const inputRef = useRef<HTMLInputElement>(null);
   const hasRecoveredOnceRef = useRef(false);
 
@@ -63,7 +65,9 @@ const ZustandFileUploadCore: React.FC = () => {
       maxRetries: uploadConfig.maxRetries,
       hashMode: uploadConfig.hashMode,
       maxFileSize: uploadConfig.maxFileSize,
-      allowedFileTypes: normalizedAllowedFileTypes,
+      // VU-51：UploadContext 已把数组按内容签名规范化成稳定引用，
+      // 这里不再做 join("|") → split("|") 的无意义往返。
+      allowedFileTypes: uploadConfig.allowedFileTypes,
       maxFiles: uploadConfig.maxFiles,
       debug: uploadConfig.debug,
     });
@@ -79,14 +83,10 @@ const ZustandFileUploadCore: React.FC = () => {
     uploadConfig.maxRetries,
     uploadConfig.hashMode,
     uploadConfig.maxFileSize,
-    normalizedAllowedFileTypes,
+    uploadConfig.allowedFileTypes,
     uploadConfig.maxFiles,
     uploadConfig.debug,
   ]);
-
-  useEffect(() => {
-    uploadAllRef.current = batchUploader.uploadAll;
-  }, [batchUploader.uploadAll]);
 
   useEffect(() => {
     initSettings({
@@ -105,29 +105,18 @@ const ZustandFileUploadCore: React.FC = () => {
     let disposed = false;
 
     const recoverInterruptedUploads = async () => {
-      const recovery = await recoverInterruptedUploadFiles(engine.storage);
-
-      // 历史 QUEUED 行治理：QUEUED 不在 interruptedUploadStatuses 内，
-      // 恢复逻辑不会触碰；而页面刷新后运行时 File 引用（fileRef）必然丢失，
-      // 这类行永远无法自动上传，会一直卡在「排队中」且没有重试入口。
-      // 挂载时统一转为 awaitingReselect 的 ERROR 行，给出明确指引。
-      const staleQueuedFiles = (await loadAllUploadFiles(engine.storage)).filter(
-        (file) =>
-          file.status === UploadStatus.QUEUED ||
-          file.status === UploadStatus.QUEUED_FOR_UPLOAD
+      // VU-39：一次 IDB 快照内完成「中断恢复」+「历史 QUEUED 治理」，
+      // 内部把彼此独立的写入用 Promise.all 并发落库，并返回最终有序快照。
+      // 旧链路的 3 次 iterate（恢复读 / 治理读 / refreshFiles 读）收敛为 1 次。
+      const { files, summary: recovery } = await recoverUploadQueueOnMount(
+        engine.storage
       );
-      for (const stale of staleQueuedFiles) {
-        await engine.storage.setItem(stale.id, {
-          ...stale,
-          status: UploadStatus.ERROR,
-          progress: 0,
-          errorMessage: "页面已刷新，请重新选择文件后上传",
-          awaitingReselect: true,
-        });
-      }
+      if (disposed) return;
 
-      await refreshFiles();
+      // 用已知快照刷新 store：不再为了「确认自己刚写进去的内容」再读一遍全表。
+      await refreshFiles(files);
 
+      // 同步判断已在唯一的异步 IO 之后立即执行，其后只剩纯内存的消息派发。
       if (disposed || recovery.totalInterrupted === 0) {
         return;
       }
@@ -173,9 +162,9 @@ const ZustandFileUploadCore: React.FC = () => {
     uploadConfig.settingsSource,
   ]);
 
-  const triggerFileInput = () => {
+  const triggerFileInput = useCallback(() => {
     inputRef.current?.click();
-  };
+  }, []);
 
   return (
     <div>
@@ -195,12 +184,18 @@ const ZustandFileUploadCore: React.FC = () => {
       {uploadConfig.uiMode !== "simple" && (
         <BatchInfoDisplay batchUploader={batchUploader} />
       )}
-      <FileTable
-        fileOperations={fileOperations}
-        pauseUploadFile={batchUploader.pauseUploadFile}
-        resumeUploadFile={batchUploader.resumeUploadFile}
-      />
-      {uploadConfig.uiMode !== "simple" && <StorageStatsDrawer />}
+      <Suspense fallback={null}>
+        <LazyFileTable
+          fileOperations={fileOperations}
+          pauseUploadFile={batchUploader.pauseUploadFile}
+          resumeUploadFile={batchUploader.resumeUploadFile}
+        />
+      </Suspense>
+      {uploadConfig.uiMode !== "simple" && (
+        <Suspense fallback={null}>
+          <LazyStorageStatsDrawer />
+        </Suspense>
+      )}
     </div>
   );
 };

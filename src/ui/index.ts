@@ -1,15 +1,12 @@
 /**
- * rui-ui —— 组件库内置极简 UI 套件（替代 antd）。
+ * rui-ui —— 组件库内置极简 UI 套件（替代 antd）的**对外公共 API**。
  *
- * 导出面与调用点对齐：精减模式下不提供 antd 全量组件，
- * 只保留 src 实际使用的 19 类组件 + 19 个图标。
+ * VU-46：本文件不再带任何 CSS 副作用，也不再用 `export *`。
+ * 库内部组件一律从具体模块具名导入（例如 `./primitives`、`./table`），
+ * 避免任何一处 `import { X } from "../../../ui"` 就把 primitives /
+ * feedback / table / icons 全量拖进产物。样式由两个入口各引入一次：
+ * 应用入口 `src/main.tsx` 与库入口 `src/index.ts`。
  */
-
-// 样式随组件走：任何模块引入本目录组件都会带上 ui.css。
-// （此前仅由 src/index.ts 引入，导致 demo/dev 直接引组件时整页裸奔——
-//  rui-* 类全部无样式、空态 SVG 撑满容器。lib 构建下同一文件去重，
-//  仍只产出一份 dist/style.css，不影响消费方。）
-import "./ui.css";
 
 export { Button } from "./primitives";
 export type { ButtonProps } from "./primitives";
@@ -63,5 +60,23 @@ export type { MessageInstance, MessageType } from "./message";
 export { ErrorBoundary } from "./ErrorBoundary";
 export type { ErrorBoundaryProps } from "./ErrorBoundary";
 
-export * from "./icons";
-export type { IconProps } from "./icons";
+// 显式具名导出（不再 `export *`），让消费方打包器能精确 tree-shake 单个图标。
+export {
+  BarChartOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  DeleteOutlined,
+  ExportOutlined,
+  InfoCircleOutlined,
+  LockOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  SettingOutlined,
+  SwapOutlined,
+  UnlockOutlined,
+  UploadOutlined,
+  WarningOutlined,
+} from "./icons";
+export type { IconProps, IconName } from "./icons";

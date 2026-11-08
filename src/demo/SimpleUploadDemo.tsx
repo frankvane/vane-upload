@@ -2,6 +2,9 @@ import React from "react";
 import ZustandFileUpload from "../components/ZustandFileUpload";
 import { API_BASE_URL, API_PATHS } from "../config/api";
 
+/** VU-45：稳定引用，避免内联数组击穿下游配置的 useMemo。 */
+const ALLOWED_FILE_TYPES: string[] = [];
+
 /**
  * demo 专用：纯属性演示上传组件的精简外观。
  * `uiMode="simple"` 负责裁剪表格/工具栏，`settingsSource="props"` 让网络参数
@@ -17,7 +20,7 @@ const SimpleUploadDemo: React.FC = () => (
     chunkConcurrency={2}
     maxRetries={3}
     maxFileSize={100 * 1024 * 1024}
-    allowedFileTypes={[]}
+    allowedFileTypes={ALLOWED_FILE_TYPES}
     maxFiles={10}
     autoUpload={true}
     autoCleanup={true}

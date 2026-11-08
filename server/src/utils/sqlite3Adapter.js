@@ -1,5 +1,10 @@
 const BetterSqlite3 = require("better-sqlite3");
 
+// 注意：这三个常量并非「零引用死代码」。Sequelize 的 sqlite
+// connection-manager 通过 dialectModule 隐式读取它们：
+//   `defaultReadWriteMode = lib.OPEN_READWRITE | lib.OPEN_CREATE`
+// 一旦删除，mode 会变成 0，fileMustExist 被误置为 true，
+// 新建数据库文件直接报 "unable to open database file"。
 const OPEN_READONLY = 1;
 const OPEN_READWRITE = 2;
 const OPEN_CREATE = 4;
@@ -21,37 +26,22 @@ const applyStatement = (statement, method, values) => {
     return statement[method](...values);
   }
   if (typeof values === "object") {
-    try {
-      return statement[method](values);
-    } catch (firstError) {
-      const keys = Object.keys(values);
-      if (keys.length > 0) {
-        const named = {};
-        for (const key of keys) {
-          const normalized = key.replace(/^\$/, "");
-          if (/^\d+$/.test(normalized)) {
-            named[`$${normalized}`] = values[key];
-          } else {
-            named[key] = values[key];
-          }
-        }
-
-        try {
-          return statement[method](named);
-        } catch {
-          const sortedNumericKeys = keys
-            .map((key) => key.replace(/^\$/, ""))
-            .filter((key) => /^\d+$/.test(key))
-            .sort((a, b) => Number(a) - Number(b));
-
-          if (sortedNumericKeys.length > 0) {
-            const orderedValues = sortedNumericKeys.map((key) => values[key] ?? values[`$${key}`]);
-            return statement[method](...orderedValues);
-          }
-        }
+    // VU-13 精准修复：命名参数只做「一次规范化 + 一次执行」。
+    // 原实现会在首次失败时，用多种策略（保留前缀 / 数字 key 位置展开）反复猜测，
+    // 既会吞掉真实 SQL 错误（如 no such column），又可能把命名参数错误绑定到
+    // 不正确的位置（产生错误结果而非报错）。这里保留原前缀（Sequelize 可能用
+    // :name / @name / $name），仅对纯数字 key 补 $ 前缀以兼容位置占位符的退化
+    // 对象传参，然后执行一次；失败立即抛出真实错误，不再回退。
+    const named = {};
+    for (const key of Object.keys(values)) {
+      const normalized = key.replace(/^\$/, "");
+      if (/^\d+$/.test(normalized)) {
+        named[`$${normalized}`] = values[key];
+      } else {
+        named[key] = values[key];
       }
-      throw firstError;
     }
+    return statement[method](named);
   }
   return statement[method](values);
 };
@@ -146,6 +136,10 @@ class Database {
       try {
         rows = applyStatement(statement, "all", normalized.values);
       } catch (error) {
+        // Sequelize 的 better-sqlite3 适配器对 DDL（CREATE/DROP/PRAGMA 等）
+        // 也会走 all()，而这类语句不返回结果集。此回退是兼容层，不可移除，
+        // 否则 dropTable/close 等操作会因 "does not return data" 失败。
+        // 注意：VU-13 的真正问题在 applyStatement 的「参数绑定」回退，不在此处。
         if (
           error &&
           typeof error.message === "string" &&

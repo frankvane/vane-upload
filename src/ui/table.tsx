@@ -15,11 +15,10 @@ export interface ColumnType<RecordType> {
   dataIndex?: string;
   key?: string;
   /**
-   * render 首参故意用 any：对齐 antd 的行为（按 dataIndex 推断具体类型），
-   * 业务侧直接写 (text: string) => ... 无需断言。
+   * render 首参类型用 unknown（调用点通过 record[dataIndex] 自行收窄），
+   * 既不引入 any，也让业务侧以 (value: unknown, record) => ... 形式接收。
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  render?: (value: any, record: RecordType, index: number) => React.ReactNode;
+  render?: (value: unknown, record: RecordType, index: number) => React.ReactNode;
   /** 超长省略（配合原生 title 悬停全显） */
   ellipsis?: boolean;
   align?: "left" | "center" | "right";
@@ -49,8 +48,11 @@ export interface TableProps<RecordType extends object> {
 /**
  * 单列表行：用 React.memo 包裹，使父级（FileList / FileTable）因无关状态
  * （切换 showXxx 开关、storageUsage 变化等）重渲染时，未变化的行跳过 Diff。
- * 依赖 props 均为原始类型或稳定引用：columns（父级 useMemo）、record（store
- * 中未变化的元素保持引用）、rowIndex、checked/disabled 布尔、onToggleOne（useCallback）。
+ *
+ * VU-41：FileTable 现在直接传 store 中的稳定文件引用（不再展开
+ * progress/speed/eta 生成新 record），且 columns 只在低频状态变化时重建，
+ * 因此默认的浅比较就能真正命中：一次进度更新只重渲染对应行的 ProgressCell。
+ * 这里不再加自定义比较器——columns 变化本来就要求行重新 render。
  */
 interface TableRowProps<RecordType> {
   record: RecordType;
@@ -73,8 +75,15 @@ function TableRowInner<RecordType extends object>({
   disabled,
   onToggleOne,
 }: TableRowProps<RecordType>) {
+  // VU-41：长列表跳过视口外行的布局与绘制，intrinsic size 避免滚动条抖动。
   return (
-    <tr className="rui-table-row">
+    <tr
+      className="rui-table-row"
+      style={{
+        contentVisibility: "auto",
+        containIntrinsicSize: "auto 48px",
+      }}
+    >
       {hasRowSelection && (
         <td>
           <input

@@ -69,7 +69,6 @@ const Title: React.FC<
   );
 };
 
-// eslint-disable-next-line react-refresh/only-export-components
 export const Typography = { Text, Paragraph, Title };
 
 /* ============================ Row / Col ============================ */

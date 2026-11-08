@@ -223,7 +223,11 @@ describe("UploadCleanupPolicy", () => {
     const done = createFile("f-reupload", UploadStatus.DONE);
     files.set(done.id, done);
     mockGetItem.mockImplementation(async (id: string) => files.get(id));
-    mockListUploadFiles.mockResolvedValue([done]);
+    // 真实 IndexedDB 的 iterate 会反映清理执行时刻的最新状态，
+    // 这里让 mock 跟随 files，而不是固定返回挂载时的旧快照。
+    mockListUploadFiles.mockImplementation(async () =>
+      Array.from(files.values())
+    );
 
     const policy = new UploadCleanupPolicy(options);
     await policy.cleanupUploadedFiles();
@@ -240,5 +244,48 @@ describe("UploadCleanupPolicy", () => {
     expect(files.get("f-reupload")?.status).toBe(UploadStatus.UPLOADING);
     // 已从待清理集合移除，下一轮倒计时不会再误删
     expect(policy.pendingCount()).toBe(0);
+  });
+
+  it("VU-50：单次清理只做 1 次全量读 / 1 次刷新，且刷新使用已知快照", async () => {
+    const { options, files } = createOptions();
+    const done = createFile("f-single", UploadStatus.DONE);
+    files.set(done.id, done);
+    mockGetItem.mockImplementation(async (id: string) => files.get(id));
+    mockListUploadFiles.mockImplementation(async () =>
+      Array.from(files.values())
+    );
+
+    const policy = new UploadCleanupPolicy(options);
+    await policy.addCompletedFile("f-single");
+    mockListUploadFiles.mockClear();
+
+    await policy.forceCleanupUI();
+
+    expect(mockListUploadFiles).toHaveBeenCalledTimes(1);
+    expect(mockRemoveItem).toHaveBeenCalledWith("f-single");
+    expect(options.refreshFiles).toHaveBeenCalledTimes(1);
+    // 快照已剔除被删除的记录，store 无需再 iterate 一次。
+    expect(options.refreshFiles).toHaveBeenCalledWith([]);
+  });
+
+  it("VU-50：dispose 后尾部 timer 不再写 store", async () => {
+    const { options, files } = createOptions();
+    const done = createFile("f-timer", UploadStatus.DONE);
+    files.set(done.id, done);
+    mockGetItem.mockImplementation(async (id: string) => files.get(id));
+    mockListUploadFiles.mockImplementation(async () =>
+      Array.from(files.values())
+    );
+
+    const policy = new UploadCleanupPolicy(options);
+    await policy.cleanupUploadedFiles();
+    // 倒计时归零 → executeCleanup 注册 1s 的 clearBatchInfo 尾部定时器
+    await vi.advanceTimersByTimeAsync(2000);
+
+    policy.dispose();
+    options.clearBatchInfo.mockClear();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(options.clearBatchInfo).not.toHaveBeenCalled();
   });
 });

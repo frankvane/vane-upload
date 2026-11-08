@@ -130,6 +130,11 @@ describe("uploadWorker CANCEL 协议（T2.3）", () => {
     );
     expect(uploadCallsAfter.length).toBe(1);
     expect(postedMessages.some((m) => m.type === "done")).toBe(false);
+    // VU-07：在途 fetch 的 AbortError 不得被上报成失败
+    expect(postedMessages.some((m) => m.type === "error")).toBe(false);
+    expect(
+      postedMessages.filter((m) => m.type === "cancelled").length
+    ).toBeGreaterThan(0);
   });
 
   it("CANCEL 后不再对同一任务发起任何新请求（重试短路）", async () => {
@@ -165,8 +170,16 @@ describe("uploadWorker CANCEL 协议（T2.3）", () => {
     await dispatch({ type: "cancel", fileId: "cancel-case-2" });
     const callsAtCancel = fetchMock.mock.calls.length;
 
-    // 等待足够久（覆盖多个重试间隔），不应有新请求
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    // 事件驱动等待取消协议生效（替代固定 120ms 等待，消除 flaky）
+    await vi.waitFor(
+      () => {
+        expect(
+          postedMessages.some((m) => m.type === "cancelled")
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 20 }
+    );
+    // 取消后不再发起新请求（在途请求已被 signal 中断，不会调度新分片）
     expect(fetchMock.mock.calls.length).toBe(callsAtCancel);
 
     await uploadPromise;

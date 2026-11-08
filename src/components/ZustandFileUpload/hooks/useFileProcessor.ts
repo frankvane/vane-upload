@@ -6,10 +6,11 @@ import { useUploadStore } from "../store/upload";
 import { ProcessingStats, UploadFile } from "../types/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { useShallow } from "zustand/react/shallow";
-// 用 Vite `?worker&inline` 把 worker 源码内联为 Blob，消费方无需再解析外部 worker 资产
-// （否则发布后 dev 下 `new URL('...', import.meta.url)` 指向的 .pnpm 深层路径会被 dev server
-// 当作 SPA fallback 返回 HTML，导致 worker 加载失败 → “文件预处理失败”）。
-import FilePrepareWorker from "../worker/filePrepareWorker.ts?worker&inline";
+import { compileAllowedTypes, isFileTypeAllowed } from "../../../shared/fileType";
+import { dedupeByContentKey } from "../services/uploadDedupe";
+// VU-25：应用构建下 worker 独立成 asset；库构建由 vite.lib.config.ts 统一重写为
+// `?worker&inline`，避免消费方 dev server 把 .pnpm 深层 worker 路径当 SPA fallback 返回 HTML。
+import FilePrepareWorker from "../worker/filePrepareWorker.ts?worker";
 
 interface WorkerProgressMessage {
   type: "progress";
@@ -19,6 +20,7 @@ interface WorkerProgressMessage {
   failed: number;
   oversized: number;
   fileDetails?: {
+    id: string;
     fileName: string;
     fileSize: number;
     fileType: string;
@@ -78,13 +80,21 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
   const messageApi = getMessageApi();
   const engine = useUploadEngine();
 
-  const fileStartTimesRef = useRef<Record<string, number>>({});
   const prepareWorkerRef = useRef<Worker | null>(null);
   // 预处理完成后的自动上传定时器：ref 持有，卸载时清理，避免离心上传
   const autoUploadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // VU-17：组件是否已卸载，卸载后跳过 setState / 提示，避免离心写 store
+  const disposedRef = useRef(false);
+  // VU-17：缓存预处理 Promise 的 settle 句柄，卸载时显式 reject，
+  // 否则 worker 被 terminate 后 Promise 永不 settle，loading 态卡死
+  const pendingPromiseRef = useRef<{
+    resolve: () => void;
+    reject: (reason?: unknown) => void;
+  } | null>(null);
 
   useEffect(() => {
     return () => {
+      disposedRef.current = true;
       if (autoUploadTimerRef.current !== null) {
         clearTimeout(autoUploadTimerRef.current);
         autoUploadTimerRef.current = null;
@@ -93,6 +103,12 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
       if (worker) {
         worker.terminate();
         prepareWorkerRef.current = null;
+      }
+      if (pendingPromiseRef.current) {
+        pendingPromiseRef.current.reject(
+          new DOMException("组件卸载，文件预处理中断", "AbortError")
+        );
+        pendingPromiseRef.current = null;
       }
     };
   }, []);
@@ -115,6 +131,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
       return { validFiles: [], errors };
     }
 
+    // VU-37：白名单一次编译（toLowerCase / 分类提出循环），循环内 O(1) 匹配。
+    const allowedTypes = compileAllowedTypes(uploadConfig.allowedFileTypes);
+
     files.forEach((file) => {
       if (file.size > uploadConfig.maxFileSize) {
         errors.push(
@@ -125,21 +144,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
         return;
       }
 
-      if (uploadConfig.allowedFileTypes.length > 0) {
-        const fileExtension = file.name.split(".").pop()?.toLowerCase();
-        const mimeType = file.type.toLowerCase();
-
-        const isAllowed = uploadConfig.allowedFileTypes.some((type: string) => {
-          if (type.startsWith(".")) {
-            return fileExtension === type.slice(1).toLowerCase();
-          }
-          return mimeType.includes(type.toLowerCase());
-        });
-
-        if (!isAllowed) {
-          errors.push(`文件 "${file.name}" 类型不被允许`);
-          return;
-        }
+      if (!isFileTypeAllowed(file, allowedTypes)) {
+        errors.push(`文件 "${file.name}" 类型不被允许`);
+        return;
       }
 
       if (uploadConfig.customFileValidator) {
@@ -179,15 +186,10 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
       return;
     }
 
-    fileStartTimesRef.current = {};
     setFileTimings({});
 
     setLoading(true);
     const startTime = Date.now();
-
-    validFiles.forEach((file) => {
-      fileStartTimesRef.current[file.name] = Date.now();
-    });
 
     const existingWorker = prepareWorkerRef.current;
     if (existingWorker) {
@@ -200,6 +202,7 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
     try {
       await new Promise<void>((resolve, reject) => {
+        pendingPromiseRef.current = { resolve, reject };
         worker.onerror = (event) => {
           reject(new Error(event.message || "文件预处理失败"));
         };
@@ -217,17 +220,14 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
                 oversized: data.oversized,
               });
 
-              if (data.fileDetails && data.fileDetails.fileName) {
-                const fileName = data.fileDetails.fileName;
-                const fileStartTime = fileStartTimesRef.current[fileName] || 0;
-                if (fileStartTime > 0) {
-                  const processingTime = Date.now() - fileStartTime;
-                  setFileTimings((prev: Record<string, number>) => ({
-                    ...prev,
-                    [fileName]: processingTime,
-                  }));
-                  delete fileStartTimesRef.current[fileName];
-                }
+              // VU-17：以 id（而非文件名）作计时键，避免同名文件互相覆盖
+              if (data.fileDetails && data.fileDetails.id) {
+                const fileId = data.fileDetails.id;
+                const processingTime = Date.now() - startTime;
+                setFileTimings((prev: Record<string, number>) => ({
+                  ...prev,
+                  [fileId]: processingTime,
+                }));
               }
               return;
             }
@@ -243,22 +243,34 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
             const cost = endTime - startTime;
             setCost(cost);
 
-            for (const file of data.uploadFiles) {
-              // T3.1：fileRef 仅入主线程注册表，剥离后再持久化，
-              // IndexedDB 中不再存放整文件数据（原 buffer 字段已移除）
-              const { fileRef, ...persistable } = file;
-              if (fileRef) {
-                engine.fileRegistry.registerFileRef(file.id, fileRef);
-              }
-              await engine.storage.setItem(file.id, persistable);
+            // VU-19：按内容指纹（hash+size+lastModified+fileName）去重，
+            // 同一物理文件重复选择只保留一条队列记录，不再生成多条。
+            const { newItems: newFiles, skipped } = dedupeByContentKey(
+              engine.store.getState().files,
+              data.uploadFiles
+            );
 
-              if (!fileStartTimesRef.current[file.fileName] && data.uploadFiles.length > 0) {
-                setFileTimings((prev: Record<string, number>) => ({
-                  ...prev,
-                  [file.fileName]: Math.round(cost / data.uploadFiles.length),
-                }));
+            if (newFiles.length === 0) {
+              if (skipped > 0) {
+                messageApi.info(`已跳过 ${skipped} 个已在队列中的文件`);
               }
+              resolve();
+              return;
             }
+
+            // VU-43：N 条彼此独立的 IDB 写入并发执行，不再逐个串行 await。
+            // fileRef 注册是同步内存操作，放在同一批任务里保证顺序无关。
+            await Promise.all(
+              newFiles.map(async (file) => {
+                // T3.1：fileRef 仅入主线程注册表，剥离后再持久化，
+                // IndexedDB 中不再存放整文件数据（原 buffer 字段已移除）
+                const { fileRef, ...persistable } = file;
+                if (fileRef) {
+                  engine.fileRegistry.registerFileRef(file.id, fileRef);
+                }
+                await engine.storage.setItem(file.id, persistable);
+              })
+            );
 
             await refreshFiles();
 
@@ -268,8 +280,11 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               data.stats.oversized > 0 ? `, ${data.stats.oversized}个超过大小限制` : ""
             }`;
             messageApi.success(resultMessage);
+            if (skipped > 0) {
+              messageApi.info(`已跳过 ${skipped} 个已在队列中的文件`);
+            }
 
-            if (uploadConfig.autoUpload && data.stats.success > 0 && !isNetworkOffline) {
+            if (uploadConfig.autoUpload && newFiles.length > 0 && !isNetworkOffline) {
               // 同一时间只保留一个待执行自动上传；卸载时由 cleanup 统一清理
               if (autoUploadTimerRef.current !== null) {
                 clearTimeout(autoUploadTimerRef.current);
@@ -298,8 +313,12 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
     } catch (error) {
       setProcessProgress(null);
       setLoading(false);
-      messageApi.error(error instanceof Error ? error.message : "文件预处理失败");
+      // VU-17：卸载导致的中断（AbortError）不再弹错误提示，避免离心副作用
+      if (!disposedRef.current && !(error instanceof DOMException && error.name === "AbortError")) {
+        messageApi.error(error instanceof Error ? error.message : "文件预处理失败");
+      }
     } finally {
+      pendingPromiseRef.current = null;
       if (prepareWorkerRef.current === worker) {
         prepareWorkerRef.current = null;
       }

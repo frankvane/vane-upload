@@ -12,19 +12,38 @@
 
 const PREFIX = "rui:";
 
+/**
+ * VU-48：可用性探测是同步写，旧实现每次 get/set/remove 都重复一次
+ * （initSettings 连读 4 个 key 就是 4 次探测写）。结果模块级惰性缓存：
+ * 成功缓存 store 引用，失败永久降级，避免反复触碰被禁用的存储。
+ * undefined = 尚未探测，null = 已确认不可用。
+ */
+let cachedStorage: Storage | null | undefined;
+
+/**
+ * 仅供测试：清空惰性缓存，模拟「模块首次加载」以验证探测只执行一次。
+ * 生产代码不应调用；未加入 src/index.ts 的公共导出。
+ */
+export const resetSafeStorageCacheForTests = (): void => {
+  cachedStorage = undefined;
+};
+
 function getStorage(): Storage | null {
+  if (cachedStorage !== undefined) return cachedStorage;
   try {
     if (typeof localStorage === "undefined" || localStorage === null) {
-      return null;
+      cachedStorage = null;
+      return cachedStorage;
     }
     // 探测可用性：隐私模式/禁用时会抛错
     const probe = `${PREFIX}__probe__`;
     localStorage.setItem(probe, "1");
     localStorage.removeItem(probe);
-    return localStorage;
+    cachedStorage = localStorage;
   } catch {
-    return null;
+    cachedStorage = null;
   }
+  return cachedStorage;
 }
 
 export const safeStorage = {

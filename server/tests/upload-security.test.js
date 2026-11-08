@@ -21,6 +21,10 @@ const app = require("../src/app");
 const { syncModels, sequelize } = require("../src/models");
 const { md5Buffer } = require("../src/utils/hash");
 const { UPLOADS_DIR, TMP_UPLOAD_DIR } = require("../src/config/paths");
+const { buildScopedFileId } = require("../src/utils/fileSecurity");
+
+// demo 模式下 userId 固定为 "test"；落盘文件名已带用户命名空间（VU-01）。
+const scoped = (fileId) => buildScopedFileId("test", fileId);
 
 const uploadChunk = async (fileId, index, buffer) => {
   const res = await request(app)
@@ -128,7 +132,7 @@ test("P1-2：合并失败时目标目录不出现半成品，staging 文件被�
   });
   assert.equal(res.status, 422);
 
-  const storedName = `f-staging-fail_${wrongMd5}.bin`;
+  const storedName = `${scoped("f-staging-fail")}_${wrongMd5}.bin`;
   assert.equal(
     fs.existsSync(path.join(UPLOADS_DIR, storedName)),
     false,
@@ -154,7 +158,7 @@ test("P1-2：合并成功后原子移入 uploads，tmp 无 .part 残留", async 
   });
   assert.equal(res.status, 200);
 
-  const storedName = `f-staging-ok_${realMd5}.bin`;
+  const storedName = `${scoped("f-staging-ok")}_${realMd5}.bin`;
   const storedPath = path.join(UPLOADS_DIR, storedName);
   assert.equal(fs.existsSync(storedPath), true);
   assert.equal(fs.readFileSync(storedPath).length, buf.length);
@@ -208,5 +212,49 @@ test("S2：合法 full-md5 合并成功且可秒传（不破坏正常链路）",
   assert.equal(instant.body.data.uploaded, true);
 
   // 清理落盘产物，避免测试反复跑污染仓库 uploads 目录
-  fs.rmSync(path.join(UPLOADS_DIR, `f-ok_${realMd5}.bin`), { force: true });
+  fs.rmSync(path.join(UPLOADS_DIR, `${scoped("f-ok")}_${realMd5}.bin`), {
+    force: true,
+  });
+});
+
+test("VU-23：sample 模式下声明哈希与权威全量哈希不同，秒传仍必须命中", async () => {
+  const buf = Buffer.from("sample-dedupe-payload");
+  const declaredMd5 = "b".repeat(32); // 模拟采样哈希（不等于内容的全量 md5）
+  const id = "f-sample-dedupe";
+  assert.notEqual(declaredMd5, md5Buffer(buf));
+
+  const up = await uploadChunk(id, 0, buf);
+  assert.equal(up.status, 200);
+
+  const merged = await request(app)
+    .post("/api/file/merge")
+    .send({
+      file_id: id,
+      name: "sec.bin",
+      size: buf.length,
+      md5: declaredMd5,
+      total: 1,
+      hash_mode: "sample",
+    });
+  assert.equal(merged.status, 200);
+
+  const instant = await request(app)
+    .post("/api/file/instant")
+    .send({
+      file_id: `${id}-again`,
+      name: "sec.bin",
+      size: buf.length,
+      md5: declaredMd5,
+    });
+  assert.equal(instant.status, 200);
+  assert.equal(
+    instant.body.data.uploaded,
+    true,
+    "DB 去重键必须与 /instant 的查询键一致"
+  );
+  assert.equal(instant.body.data.file.md5, declaredMd5);
+
+  fs.rmSync(path.join(UPLOADS_DIR, `${scoped(id)}_${declaredMd5}.bin`), {
+    force: true,
+  });
 });

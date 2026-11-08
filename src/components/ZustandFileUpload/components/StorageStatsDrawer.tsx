@@ -1,5 +1,7 @@
-import { Card, Col, Drawer, Empty, Progress, Row, Statistic, Typography } from "../../../ui";
-import React, { useEffect, useState } from "react";
+import { Card, Empty, Progress, Statistic } from "../../../ui/primitives";
+import { Col, Row, Typography } from "../../../ui/typography";
+import { Drawer } from "../../../ui/feedback";
+import React, { useMemo } from "react";
 
 import { ByteConvert } from "../utils";
 import { UploadStatus, statusMap } from "../types/upload";
@@ -24,16 +26,13 @@ const StorageStatsDrawer: React.FC = () => {
         setStorageStatsVisible: state.setStorageStatsVisible,
       }))
     );
-  const [stats, setStats] = useState<StorageStats>({
-    totalFiles: 0,
-    totalSize: 0,
-    statusCounts: {},
-    statusSizes: {},
-  });
 
-  // 计算统计信息
-  useEffect(() => {
-    if (!storageStatsVisible) return;
+  // VU-64：统计信息由 files 派生，改为渲染期 useMemo 计算，
+  // 不再经 useEffect + setState（避免 react-hooks/set-state-in-effect 的级联渲染）。
+  const stats = useMemo<StorageStats>(() => {
+    if (!storageStatsVisible) {
+      return { totalFiles: 0, totalSize: 0, statusCounts: {}, statusSizes: {} };
+    }
 
     const statusCounts: Record<string, number> = {};
     const statusSizes: Record<string, number> = {};
@@ -53,12 +52,12 @@ const StorageStatsDrawer: React.FC = () => {
       totalSize += file.fileSize;
     });
 
-    setStats({
+    return {
       totalFiles: files.length,
       totalSize,
       statusCounts,
       statusSizes,
-    });
+    };
   }, [files, storageStatsVisible]);
 
   // 生成状态统计卡片

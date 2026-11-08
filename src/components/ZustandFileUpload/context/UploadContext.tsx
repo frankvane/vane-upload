@@ -1,5 +1,4 @@
-/* eslint-disable react-refresh/only-export-components */
-import React, { createContext, useEffect, useRef } from "react";
+import React, { createContext, useEffect, useMemo } from "react";
 import {
   UploadConfig,
   UploadSettingsSource,
@@ -97,21 +96,23 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   // T3.2 单例治理：每个 <FileUpload> 实例持有一套独立的引擎资源
   // （store / storage / fileRegistry / workerPool），经 context 下发，
   // 实现多实例互不串数据；卸载时仅释放自身资源。
-  const engineRef = useRef<UploadEngine | null>(null);
-  if (engineRef.current === null) {
+  //
+  // VU-16：改为 useMemo(instanceId)，instanceId 变化时重建引擎；下方 effect 的
+  // cleanup 会在切换前释放旧引擎，解决「instanceId 变更不生效 + 旧资源泄漏」。
+  // 工厂本身只创建轻量对象（worker 是懒创建），不会在 render 期产生外部副作用。
+  const engine = useMemo<UploadEngine>(() => {
     const storage = createUploadStorage(instanceId);
     const fileRegistry = createFileRegistry();
     const workerPool = createUploadWorkerPool();
     const store = createUploadStore(storage);
-    engineRef.current = {
+    return {
       instanceId: instanceId ?? "default",
       storage,
       fileRegistry,
       workerPool,
       store,
     };
-  }
-  const engine = engineRef.current;
+  }, [instanceId]);
 
   useEffect(() => {
     return () => {
@@ -120,41 +121,95 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
     };
   }, [engine]);
 
-  const value: UploadContextType = {
-    baseURL,
-    uploadApi,
-    checkApi,
-    mergeApi,
-    chunkSize,
-    fileConcurrency,
-    chunkConcurrency,
-    maxRetries,
-    hashMode,
-    maxFileSize,
-    allowedFileTypes,
-    maxFiles,
-    autoUpload,
-    autoCleanup,
-    cleanupDelay,
-    networkDisplayMode,
-    uiMode,
-    settingsSource,
-    debug,
-    visibleColumns,
-    onUploadStart,
-    onUploadProgress,
-    onUploadProgressDetail,
-    onUploadComplete,
-    onUploadError,
-    onBatchComplete,
-    customFileValidator,
-    customUploadHandler,
-    authToken,
-    getAuthToken,
-    getAuthHeaders,
-    authScheme,
-    withCredentials,
-  };
+  // VU-45：非原始 props（数组）按内容签名规范化成稳定引用，再参与 value 的
+  // useMemo 依赖。避免宿主传入内容相同的新数组时击穿整棵子树。
+  const allowedTypesKey = allowedFileTypes.join("|");
+  const visibleColumnsKey = visibleColumns?.join("|");
+  const stableAllowedFileTypes = useMemo(
+    () => (allowedTypesKey ? allowedTypesKey.split("|") : []),
+    [allowedTypesKey]
+  );
+  const stableVisibleColumns = useMemo<UploadColumnKey[] | undefined>(() => {
+    if (visibleColumnsKey === undefined) return undefined;
+    return visibleColumnsKey
+      ? (visibleColumnsKey.split("|") as UploadColumnKey[])
+      : [];
+  }, [visibleColumnsKey]);
+
+  // VU-16 / VU-45：context value 只在这些原语 / 稳定引用变化时才换身份，
+  // 宿主无关重渲染（如 notify toast）不再让所有 Consumer 重渲染。
+  const value = useMemo<UploadContextType>(
+    () => ({
+      baseURL,
+      uploadApi,
+      checkApi,
+      mergeApi,
+      chunkSize,
+      fileConcurrency,
+      chunkConcurrency,
+      maxRetries,
+      hashMode,
+      maxFileSize,
+      allowedFileTypes: stableAllowedFileTypes,
+      maxFiles,
+      autoUpload,
+      autoCleanup,
+      cleanupDelay,
+      networkDisplayMode,
+      uiMode,
+      settingsSource,
+      debug,
+      visibleColumns: stableVisibleColumns,
+      onUploadStart,
+      onUploadProgress,
+      onUploadProgressDetail,
+      onUploadComplete,
+      onUploadError,
+      onBatchComplete,
+      customFileValidator,
+      customUploadHandler,
+      authToken,
+      getAuthToken,
+      getAuthHeaders,
+      authScheme,
+      withCredentials,
+    }),
+    [
+      baseURL,
+      uploadApi,
+      checkApi,
+      mergeApi,
+      chunkSize,
+      fileConcurrency,
+      chunkConcurrency,
+      maxRetries,
+      hashMode,
+      maxFileSize,
+      stableAllowedFileTypes,
+      maxFiles,
+      autoUpload,
+      autoCleanup,
+      cleanupDelay,
+      networkDisplayMode,
+      uiMode,
+      settingsSource,
+      debug,
+      stableVisibleColumns,
+      onUploadStart,
+      onUploadProgress,
+      onUploadProgressDetail,
+      onUploadComplete,
+      onUploadError,
+      onBatchComplete,
+      customFileValidator,
+      customUploadHandler,
+      authToken,
+      getAuthToken,
+      getAuthHeaders,
+      authScheme,
+      withCredentials,
+    ]
+  );
 
   return (
     <UploadStoreContext.Provider value={engine.store}>

@@ -8,8 +8,7 @@ import {
 import { createContext, useContext } from "react";
 import { useStore } from "zustand";
 import { create, type StoreApi } from "zustand";
-import { message } from "../../../ui";
-import type { MessageInstance } from "../../../ui";
+import { message, type MessageInstance } from "../../../ui/message";
 import { listUploadFiles } from "../services/uploadStorage";
 import { safeStorage } from "../../../shared/safeStorage";
 
@@ -66,7 +65,11 @@ export interface UploadState {
   setFiles: (files: UploadFile[]) => void;
   /** 局部更新某文件的部分字段（T3.3：暂停/继续即时反馈） */
   patchFile: (id: string, patch: Partial<UploadFile>) => void;
-  refreshFiles: () => Promise<void>;
+  /**
+   * 刷新文件列表。传入已知快照时直接采用（VU-39 挂载恢复 / VU-18 增量同步），
+   * 不再重复 iterate + 排序 IndexedDB；不传时才做一次全量对账读。
+   */
+  refreshFiles: (knownFiles?: UploadFile[]) => Promise<void>;
   setProgressMap: (progressMap: ProgressMapUpdater) => void;
   setSpeedMap: (
     speedMap:
@@ -77,6 +80,11 @@ export interface UploadState {
     etaMap:
       | Record<string, number>
       | ((prev: Record<string, number>) => Record<string, number>)
+  ) => void;
+  /** VU-40：一次 set 原子更新三张 map，避免每条进度消息触发 3 次订阅通知。 */
+  setProgressDetail: (
+    fileId: string,
+    detail: { progress: number; speed: number; eta: number },
   ) => void;
   setBatchInfo: (batchInfo: BatchInfoUpdater) => void;
   setProcessProgress: (progress: ProcessProgress | null) => void;
@@ -149,7 +157,11 @@ export const createUploadStore = (storage: LocalForage): UploadStore =>
           f.id === id ? { ...f, ...patch } : f
         ),
       })),
-    refreshFiles: async () => {
+    refreshFiles: async (knownFiles) => {
+      if (knownFiles) {
+        set({ files: knownFiles });
+        return;
+      }
       const files = await listUploadFiles(storage);
       set({ files });
     },
@@ -168,6 +180,12 @@ export const createUploadStore = (storage: LocalForage): UploadStore =>
     setEtaMap: (etaMap) =>
       set((state) => ({
         etaMap: typeof etaMap === "function" ? etaMap(state.etaMap) : etaMap,
+      })),
+    setProgressDetail: (fileId, detail) =>
+      set((state) => ({
+        progressMap: { ...state.progressMap, [fileId]: detail.progress },
+        speedMap: { ...state.speedMap, [fileId]: detail.speed },
+        etaMap: { ...state.etaMap, [fileId]: detail.eta },
       })),
     setBatchInfo: (batchInfo) =>
       set((state) => ({

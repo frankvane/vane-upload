@@ -1,4 +1,5 @@
-import { Badge, Tooltip } from "../../../ui";
+import { Badge } from "../../../ui/primitives";
+import { Tooltip } from "../../../ui/feedback";
 import React, { useRef } from "react";
 import {
   resolveNetworkBadgeInfo,

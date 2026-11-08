@@ -1,4 +1,6 @@
-import { Button, Table, Tag, Tooltip } from "../../../ui";
+// VU-46：从具体模块具名导入，避免经 ui barrel 拖入整套组件与 CSS 副作用。
+import { Button, Tag } from "../../../ui/primitives";
+import { Table } from "../../../ui/table";
 import React, { useMemo } from "react";
 import type { FileOperationsActions } from "../hooks/useFileOperations";
 import { useEffectiveUploadConfig } from "../hooks/useEffectiveConfig";
@@ -11,7 +13,7 @@ import {
 } from "../types/upload";
 import { ByteConvert } from "../utils";
 import { useShallow } from "zustand/react/shallow";
-import PercentDisplay from "./PercentDisplay";
+import ProgressCell from "./ProgressCell";
 
 interface FileTableProps {
   fileOperations: Pick<
@@ -28,19 +30,11 @@ const FileTable: React.FC<FileTableProps> = ({
   pauseUploadFile,
   resumeUploadFile,
 }) => {
-  const {
-    files,
-    progressMap,
-    speedMap,
-    etaMap,
-    isUploading,
-    isNetworkOffline,
-  } = useUploadStore(
+  // VU-41：不再订阅三张进度 map。进度订阅下沉到 ProgressCell，
+  // 高频进度更新因此完全不会触发 FileTable 重渲染或 dataSource 重建。
+  const { files, isUploading, isNetworkOffline } = useUploadStore(
     useShallow((state) => ({
       files: state.files,
-      progressMap: state.progressMap,
-      speedMap: state.speedMap,
-      etaMap: state.etaMap,
       isUploading: state.isUploading,
       isNetworkOffline: state.isNetworkOffline,
     }))
@@ -54,17 +48,9 @@ const FileTable: React.FC<FileTableProps> = ({
     [files]
   );
 
-  const dataSource = useMemo(
-    () =>
-      files.map((file) => ({
-        ...file,
-        key: file.id,
-        progress: progressMap[file.id] ?? file.progress ?? 0,
-        speed: speedMap[file.id] ?? 0,
-        eta: etaMap[file.id] ?? 0,
-      })),
-    [files, progressMap, speedMap, etaMap]
-  );
+  // VU-41：直接传 store 里的稳定文件引用，不再每次 map 展开出新 record。
+  // Table 改用 rowKey="id"，因此无需额外注入 key 字段。
+  const dataSource = files;
 
   const visibleColumns = uploadConfig.visibleColumns;
 
@@ -83,7 +69,7 @@ const FileTable: React.FC<FileTableProps> = ({
         title: "大小",
         dataIndex: "fileSize",
         key: "fileSize",
-        render: (size: number) => `${ByteConvert(size)}`,
+        render: (_: unknown, record: UploadFile) => `${ByteConvert(record.fileSize)}`,
         align: "right" as AlignItem,
         width: "10%",
       },
@@ -98,8 +84,9 @@ const FileTable: React.FC<FileTableProps> = ({
         title: "状态",
         dataIndex: "status",
         key: "status",
-        render: (status: string) => {
-          const statusItem = statusMap[status] || { text: status, color: "default" };
+        render: (_: unknown, record: UploadFile) => {
+          const statusItem =
+            statusMap[record.status] || { text: record.status, color: "default" };
           return <Tag color={statusItem.color}>{statusItem.text}</Tag>;
         },
         align: "center" as AlignItem,
@@ -109,35 +96,13 @@ const FileTable: React.FC<FileTableProps> = ({
         title: "进度",
         dataIndex: "progress",
         key: "progress",
-        render: (_: unknown, record: UploadFile) => {
-          if (
-            record.status === UploadStatus.DONE ||
-            record.status === UploadStatus.INSTANT
-          ) {
-            return <PercentDisplay percent={100} status="success" />;
-          }
-          if (record.status === UploadStatus.ERROR) {
-            return <PercentDisplay percent={record.progress} status="error" />;
-          }
-          if (record.status === UploadStatus.PAUSED) {
-            return (
-              <Tooltip title="已暂停，可点击「继续」从断点续传">
-                <PercentDisplay percent={record.progress} status="normal" />
-              </Tooltip>
-            );
-          }
-          if (record.status === UploadStatus.UPLOADING) {
-            return (
-              <PercentDisplay
-                percent={record.progress}
-                status="active"
-                speed={record.speed}
-                eta={record.eta}
-              />
-            );
-          }
-          return <PercentDisplay percent={record.progress} status="normal" />;
-        },
+        render: (_: unknown, record: UploadFile) => (
+          <ProgressCell
+            fileId={record.id}
+            status={record.status}
+            fallbackProgress={record.progress ?? 0}
+          />
+        ),
         align: "center" as AlignItem,
         width: isSimpleMode ? "20%" : "15%",
       },
@@ -231,6 +196,7 @@ const FileTable: React.FC<FileTableProps> = ({
     <Table
       columns={columns}
       dataSource={dataSource}
+      rowKey="id"
       pagination={false}
       bordered
       style={{ marginTop: 16 }}

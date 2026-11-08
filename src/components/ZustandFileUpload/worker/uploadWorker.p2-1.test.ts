@@ -16,9 +16,14 @@ const jsonResponse = (data: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
+let instantFails = false;
+
 const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
   const target = String(input);
   if (target.includes("/instant")) {
+    if (instantFails) {
+      throw new TypeError("network down");
+    }
     return jsonResponse({ code: 200, data: { uploaded: false } });
   }
   if (target.includes("/status")) {
@@ -44,6 +49,7 @@ describe("uploadWorker P2-1 分片 MD5 按需计算", () => {
   beforeEach(async () => {
     vi.stubGlobal("fetch", fetchMock);
     fetchMock.mockClear();
+    instantFails = false;
     postedMessages.length = 0;
     (self as unknown as { postMessage: unknown }).postMessage = (message: {
       type: string;
@@ -114,6 +120,45 @@ describe("uploadWorker P2-1 分片 MD5 按需计算", () => {
       expect(String(body.get("chunk_md5"))).toMatch(/^[a-f0-9]{32}$/);
     }
 
+    expect(postedMessages.some((message) => message.type === "done")).toBe(true);
+  });
+
+  it("VU-06：秒传预检失败仍查询 /status，不会退化成全量重传", async () => {
+    instantFails = true;
+    const fileRef = new File([new Uint8Array(3072).fill(9)], "p21-fallback.bin");
+
+    await dispatch({
+      type: "upload",
+      fileInfo: {
+        id: "p2-1-fallback",
+        fileName: "p21-fallback.bin",
+        fileSize: 3072,
+        hash: "3".repeat(32),
+        chunkSize: 1024,
+        chunkKey: `${"3".repeat(32)}_3072_1024`,
+      },
+      fileRef,
+      // 预检网络失败会触发重试，把重试间隔压到 0 避免拖慢用例
+      networkParams: { chunkConcurrency: 1, maxRetries: 1, retryInterval: 0 },
+      uploadConfig: {
+        baseURL: "",
+        uploadApi: "/api/file/upload",
+        checkApi: "/api/file/instant",
+        mergeApi: "/api/file/merge",
+      },
+    });
+
+    const calls = fetchMock.mock.calls.map(([url, init]) => ({
+      url: String(url),
+      body: init?.body,
+    }));
+    expect(calls.some((call) => call.url.includes("/status"))).toBe(true);
+
+    const uploadedIndexes = calls
+      .filter((call) => call.url.includes("/upload"))
+      .map((call) => Number((call.body as FormData).get("index")))
+      .sort((a, b) => a - b);
+    expect(uploadedIndexes).toEqual([1, 2]);
     expect(postedMessages.some((message) => message.type === "done")).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { Progress } from "../../../ui";
+import { Progress } from "../../../ui/primitives";
 import React from "react";
 
 interface PercentDisplayProps {

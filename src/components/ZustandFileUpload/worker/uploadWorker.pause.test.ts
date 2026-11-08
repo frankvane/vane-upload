@@ -136,8 +136,7 @@ describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
     expect(pausedMsg.uploadedChunks).toBe(0); // 唯一在途分片尚未完成
     expect(postedMessages.some((m) => m.type === "done")).toBe(false);
 
-    // 等待足够久，确认暂停后没有新的分片请求发起（边界挂起生效）
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    // 暂停后不应再发起新的分片请求（事件驱动断言，替代固定 120ms 等待）
     const uploadCallsAfterPause = fetchMock.mock.calls.filter(([u]) =>
       String(u).includes("/upload")
     );

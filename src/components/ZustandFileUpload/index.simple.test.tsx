@@ -26,7 +26,8 @@ describe("ZustandFileUpload simple mode", () => {
     expect(screen.queryByRole("button", { name: "清除列表" })).toBeNull();
     expect(screen.queryByText("批量重试")).toBeNull();
     expect(screen.queryByText("重试失败文件")).toBeNull();
-    // simple 模式仍保留操作列（失败可重试、可删除）
-    expect(screen.getByText("操作")).toBeInTheDocument();
+    // simple 模式仍保留操作列（失败可重试、可删除）；FileTable 已 React.lazy 拆包，
+    // 首帧处于 Suspense，需用 findBy 等待异步 chunk 解析后再断言。
+    expect(await screen.findByText("操作")).toBeInTheDocument();
   });
 });

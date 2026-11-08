@@ -1,4 +1,6 @@
 import { debugError, debugLog } from "./../../../shared/debugLogger";
+import { redactHeaders, scrubLogText } from "./../../../shared/redact";
+import { runCursorPool } from "./../../../shared/concurrency";
 
 import SparkMD5 from "spark-md5";
 import type { UploadHashMode } from "../types/upload";
@@ -111,6 +113,27 @@ const DEBUG_THROTTLE_MS = 200;
 let lastRoutineDebugAt = 0;
 
 /**
+ * VU-05：日志 data 的兜底脱敏——headers 按敏感键置换，字符串值洗掉裸 token。
+ * 规则来自 shared/redact.ts，避免调用点遗漏导致凭据外泄。
+ */
+const sanitizeDebugData = (
+  data: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined => {
+  if (!data) return undefined;
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key.toLowerCase() === "headers" && value && typeof value === "object") {
+      safe[key] = redactHeaders(value as Record<string, string>);
+    } else if (typeof value === "string") {
+      safe[key] = scrubLogText(value);
+    } else {
+      safe[key] = value;
+    }
+  }
+  return safe;
+};
+
+/**
  * @param urgent 紧急日志（失败/重试/超时/取消）不受节流限制；
  *               分片级等高频常规日志按 200ms 节流。
  */
@@ -131,12 +154,14 @@ function debug(
     lastRoutineDebugAt = now;
   }
 
-  debugLog(`[UploadWorker] ${message}`, data || "");
-  // 同时发送日志消息到主线程
+  // VU-05 纵深防御：调用点之外再统一洗一次，任何出站日志都不带明文凭据。
+  const safeMessage = scrubLogText(message);
+  const safeData = sanitizeDebugData(data);
+  debugLog(`[UploadWorker] ${safeMessage}`, safeData || "");
   self.postMessage({
     type: "debug",
-    message,
-    data,
+    message: safeMessage,
+    data: safeData,
   });
 }
 
@@ -247,7 +272,7 @@ async function fetchWithRetry(
 
         debug(`执行请求: ${url} (尝试 ${currentAttempt}/${maxRetries})`, {
           method: options.method,
-          headers: mergedHeaders ? JSON.stringify(mergedHeaders) : undefined,
+          headers: redactHeaders(mergedHeaders),
           bodyType: options.body ? typeof options.body : undefined,
         });
 
@@ -358,8 +383,16 @@ async function fetchWithRetry(
   });
 }
 
+/** VU-07：区分「用户主动取消」与「真实失败」，避免 AbortError 被渲染成失败状态。 */
+const isCancellation = (error: unknown, signal?: AbortSignal): boolean =>
+  Boolean(signal?.aborted) ||
+  (error instanceof Error &&
+    (error.name === "AbortError" || error.message === "上传已取消"));
+
 self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
   let fileId: string | undefined;
+  // 提升到外层作用域，供两个 catch 判定取消语义。
+  let taskSignal: AbortSignal | undefined;
   try {
     debug("Worker 收到消息", { type: event.data.type });
 
@@ -457,7 +490,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     taskAbortControllers.set(fileInfo.id, taskController);
     // 初始化暂停状态与续传统计（T3.3）
     taskPauseState.set(fileInfo.id, { paused: false, resumeResolver: null });
-    const taskSignal = taskController.signal;
+    taskSignal = taskController.signal;
 
     debug("文件信息", {
       fileName: fileInfo.fileName,
@@ -549,157 +582,180 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     // 先向服务端查询已存在的分片索引（分片内容由 file_id + index 唯一确定），
     // 缺失分片的 MD5 在上传该片时按需计算，首片延迟与文件总片数解耦。
     let existingChunks = new Set<number>();
-    if (fastData) {
-      try {
-        const statusQuery = `file_id=${encodeURIComponent(
-          fileInfo.chunkKey || fileInfo.hash || "",
-        )}&md5=${encodeURIComponent(fileInfo.hash || "")}`;
-        const statusRes = await fetchWithRetry(
-          `${statusUrl}?${statusQuery}`,
-          { method: "GET" },
-          {
-            ...retryOptions,
-            authHeaders,
-            credentials: credentialsMode,
-            allowedHosts: taskAllowedHosts.get(fileInfo.id),
-            signal: taskSignal,
-          },
+    // VU-06：状态查询与秒传预检解耦。预检（/instant）因网络抖动失败时
+    // fastData 为 null，旧实现会连 /status 都不查，弱网下续传直接退化成全量重传。
+    // fastData 现在只用于秒传短路判断；/status 无论预检成败都要尝试一次。
+    try {
+      const statusQuery = `file_id=${encodeURIComponent(
+        fileInfo.chunkKey || fileInfo.hash || "",
+      )}&md5=${encodeURIComponent(fileInfo.hash || "")}`;
+      const statusRes = await fetchWithRetry(
+        `${statusUrl}?${statusQuery}`,
+        { method: "GET" },
+        {
+          ...retryOptions,
+          authHeaders,
+          credentials: credentialsMode,
+          allowedHosts: taskAllowedHosts.get(fileInfo.id),
+          signal: taskSignal,
+        },
+      );
+      const statusData = await statusRes.json().catch(() => null);
+      const chunks = statusData?.data?.chunks;
+      if (Array.isArray(chunks)) {
+        existingChunks = new Set(
+          chunks.filter(
+            (index: unknown) =>
+              Number.isInteger(index) &&
+              (index as number) >= 0 &&
+              (index as number) < chunkCount,
+          ) as number[],
         );
-        const statusData = await statusRes.json().catch(() => null);
-        const chunks = statusData?.data?.chunks;
-        if (Array.isArray(chunks)) {
-          existingChunks = new Set(
-            chunks.filter(
-              (index: unknown) =>
-                Number.isInteger(index) &&
-                (index as number) >= 0 &&
-                (index as number) < chunkCount,
-            ) as number[],
-          );
-        }
-        debug("已存在分片", { count: existingChunks.size });
-      } catch (error) {
-        // 状态查询失败不应阻塞上传：退化为全量重传即可。
-        debug("状态查询失败，按全量重传处理", { error: String(error) }, true);
       }
+      debug("已存在分片", { count: existingChunks.size });
+    } catch (error) {
+      // 只有「预检 + 状态查询都失败」才退化为全量重传。
+      debug("状态查询失败，按全量重传处理", { error: String(error) }, true);
     }
 
-    // 确定需要上传的分片
-    const needUploadChunks: number[] = [];
-    for (let i = 0; i < chunkCount; i++) {
-      if (!existingChunks.has(i)) needUploadChunks.push(i);
-    }
+    // VU-49：不再物化 `needUploadChunks` 数组与等量的任务闭包。
+    // existingChunks 已过滤为 [0, chunkCount) 内的有效索引，因此缺失数可直接相减；
+    // 上传时用共享游标跳过已存在的索引，内存占用与分片数无关。
+    const missingCount = chunkCount - existingChunks.size;
     debug("需要上传的分片", {
-      count: needUploadChunks.length,
-      chunks: needUploadChunks,
+      count: missingCount,
+      // 大文件有数千个索引，只打印区间，绝不把数组塞进日志 / 环形缓冲。
+      range: `0..${Math.max(0, chunkCount - 1)}`,
     });
 
     try {
       // 记录已完成的分片数量，用于计算进度
-      const completedChunks = chunkCount - needUploadChunks.length;
-      let totalUploadedChunks = completedChunks;
+      let totalUploadedChunks = chunkCount - missingCount;
       const failedChunks: number[] = [];
 
-      // 3. 分片上传 - 使用并发控制
-      if (needUploadChunks.length > 0) {
+      // 3. 分片上传 - 游标式并发池
+      if (missingCount > 0) {
         debug("开始分片上传");
         // 上传阶段计时起点，用于推导速率/剩余时间（T3.4）
         const uploadStartTime = Date.now();
-        const uploadTasks = needUploadChunks.map((i) => {
-          return async () => {
-            // 分片边界安全暂停（T3.3）：开始下一个分片前检查，暂停则挂起等待 resume
-            await waitWhilePaused(fileInfo.id, taskSignal);
-            if (taskSignal.aborted) {
-              throw new Error("上传已取消");
-            }
+        let cursor = 0;
+        const nextChunk = (): number | undefined => {
+          while (cursor < chunkCount) {
+            const index = cursor;
+            cursor += 1;
+            if (!existingChunks.has(index)) return index;
+          }
+          return undefined;
+        };
 
-            const start = i * chunkSize;
-            const end = Math.min(fileRef.size, start + chunkSize);
-            const chunkBuf = await fileRef.slice(start, end).arrayBuffer();
-            // P2-1：按需计算——只算当前要上传的分片，不再预计算全部分片
-            const chunkMd5 = await calculateMD5(chunkBuf);
+        const uploadChunk = async (i: number) => {
+          // 分片边界安全暂停（T3.3）：开始下一个分片前检查，暂停则挂起等待 resume
+          await waitWhilePaused(fileInfo.id, taskSignal);
+          if (taskSignal?.aborted) {
+            throw new Error("上传已取消");
+          }
 
-            const formData = new FormData();
-            formData.append(
-              "file_id",
-              fileInfo.chunkKey || fileInfo.hash || "",
+          const start = i * chunkSize;
+          const end = Math.min(fileRef.size, start + chunkSize);
+          const chunkBuf = await fileRef.slice(start, end).arrayBuffer();
+          // P2-1：按需计算——只算当前要上传的分片，不再预计算全部分片
+          const chunkMd5 = calculateMD5(chunkBuf);
+
+          const formData = new FormData();
+          formData.append(
+            "file_id",
+            fileInfo.chunkKey || fileInfo.hash || "",
+          );
+          formData.append("index", i.toString());
+          formData.append("chunk", new Blob([chunkBuf]));
+          formData.append("total", chunkCount.toString());
+          formData.append("chunk_md5", chunkMd5);
+
+          debug(`上传分片 ${i + 1}/${chunkCount}`, { size: end - start });
+          try {
+            // 使用配置的上传 API 地址
+            const uploadApi = uploadConfig?.uploadApi || "/api/file/upload";
+            const uploadUrl = joinUrl(baseURL, uploadApi);
+            debug(`分片上传URL: ${uploadUrl}`);
+
+            await fetchWithRetry(
+              uploadUrl,
+              {
+                method: "POST",
+                body: formData,
+              },
+              {
+                ...retryOptions,
+                authHeaders,
+                credentials: credentialsMode,
+                allowedHosts: taskAllowedHosts.get(fileInfo.id),
+                signal: taskSignal,
+              },
             );
-            formData.append("index", i.toString());
-            formData.append("chunk", new Blob([chunkBuf]));
-            formData.append("total", chunkCount.toString());
-            formData.append("chunk_md5", chunkMd5);
 
-            debug(`上传分片 ${i + 1}/${chunkCount}`, { size: end - start });
-            try {
-              // 使用配置的上传 API 地址
-              const uploadApi = uploadConfig?.uploadApi || "/api/file/upload";
-              const uploadUrl = joinUrl(baseURL, uploadApi);
-              debug(`分片上传URL: ${uploadUrl}`);
-
-              await fetchWithRetry(
-                uploadUrl,
-                {
-                  method: "POST",
-                  body: formData,
-                },
-                {
-                  ...retryOptions,
-                  authHeaders,
-                  credentials: credentialsMode,
-                  allowedHosts: taskAllowedHosts.get(fileInfo.id),
-                  signal: taskSignal,
-                },
-              );
-
-              // 更新进度
-              totalUploadedChunks++;
-              const stats = taskStats.get(fileInfo.id);
-              if (stats) {
-                stats.uploadedChunks = totalUploadedChunks;
-              }
-              const uploadedBytes = Math.min(
-                totalUploadedChunks * chunkSize,
-                fileRef.size,
-              );
-              const elapsedMs = Math.max(1, Date.now() - uploadStartTime);
-              const detail = computeUploadProgress({
-                uploadedBytes,
-                totalBytes: fileRef.size,
-                elapsedMs,
-              });
-              debug(`分片 ${i + 1} 上传成功，总进度: ${detail.progress}%`);
-
-              self.postMessage({
-                type: "progress",
-                progress: detail.progress,
-                uploadedBytes: detail.uploadedBytes,
-                totalBytes: detail.totalBytes,
-                speed: detail.speed,
-                eta: detail.eta,
-                chunkIndex: i,
-              });
-            } catch (error) {
-              // 记录失败的分片
-              failedChunks.push(i);
-              debug(
-                `分片 ${i + 1} 上传失败`,
-                {
-                  error: error instanceof Error ? error.message : String(error),
-                },
-                true,
-              );
-              debugError(`分片 ${i + 1} 上传失败:`, error);
-              throw error;
+            // 更新进度
+            totalUploadedChunks++;
+            const stats = taskStats.get(fileInfo.id);
+            if (stats) {
+              stats.uploadedChunks = totalUploadedChunks;
             }
-          };
-        });
+            const uploadedBytes = Math.min(
+              totalUploadedChunks * chunkSize,
+              fileRef.size,
+            );
+            const elapsedMs = Math.max(1, Date.now() - uploadStartTime);
+            const detail = computeUploadProgress({
+              uploadedBytes,
+              totalBytes: fileRef.size,
+              elapsedMs,
+            });
+            debug(`分片 ${i + 1} 上传成功，总进度: ${detail.progress}%`);
 
-        // 使用并发控制函数执行上传任务
+            self.postMessage({
+              type: "progress",
+              progress: detail.progress,
+              uploadedBytes: detail.uploadedBytes,
+              totalBytes: detail.totalBytes,
+              speed: detail.speed,
+              eta: detail.eta,
+              chunkIndex: i,
+            });
+          } catch (error) {
+            debug(
+              `分片 ${i + 1} 上传失败`,
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+              true,
+            );
+            debugError(`分片 ${i + 1} 上传失败:`, error);
+            // 失败索引由 pool 的 onFailure 统一记录，这里继续抛出以计入 failed。
+            throw error;
+          }
+        };
+
+        // VU-49：只启动 chunkConcurrency 个 runner，按游标领取下一个缺失分片。
         debug("执行并发上传任务", {
-          tasks: uploadTasks.length,
+          tasks: missingCount,
           concurrency: chunkConcurrency,
         });
-        await runWithConcurrency(uploadTasks, chunkConcurrency);
+        await runCursorPool({
+          next: nextChunk,
+          concurrency: chunkConcurrency,
+          task: uploadChunk,
+          // 取消后不再领取新分片，已在途请求由 fetchWithRetry 的 signal 中断。
+          shouldStop: () => taskSignal?.aborted === true,
+          onFailure: (index) => {
+            failedChunks.push(index);
+          },
+        });
+        // VU-07：在途请求被 CANCEL 中断后会记入 failedChunks。
+        // 必须在这里先按取消收尾，否则下面的「分片上传失败」分支会先发 error，
+        // 与主线程的 cancelled 收尾形成竞态，UI 显示失败并触发 onUploadError。
+        if (taskSignal?.aborted) {
+          self.postMessage({ type: "cancelled", fileId: fileInfo.id });
+          return;
+        }
         debug("并发上传任务完成", { failedChunks: failedChunks.length });
 
         // 暂停边界：若暂停到达时所有在途分片已结束（极端时序），在此确认 paused，
@@ -773,14 +829,19 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
 
       self.postMessage({ type: "done", skipped: false });
     } catch (error) {
-      // 上传过程中出现致命错误
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      debug("上传过程中出现致命错误", { error: errorMessage }, true);
-      self.postMessage({
-        type: "error",
-        message: errorMessage,
-      });
+      // VU-07：取消时在途 fetch 抛 AbortError，旧实现统一上报 error，
+      // 与主线程的 cancelled 收尾形成竞态，UI 可能显示「失败」。
+      if (isCancellation(error, taskSignal)) {
+        self.postMessage({ type: "cancelled", fileId: fileId ?? "" });
+      } else {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        debug("上传过程中出现致命错误", { error: errorMessage }, true);
+        self.postMessage({
+          type: "error",
+          message: errorMessage,
+        });
+      }
     } finally {
       // 任务结束（成功/失败/取消）后释放 AbortController 与暂停状态，避免 Map 残留
       if (fileId) {
@@ -791,7 +852,11 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       }
     }
   } catch (error) {
-    // Worker 执行过程中的全局错误处理
+    // Worker 执行过程中的全局错误处理（同样要区分取消）
+    if (isCancellation(error, taskSignal)) {
+      self.postMessage({ type: "cancelled", fileId: fileId ?? "" });
+      return;
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     debug("Worker 执行错误", { error: errorMessage }, true);
     self.postMessage({
@@ -801,70 +866,5 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
   }
 };
 
-// 简单的并发控制函数
-async function runWithConcurrency(
-  tasks: (() => Promise<void>)[],
-  concurrency: number,
-): Promise<{ completed: number; failed: number; failedIndices: number[] }> {
-  // 当前运行的任务数
-  let running = 0;
-  // 下一个要执行的任务索引
-  let taskIndex = 0;
-  // 成功和失败的任务计数
-  let completed = 0;
-  let failed = 0;
-  // 失败的任务索引
-  const failedIndices: number[] = [];
-
-  debug("开始并发控制", { tasks: tasks.length, concurrency });
-
-  return new Promise((resolve) => {
-    // 启动初始任务
-    const startNext = () => {
-      // 如果所有任务都完成了，解析 Promise
-      if (taskIndex >= tasks.length && running === 0) {
-        debug("并发任务全部完成", { completed, failed });
-        resolve({ completed, failed, failedIndices });
-        return;
-      }
-
-      // 当有空闲并且还有任务时，启动新任务
-      while (running < concurrency && taskIndex < tasks.length) {
-        const currentIndex = taskIndex;
-        const currentTask = tasks[taskIndex++];
-        if (!currentTask) {
-          continue;
-        }
-        running++;
-        debug(
-          `启动任务 ${currentIndex + 1}/${tasks.length}，当前运行: ${running}`,
-        );
-
-        currentTask()
-          .then(() => {
-            completed++;
-            running--;
-            debug(
-              `任务 ${
-                currentIndex + 1
-              } 完成，剩余运行: ${running}，完成: ${completed}，失败: ${failed}`,
-            );
-            startNext(); // 任务完成后，尝试启动下一个任务
-          })
-          .catch(() => {
-            failed++;
-            failedIndices.push(currentIndex);
-            running--;
-            debug(
-              `任务 ${
-                currentIndex + 1
-              } 失败，剩余运行: ${running}，完成: ${completed}，失败: ${failed}`,
-            );
-            startNext(); // 即使失败也尝试启动下一个任务
-          });
-      }
-    };
-
-    startNext();
-  });
-}
+// VU-49：并发控制已迁至 shared/concurrency.ts 的 runCursorPool（游标式，
+// 不预物化任务数组）；主线程与预处理 Worker 共用同一实现，避免两套语义漂移。

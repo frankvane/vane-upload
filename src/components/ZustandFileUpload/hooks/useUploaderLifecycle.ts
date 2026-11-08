@@ -13,12 +13,12 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { UploadCleanupPolicy } from "../services/cleanupPolicy";
 import type { UploadEngine } from "../context/UploadEngineContext";
-import type { BatchInfo } from "../types/upload";
+import type { BatchInfo, UploadFile } from "../types/upload";
 import { withClearedCountdown } from "./uploadPolicy";
 
 export interface UploaderLifecycleParams {
   engine: UploadEngine;
-  refreshFiles: () => Promise<void> | void;
+  refreshFiles: () => Promise<void>;
   setBatchInfo: (
     updater: (prev: BatchInfo | null) => BatchInfo | null
   ) => void;
@@ -30,15 +30,21 @@ export interface UploaderLifecycle {
   activeUploadAbortRef: React.MutableRefObject<AbortController | null>;
   beginBatchSession: () => AbortController;
   endBatchSession: (controller: AbortController) => void;
+  /**
+   * VU-18：把已知的最新文件态即时同步进 store（纯内存，不读 IndexedDB）。
+   * 上传期的状态转换用它取代原先 120ms 后触发的全量 iterate + 排序。
+   */
+  syncFile: (file: UploadFile) => void;
+  /** 批次结束 / 显式请求时的全量对账读（整个批次最多一次）。 */
   flushRefresh: () => Promise<void>;
-  scheduleRefresh: (delay?: number) => void;
 }
 
 const createCleanupPolicy = (engine: UploadEngine) =>
   new UploadCleanupPolicy({
     getFiles: () => engine.store.getState().files,
     setFiles: (files) => engine.store.getState().setFiles(files),
-    refreshFiles: () => engine.store.getState().refreshFiles(),
+    refreshFiles: (knownFiles) =>
+      engine.store.getState().refreshFiles(knownFiles),
     setBatchInfo: (updater) => engine.store.getState().setBatchInfo(updater),
     clearBatchInfo: () => engine.store.getState().setBatchInfo(null),
     getCleanupDelay: () => engine.store.getState().cleanupDelay,
@@ -55,9 +61,25 @@ export function useUploaderLifecycle({
   const cleanupPolicy = useMemo(() => createCleanupPolicy(engine), [engine]);
   const activeUploadAbortRef = useRef<AbortController | null>(null);
   const bootstrapAutoCleanupTimerRef = useRef<number | null>(null);
-  const refreshTimerRef = useRef<number | null>(null);
+  // VU-18：不再有 refreshTimerRef —— 上传期状态转换不再排队一次定时全量读。
   const isRefreshingRef = useRef(false);
   const queuedRefreshRef = useRef(false);
+
+  const syncFile = useCallback(
+    (file: UploadFile) => {
+      const state = engine.store.getState();
+      const known = state.files.some((item) => item.id === file.id);
+      if (known) {
+        // 已在列表内：局部替换，列表引用变化一次，进度相关的订阅不受影响。
+        state.patchFile(file.id, { ...file });
+        return;
+      }
+      // 列表里还没有这条记录（并发新增 / 外部写入）：退回一次全量对账，
+      // 保证不会把新文件丢在 UI 之外。
+      void refreshFiles().catch(() => undefined);
+    },
+    [engine, refreshFiles]
+  );
 
   const flushRefresh = useCallback(async () => {
     if (isRefreshingRef.current) {
@@ -76,20 +98,6 @@ export function useUploaderLifecycle({
       }
     }
   }, [refreshFiles]);
-
-  const scheduleRefresh = useCallback(
-    (delay = 120) => {
-      if (refreshTimerRef.current !== null) {
-        return;
-      }
-
-      refreshTimerRef.current = window.setTimeout(() => {
-        refreshTimerRef.current = null;
-        void flushRefresh().catch(() => undefined);
-      }, delay);
-    },
-    [flushRefresh]
-  );
 
   const beginBatchSession = useCallback(() => {
     const existingController = activeUploadAbortRef.current;
@@ -122,11 +130,6 @@ export function useUploaderLifecycle({
         bootstrapAutoCleanupTimerRef.current = null;
       }
 
-      if (refreshTimerRef.current !== null) {
-        clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = null;
-      }
-
       queuedRefreshRef.current = false;
       cleanupPolicy.dispose();
     };
@@ -154,12 +157,23 @@ export function useUploaderLifecycle({
     }, 2000);
   }, [autoCleanup, cleanupPolicy, setBatchInfo]);
 
-  return {
-    cleanupPolicy,
-    activeUploadAbortRef,
-    beginBatchSession,
-    endBatchSession,
-    flushRefresh,
-    scheduleRefresh,
-  };
+  // VU-42：返回对象保持身份稳定，避免下游 useCallback / memo 被每次渲染
+  // 新建的包装对象击穿。内部成员本身已全部 useMemo / useCallback / useRef 化。
+  return useMemo(
+    () => ({
+      cleanupPolicy,
+      activeUploadAbortRef,
+      beginBatchSession,
+      endBatchSession,
+      syncFile,
+      flushRefresh,
+    }),
+    [
+      cleanupPolicy,
+      beginBatchSession,
+      endBatchSession,
+      syncFile,
+      flushRefresh,
+    ]
+  );
 }

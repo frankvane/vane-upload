@@ -28,7 +28,8 @@ process.env.SERVER_TMP_UPLOAD_DIR = testTmpUploadDir;
 
 const app = require("../src/app");
 const { syncModels, sequelize, File } = require("../src/models");
-const { md5Buffer, getPartialMd5Mode } = require("../src/utils/hash");
+const { md5Buffer } = require("../src/utils/hash");
+const hashUtils = require("../src/utils/hash");
 const { redactErrorMessage } = require("../src/utils/errorMessage");
 
 const uploadChunk = async (fileId, index, buffer) =>
@@ -57,7 +58,8 @@ test.after(async () => {
 });
 
 test("P1-4：全局配额——换 file_id 也无法突破进程总容量", async () => {
-  // 本条必须最先执行：全局用量从空目录播种。
+  // 不再依赖「最先执行」：每个用例重置 DB，消除顺序依赖（VU-60）。
+  await syncModels({ force: true });
   const chunk = Buffer.alloc(600, 0x64);
   process.env.MAX_UPLOAD_SIZE_MB = "0.002"; // 单文件 2KB，够放 3 片
   process.env.MAX_TOTAL_UPLOAD_SIZE_MB = "0.001"; // 全局约 1048B
@@ -127,11 +129,14 @@ test("P2-9：秒传命中只回传必要字段，不泄漏 user_id / file_path /
   assert.equal("thumbnail_path" in file, false, "不得回传 thumbnail_path");
 });
 
-test("P2-8：getPartialMd5Mode 以 10MB 为界（<10MB 全量、>=10MB 采样）", () => {
-  assert.equal(getPartialMd5Mode(1024), "full");
-  assert.equal(getPartialMd5Mode(10 * 1024 * 1024 - 1), "full");
-  assert.equal(getPartialMd5Mode(10 * 1024 * 1024), "sample");
-  assert.equal(getPartialMd5Mode(11 * 1024 * 1024), "sample");
+test("VU-56：两套互相矛盾的采样哈希死代码已删除，hash 只保留全量实现", () => {
+  // 后端「头 10MB + 尾 1MB」与前端「首/中/尾 4MB + size 文本」口径不同，
+  // 保留但零调用的采样函数只会误导后续维护者启用错误比对。
+  assert.deepEqual(Object.keys(hashUtils).sort(), ["md5Buffer", "md5File"]);
+  assert.equal("getPartialMd5Mode" in hashUtils, false);
+  assert.equal("calculatePartialMd5" in hashUtils, false);
+  assert.equal("calculatePartialMd5Async" in hashUtils, false);
+  assert.equal(fs.existsSync(path.join(__dirname, "../src/utils/thumbnail.js")), false);
 });
 
 test("P2-10：生产环境不回传原始 error.message，测试环境保留以便定位", () => {

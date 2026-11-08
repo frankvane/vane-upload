@@ -10,6 +10,7 @@ coverage/
 # server runtime data
 server/data/
 server/tmp/
+.e2e-tmp/
 server/uploads/
 server/coverage/
 
@@ -19,3 +20,10 @@ npm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# agent internal data (memory / session state) — not project source
+.workbuddy/
+
+# playwright e2e output artifacts
+test-results/
+playwright-report/

@@ -61,8 +61,13 @@ module.exports = (sequelize) =>
     {
       tableName: "files",
       underscored: true,
+      // VU-53：秒传 / 已合并的高频查询是
+      // `WHERE user_id=? AND md5=? AND size=? AND status=1`，
+      // 单列索引只能选一个，复合索引让它一次走完。
       indexes: [
         { fields: ["file_id"] },
+        { fields: ["user_id", "md5", "size", "status"] },
+        { fields: ["user_id", "status"] },
         { fields: ["md5"] },
         { fields: ["status"] },
       ],

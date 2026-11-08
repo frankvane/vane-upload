@@ -63,7 +63,7 @@ if (typeof Blob !== "undefined" && typeof Blob.prototype.arrayBuffer !== "functi
 }
 
 // jsdom 下 self === window，其 postMessage 要求 (message, targetOrigin) 两参数；
-// 而 Worker 模块使用单参数语义（ctx.postMessage(message)）。Vite 的 `?worker&inline`
+// 而 Worker 模块使用单参数语义（ctx.postMessage(message)）。Vite 的 `?worker`
 // 测试变换会把 Worker 消息经 window.postMessage 路由，触发 Worker 模块注册的
 // message 监听，进而以单参数回传消息（如 sendProgressUpdate）→ jsdom 抛
 // "postMessage requires 2 arguments" 未捕获异常。此处包裹为兼容单/双参数：

@@ -1,5 +1,7 @@
-import { Button, Drawer, Progress, Space, Tag, Typography } from "../../../ui";
-import React, { useEffect, useState } from "react";
+import { Button, Progress, Space, Tag } from "../../../ui/primitives";
+import { Typography } from "../../../ui/typography";
+import { Drawer } from "../../../ui/feedback";
+import React, { useState } from "react";
 import { useUploadStore } from "../store/upload";
 import type { BatchUploaderActions } from "../hooks/useBatchUploader";
 import { useShallow } from "zustand/react/shallow";
@@ -46,11 +48,11 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
     isUploading || failed > 0 || retried > 0 || pendingCount > 0 || hasCountdown
   );
 
-  useEffect(() => {
-    if (!shouldShowDock && drawerOpen) {
-      setDrawerOpen(false);
-    }
-  }, [shouldShowDock, drawerOpen]);
+  // VU-64：原「shouldShowDock 消失时同步关闭抽屉」的 effect 会触发
+  // react-hooks/set-state-in-effect。组件在 !shouldShowDock 时整体 return null，
+  // 抽屉随卸载自然关闭，无需再同步 setState；open 额外与 shouldShowDock 取与，
+  // 避免 dock 重现时抽屉被陈旧 drawerOpen 自动重新展开。
+  const drawerOpenNow = drawerOpen && shouldShowDock;
 
   const statusText = (() => {
     if (isUploading) {
@@ -104,7 +106,7 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
         title="上传批次详情"
         placement="right"
         width={420}
-        open={drawerOpen}
+        open={drawerOpenNow}
         onClose={() => setDrawerOpen(false)}
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>

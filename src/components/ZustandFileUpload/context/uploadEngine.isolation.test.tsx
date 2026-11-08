@@ -48,11 +48,17 @@ describe("T3.2 每实例引擎隔离", () => {
       const pa = createUploadWorkerPool();
       const pb = createUploadWorkerPool();
       expect(pa).not.toBe(pb);
+      // 每个实例绑定各自的同名方法（证明非共享单例，而是按实例创建）
+      expect(pa.runUploadTask).not.toBe(pb.runUploadTask);
+      expect(pa.cancelUploadTask).not.toBe(pb.cancelUploadTask);
       expect(typeof pa.runUploadTask).toBe("function");
       expect(typeof pa.cancelUploadTask).toBe("function");
       expect(typeof pa.dispose).toBe("function");
+      // 释放一个实例不影响另一个的可调用性（互不串）
       expect(() => pa.dispose()).not.toThrow();
       expect(() => pb.dispose()).not.toThrow();
+      expect(typeof pb.runUploadTask).toBe("function");
+      expect(typeof pb.cancelUploadTask).toBe("function");
     });
 
     it("不同实例的 store 状态互不串", () => {

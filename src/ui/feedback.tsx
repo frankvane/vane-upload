@@ -8,8 +8,9 @@
  */
 import React from "react";
 import { createRoot } from "react-dom/client";
-import ReactDOM from "react-dom";
+import { createPortal } from "react-dom";
 import { Button } from "./primitives";
+import { registerEscapeHandler } from "./escapeStack";
 
 /* ============================ Portal 工具 ============================ */
 
@@ -83,7 +84,7 @@ export const Tooltip: React.FC<TooltipProps> = ({
       {canDOM &&
         visible &&
         pos &&
-        ReactDOM.createPortal(
+        createPortal(
           <div
             className="rui-tooltip"
             style={{
@@ -154,14 +155,12 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
       if (anchorRef.current?.contains(target)) return;
       setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
+    // VU-44：ESC 走共享单例，mousedown 也声明 passive（不阻止默认行为）。
+    document.addEventListener("mousedown", onDocClick, { passive: true });
+    const unregisterEscape = registerEscapeHandler(() => setOpen(false));
     return () => {
       document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
+      unregisterEscape();
     };
   }, [open]);
 
@@ -174,7 +173,7 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
       {canDOM &&
         open &&
         pos &&
-        ReactDOM.createPortal(
+        createPortal(
           <div
             className="rui-popover rui-popconfirm"
             style={{ left: pos.left, top: pos.top, position: "fixed", transform: "translateX(-50%)" }}
@@ -246,28 +245,28 @@ const ModalInner: React.FC<ModalProps> = ({
   children,
   style,
 }) => {
-  const [mounted, setMounted] = React.useState(false);
   const dialogRef = React.useRef<HTMLDivElement>(null);
+  // VU-30：回调经 ref 读取，避免 effect 捕获首次渲染的过期 onCancel。
+  // VU-64：ref 镜像改在 effect 内更新（render 期写 ref 触发 react-hooks/refs）。
+  const onCancelRef = React.useRef(onCancel);
+  React.useEffect(() => {
+    onCancelRef.current = onCancel;
+  });
 
   React.useEffect(() => {
-    setMounted(true);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel?.();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // VU-30 + VU-44：监听只注册一次，回调经 ref 读取最新 onCancel；
+    // ESC 派发交给共享单例（只作用于最上层浮层）。
+    return registerEscapeHandler(() => onCancelRef.current?.());
   }, []);
 
   React.useEffect(() => {
     dialogRef.current?.focus();
-  }, [mounted]);
+  }, []);
 
   // 尊重 open：关闭时不渲染弹层（此前忽略 open 导致弹层常驻，调用方无法隐藏）
   if (!open) return null;
-  if (!mounted) return null;
 
-  return ReactDOM.createPortal(
+  return createPortal(
     <>
       <div className="rui-modal-mask" onClick={() => onCancel?.()} />
       <div className="rui-modal-wrap">
@@ -328,7 +327,6 @@ export interface ConfirmOptions {
 }
 
 /** 命令式确认框（对齐 antd Modal.confirm 调用面） */
-// eslint-disable-next-line react-refresh/only-export-components
 export const confirm = (options: ConfirmOptions) => {
   if (!canDOM) return;
   const holder = document.createElement("div");
@@ -415,24 +413,24 @@ export const Drawer: React.FC<DrawerProps> = ({
   extra,
   children,
 }) => {
-  const [mounted, setMounted] = React.useState(false);
   const panelRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => setMounted(true), []);
+  // VU-44：回调经 ref 读取，effect 依赖只保留 open，避免 onClose 变化反复注册监听。
+  // VU-64：ref 镜像改在 effect 内更新。
+  const onCloseRef = React.useRef(onClose);
+  React.useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   React.useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose?.();
-    };
-    document.addEventListener("keydown", onKey);
+    const unregisterEscape = registerEscapeHandler(() => onCloseRef.current?.());
     panelRef.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return unregisterEscape;
+  }, [open]);
 
-  if (!open || !mounted) return null;
+  if (!open) return null;
 
-  return ReactDOM.createPortal(
+  return createPortal(
     <>
       <div className="rui-drawer-mask" onClick={() => onClose?.()} />
       <div

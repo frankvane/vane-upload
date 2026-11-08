@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from "react";
 import { UploadFile } from "../types/upload";
 import { useUploadStore } from "../store/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
@@ -22,6 +23,7 @@ export interface FileOperationsActions {
   }>;
 }
 
+/** VU-42：动作与返回对象身份稳定，避免下游表格行/按钮被无意义重渲染击穿。 */
 export function useFileOperations(
   batchUploader: RetryBatchUploaderActions
 ): FileOperationsActions {
@@ -44,51 +46,56 @@ export function useFileOperations(
   );
   const { retryUploadFile, retryAllFailedFiles } = batchUploader;
 
-  const messageApi = getMessageApi();
   const engine = useUploadEngine();
 
-  const handleDeleteFile = async (id: string): Promise<void> => {
-    try {
-      await engine.storage.removeItem(id);
-      await refreshFiles();
-      messageApi.success("文件已删除");
-    } catch {
-      messageApi.error("删除文件失败");
-    }
-  };
-
-  const handleRetryUpload = async (file: UploadFile): Promise<void> => {
-    setRetryingFiles((prev) => ({ ...prev, [file.id]: true }));
-
-    try {
-      const result = await retryUploadFile(file);
-      if (result.success) {
-        messageApi.success(result.message);
-      } else {
-        messageApi.error(result.message);
+  const handleDeleteFile = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        await engine.storage.removeItem(id);
+        await refreshFiles();
+        getMessageApi().success("文件已删除");
+      } catch {
+        getMessageApi().error("删除文件失败");
       }
-    } finally {
-      setRetryingFiles((prev) => {
-        const updated = { ...prev };
-        delete updated[file.id];
-        return updated;
-      });
-    }
-  };
+    },
+    [engine, refreshFiles, getMessageApi]
+  );
 
-  const handleClearList = async (): Promise<boolean> => {
+  const handleRetryUpload = useCallback(
+    async (file: UploadFile): Promise<void> => {
+      setRetryingFiles((prev) => ({ ...prev, [file.id]: true }));
+
+      try {
+        const result = await retryUploadFile(file);
+        if (result.success) {
+          getMessageApi().success(result.message);
+        } else {
+          getMessageApi().error(result.message);
+        }
+      } finally {
+        setRetryingFiles((prev) => {
+          const updated = { ...prev };
+          delete updated[file.id];
+          return updated;
+        });
+      }
+    },
+    [setRetryingFiles, retryUploadFile, getMessageApi]
+  );
+
+  const handleClearList = useCallback(async (): Promise<boolean> => {
     try {
       await engine.storage.clear();
       await refreshFiles();
-      messageApi.success("文件列表已清空");
+      getMessageApi().success("文件列表已清空");
       return true;
     } catch {
-      messageApi.error("清空文件列表失败");
+      getMessageApi().error("清空文件列表失败");
       return false;
     }
-  };
+  }, [engine, refreshFiles, getMessageApi]);
 
-  const handleRetryAllUpload = async (): Promise<{
+  const handleRetryAllUpload = useCallback(async (): Promise<{
     success: boolean;
     message: string;
     retriedCount: number;
@@ -99,23 +106,33 @@ export function useFileOperations(
       const result = await retryAllFailedFiles();
 
       if (result.success) {
-        messageApi.success(result.message);
+        getMessageApi().success(result.message);
       } else {
-        messageApi.error(result.message);
+        getMessageApi().error(result.message);
       }
 
       return result;
     } finally {
       setIsRetryingAll(false);
     }
-  };
+  }, [setIsRetryingAll, retryAllFailedFiles, getMessageApi]);
 
-  return {
-    retryingFiles,
-    isRetryingAll,
-    handleDeleteFile,
-    handleRetryUpload,
-    handleClearList,
-    handleRetryAllUpload,
-  };
+  return useMemo(
+    () => ({
+      retryingFiles,
+      isRetryingAll,
+      handleDeleteFile,
+      handleRetryUpload,
+      handleClearList,
+      handleRetryAllUpload,
+    }),
+    [
+      retryingFiles,
+      isRetryingAll,
+      handleDeleteFile,
+      handleRetryUpload,
+      handleClearList,
+      handleRetryAllUpload,
+    ]
+  );
 }

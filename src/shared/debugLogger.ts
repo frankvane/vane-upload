@@ -12,6 +12,8 @@
  * 消费方可经 `getDebugLog()` 取出最近日志用于排障，`clearDebugLog()` 清空。
  */
 
+import { scrubLogText } from "./redact";
+
 let silent = true;
 let maxLogEntries = 500;
 
@@ -28,10 +30,15 @@ function safeStringify(value: unknown): string {
   }
 }
 
+/**
+ * VU-05 兜底：即便某个调用点忘记脱敏，写入环形缓冲 / 对外导出前再洗一遍。
+ * 规则集中在 shared/redact.ts，主线程、Worker 共用同一份，避免多处正则口径漂移。
+ */
+
 function pushRing(level: string, args: unknown[]): void {
   // 生产（silent）不缓冲：避免任何内存增长；真实失败由 debugError 仍走 console.error
   if (silent) return;
-  const msg = args.map(safeStringify).join(" ");
+  const msg = scrubLogText(args.map(safeStringify).join(" "));
   ring.push(`[${level}][${new Date().toISOString()}] ${msg}`);
   // 限长：超出上限时丢弃最旧条目
   if (ring.length > maxLogEntries) {
@@ -50,20 +57,30 @@ export const configureDebug = (opt: {
   }
 };
 
+/** 控制台输出同样要脱敏——否则「只洗环形缓冲」等于没修。 */
+const scrubArgs = (args: unknown[]): unknown[] =>
+  args.map((arg) => {
+    if (typeof arg === "string") return scrubLogText(arg);
+    if (typeof arg === "object" && arg !== null) {
+      return scrubLogText(safeStringify(arg));
+    }
+    return arg;
+  });
+
 export const debugLog = (...args: unknown[]): void => {
-  if (!silent) console.debug("[rui-upload]", ...args);
+  if (!silent) console.debug("[rui-upload]", ...scrubArgs(args));
   pushRing("debug", args);
 };
 
 export const debugWarn = (...args: unknown[]): void => {
-  if (!silent) console.warn("[rui-upload]", ...args);
+  if (!silent) console.warn("[rui-upload]", ...scrubArgs(args));
   pushRing("warn", args);
 };
 
 // 真实失败始终记录，不受 silent 控制（与 console.error 原语义一致）。
 // 注意：silent 时不入环形缓冲（生产内存零负担），仅调试开启时留痕。
 export const debugError = (...args: unknown[]): void => {
-  console.error("[rui-upload]", ...args);
+  console.error("[rui-upload]", ...scrubArgs(args));
   pushRing("error", args);
 };
 
