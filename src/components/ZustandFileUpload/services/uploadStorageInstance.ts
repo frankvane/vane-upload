@@ -39,6 +39,7 @@ export const createUploadStorage = (instanceId?: string): LocalForage =>
       storeName: instanceId
         ? `${DEFAULT_UPLOAD_STORE_NAME}_${instanceId}`
         : DEFAULT_UPLOAD_STORE_NAME,
-      description: "大文件分片上传元数据（仅存元数据，不存文件字节）",
+      description:
+        "大文件分片上传元数据（分片字节另存于 react-upload-chunks，用于刷新续传）",
     })
   );

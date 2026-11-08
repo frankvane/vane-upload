@@ -348,7 +348,7 @@ D 前端性能（须先做 VU-16/42 稳定引用） ──►  E 后端性能与
 | TC-14 | 并发合并同键 | 并发 | `Promise.all` 2 个 / 10 个 merge → 仅 1 次落盘，`File` 表 1 行，锁正确释放（联动 VU-08） | P0 | 并发+ST |
 | TC-15 | 取消 | 状态转换 | 在途 fetch 被 abort → 只回 `cancelled`、不发 `error`/`done`、不再发起请求（联动 VU-07） | P0 | ST+SC |
 | TC-16 | 暂停/恢复 | 状态转换 | 第 2 片在途 pause → 挂起无新请求；resume → 从断点续传，不重传已完成分片 | P0 | ST+SC |
-| TC-17 | 刷新恢复 | 场景 | IDB 有 `UPLOADING` 且 fileRef 丢失 → `awaitingReselect` ERROR，重选后从已传分片续传（联动 VU-17） | P0 | SC+ST |
+| TC-17 | 刷新恢复 | 场景 | IDB 有 `UPLOADING` 且 fileRef 丢失：分片缓存（`react-upload-chunks`）就绪 → 零点击自动续传；缓存缺失/超上限 → `awaitingReselect` ERROR 并提示重选（联动 VU-17）。**因方案 A（分片字节持久化）变更，原「fileRef 丢失即 awaitingReselect」结论已失效** | P0 | SC+ST |
 | TC-18 | IndexedDB 降级 | 异常 | mock `indexedDB` 不可用 / `setItem` 抛错 → 不白屏、上传主流程可继续、无半写入记录 | P1 | EG+降级 |
 | TC-19 | 网络自适应 | 状态转换 | rtt 50→1000 触发 chunkSize 8MB→256KB → `chunkKey` 改变、`/instant` 返回 `reset:true`、旧分片被清、最终合并成功 | P0 | ST+SC |
 | TC-20 | 秒传命中 | 场景 | A 已合并 → A 换 file_id/chunkSize 仍 `uploaded:true`；B 为 `uploaded:false`；DTO 无 `user_id`/`file_path` | P0 | EP+SC |

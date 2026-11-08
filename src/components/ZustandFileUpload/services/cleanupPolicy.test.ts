@@ -174,7 +174,7 @@ describe("UploadCleanupPolicy", () => {
     expect(options.refreshFiles).toHaveBeenCalled();
   });
 
-  it("forceCleanupUI 立即执行清理且释放已完成文件的 buffer", async () => {
+  it("forceCleanupUI 立即执行清理并移除已完成文件的记录与分片缓存", async () => {
     const { options, files } = createOptions();
     const done = createFile("f-buffer", UploadStatus.DONE, true);
     files.set(done.id, done);
@@ -187,7 +187,7 @@ describe("UploadCleanupPolicy", () => {
 
     await policy.forceCleanupUI();
 
-    // 记录被从 IndexedDB 移除（T3.1 起不再有 buffer 字段需要剥离）
+    // 记录被从元数据库移除；分片字节缓存由 cleanupPolicy 另行清理
     expect(mockSetItem).not.toHaveBeenCalledWith(
       "f-buffer",
       expect.anything()

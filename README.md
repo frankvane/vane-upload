@@ -8,7 +8,7 @@
 - 分片上传与断点续传（服务端分片状态查询 + 秒传预检）
 - 文件/分片并发控制、网络自适应参数
 - 上传进度与状态管理（Zustand store）
-- IndexedDB 暂存与刷新后中断任务恢复（`localforage`）
+- IndexedDB 暂存与刷新后中断任务恢复（`localforage` 存元数据，`react-upload-chunks` 存未确认分片，刷新后零点击续传）
 - Web Worker：文件哈希预处理（`filePrepareWorker`）、分片上传（`uploadWorker`）
 - 内置 UI 套件与上传相关样式
 - 后端上传接口：秒传预检、分片状态、分片上传、合并
@@ -150,7 +150,10 @@ import "vane-upload/style.css";
 ## 断点续传与 IndexedDB
 
 - 上传队列快照写入 `localforage`（默认 IndexedDB 存储），按 `instanceId` 隔离多实例。
-- 页面刷新后，未完成记录会恢复为待上传；若运行时 `File` 引用已丢失，会标记为需重新选择文件。
+- 未确认成功的分片字节写入独立的 `react-upload-chunks` IndexedDB：每片上传成功即删除对应缓存，占用随进度下降；分片元信息最后写入作为「缓存就绪」提交标记。
+- 页面刷新后，未完成记录恢复为待上传；若分片缓存就绪则**零点击自动续传**（沿用持久化的 hash / chunkSize / chunkCount），不再要求重新选择文件。
+- 缓存不可用时降级：单文件超过 `chunkCacheMaxFileSize`（默认 512 MB）、存储配额不足、隐私模式或 IndexedDB 写入失败时，记录标记为 `awaitingReselect` 并明确提示「需重新选择文件」，不会伪装成正在续传。
+- 清理时机：上传完成、用户取消、删除记录、合并失败且不再重试时，同步清除该文件的分片缓存。
 - 分片键为 `${md5}_${size}_${chunkSize}`，网络自适应改变分片大小时新旧分片天然隔离。
 
 ## 测试与校验
