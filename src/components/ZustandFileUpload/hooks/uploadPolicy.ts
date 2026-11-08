@@ -58,6 +58,18 @@ export function applySettled(
   };
 }
 
+/** 批次内单个文件被用户「取消上传」：推进进度但既不计成功也不计失败。 */
+export function applySettledCancelled(prev: BatchInfo | null): BatchInfo | null {
+  if (!prev) {
+    return null;
+  }
+  return {
+    ...prev,
+    current: prev.current + 1,
+    active: Math.max(0, prev.active - 1),
+  };
+}
+
 /** 批次收尾：清零队列/活动，落定 completed/failed 与倒计时。 */
 export function applyFinalized(
   prev: BatchInfo | null,

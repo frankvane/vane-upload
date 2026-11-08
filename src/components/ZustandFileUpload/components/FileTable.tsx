@@ -23,12 +23,18 @@ interface FileTableProps {
   /** T3.3：暂停/继续单个上传任务 */
   pauseUploadFile: (file: UploadFile) => void;
   resumeUploadFile: (file: UploadFile) => void;
+  /**
+   * E2E-R4：取消单个文件上传——中止传输但保留记录（置 PAUSED，可点「继续」重启），
+   * 不清理服务端分片与本地缓存；「删除」才会移除记录并清理两端数据。
+   */
+  cancelUploadFile: (file: UploadFile) => void;
 }
 
 const FileTable: React.FC<FileTableProps> = ({
   fileOperations,
   pauseUploadFile,
   resumeUploadFile,
+  cancelUploadFile,
 }) => {
   // VU-41：不再订阅三张进度 map。进度订阅下沉到 ProgressCell，
   // 高频进度更新因此完全不会触发 FileTable 重渲染或 dataSource 重建。
@@ -143,6 +149,16 @@ const FileTable: React.FC<FileTableProps> = ({
                 暂停
               </Button>
             )}
+            {status === UploadStatus.UPLOADING && (
+              <Button
+                size="small"
+                onClick={() => cancelUploadFile(record)}
+                disabled={isRetrying}
+                title="中止本次传输，保留记录与进度，可稍后点「继续」重新开始"
+              >
+                取消
+              </Button>
+            )}
             {status === UploadStatus.PAUSED && (
               <Button
                 size="small"
@@ -182,7 +198,7 @@ const FileTable: React.FC<FileTableProps> = ({
         );
       },
       align: "center" as AlignItem,
-      width: "15%",
+      width: "18%",
     };
 
     // visibleColumns：仅显示并按下标顺序排序列 key；缺省显示全部内置列
@@ -202,6 +218,7 @@ const FileTable: React.FC<FileTableProps> = ({
     isNetworkOffline,
     pauseUploadFile,
     resumeUploadFile,
+    cancelUploadFile,
     handleRetryUpload,
     handleDeleteFile,
     visibleColumns,

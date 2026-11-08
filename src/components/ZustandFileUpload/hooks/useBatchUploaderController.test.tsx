@@ -231,6 +231,38 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(h.engine.workerPool.pauseUploadTask).toHaveBeenCalledWith("up");
   });
 
+  it("cancelUploadFile：中止传输但保留记录（PAUSED），可继续（E2E-R4）", async () => {
+    const uploading = makeFile({ id: "up", status: UploadStatus.UPLOADING });
+    const { result } = renderHook(() => useBatchUploader());
+
+    await act(async () => {
+      await result.current.cancelUploadFile(uploading);
+    });
+
+    // 记录保留：置 PAUSED（行内出现「继续」），不写错误、不删除记录
+    expect(h.patchFile).toHaveBeenCalledWith("up", {
+      status: UploadStatus.PAUSED,
+      errorMessage: undefined,
+    });
+    expect(h.engine.storage.setItem).toHaveBeenCalledWith(
+      "up",
+      expect.objectContaining({ status: UploadStatus.PAUSED })
+    );
+    expect(h.engine.workerPool.cancelUploadTask).toHaveBeenCalledWith("up");
+    expect(h.message.info).toHaveBeenCalledWith(
+      expect.stringContaining("已取消")
+    );
+
+    // 非 UPLOADING 状态为 no-op，避免误取消已完成/暂停的文件
+    h.engine.workerPool.cancelUploadTask.mockClear();
+    await act(async () => {
+      await result.current.cancelUploadFile(
+        makeFile({ id: "done", status: UploadStatus.DONE })
+      );
+    });
+    expect(h.engine.workerPool.cancelUploadTask).not.toHaveBeenCalled();
+  });
+
   it("pauseUploadFile：非 UPLOADING 文件为 no-op", async () => {
     const done = makeFile({ id: "d", status: UploadStatus.DONE });
     const { result } = renderHook(() => useBatchUploader());

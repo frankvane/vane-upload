@@ -47,6 +47,7 @@ const Harness = () => {
       fileOperations={stableFileOperations}
       pauseUploadFile={noop}
       resumeUploadFile={noop}
+      cancelUploadFile={noop}
     />
   );
 };

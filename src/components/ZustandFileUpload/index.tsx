@@ -209,6 +209,7 @@ const ZustandFileUploadCore: React.FC = () => {
           fileOperations={fileOperations}
           pauseUploadFile={batchUploader.pauseUploadFile}
           resumeUploadFile={batchUploader.resumeUploadFile}
+          cancelUploadFile={batchUploader.cancelUploadFile}
         />
       </Suspense>
       {uploadConfig.uiMode !== "simple" && (

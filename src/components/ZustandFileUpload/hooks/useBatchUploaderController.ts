@@ -1,4 +1,4 @@
-﻿import { useCallback, useMemo } from "react";
+﻿import { useCallback, useMemo, useRef } from "react";
 import { UploadFile, UploadStatus } from "../types/upload";
 
 import { loadAllUploadFiles, runConcurrentQueue } from "../services/uploadOrchestrator";
@@ -17,6 +17,7 @@ import {
   applyBeforeEach,
   applyFinalized,
   applySettled,
+  applySettledCancelled,
   classifyUploadResult,
   createInitialBatchInfo,
   isUploadSuccessKind,
@@ -35,6 +36,11 @@ export interface BatchUploaderActions {
   clearBatchInfo: () => void;
   pauseUploadFile: (file: UploadFile) => Promise<void>;
   resumeUploadFile: (file: UploadFile) => Promise<void>;
+  /**
+   * E2E-R4：取消单个文件的上传——中止传输但保留记录（状态置 PAUSED，
+   * 可点「继续」重新开始），与「删除」（移除记录 + 清理服务端分片与本地缓存）区分。
+   */
+  cancelUploadFile: (file: UploadFile) => Promise<void>;
   retryUploadFile: (
     file: UploadFile
   ) => Promise<{ success: boolean; message: string }>;
@@ -79,6 +85,16 @@ export function useBatchUploader(): BatchUploaderActions {
 
   const uploadConfig = useEffectiveUploadConfig();
   const engine = useUploadEngine();
+
+  /**
+   * E2E-R4：用户显式「取消上传」的文件 id。
+   * - userCancelledIds：Worker 返回 cancelled 时据此写 PAUSED（而非回 QUEUED）；
+   * - cancelledInBatchIds：批次结算时跳过成功/失败计数，避免取消污染批量统计。
+   */
+  const userCancelledIdsRef = useRef<Set<string>>(new Set());
+  const cancelledInBatchIdsRef = useRef<Set<string>>(new Set());
+  /** 本批次内实际结算的取消数（用于从 summary.failedCount 中剔除） */
+  const cancelledSettleCountRef = useRef(0);
 
   const {
     cleanupPolicy,
@@ -181,8 +197,16 @@ export function useBatchUploader(): BatchUploaderActions {
       const kind = classifyUploadResult(result);
 
       if (kind.kind === "cancelled") {
-        // 取消语义：状态回 QUEUED 可重新入队（保留 fileRef 以便后续重传/续传）
-        latest.status = UploadStatus.QUEUED;
+        // E2E-R4：用户显式「取消上传」→ 置 PAUSED（保留记录与进度，可点「继续」
+        // 重新开始）；批级取消（cancelUpload）仍回 QUEUED 等待重新入队。
+        const userCancelled = userCancelledIdsRef.current.delete(file.id);
+        latest.status = userCancelled
+          ? UploadStatus.PAUSED
+          : UploadStatus.QUEUED;
+        if (userCancelled) {
+          latest.progress =
+            engine.store.getState().progressMap[file.id] ?? latest.progress ?? 0;
+        }
         latest.errorMessage = undefined;
         latest.awaitingReselect = false;
         await engine.storage.setItem(file.id, latest);
@@ -299,6 +323,9 @@ export function useBatchUploader(): BatchUploaderActions {
 
     const batchController = beginBatchSession();
     setIsUploading(true);
+    // E2E-R4：新批次重置取消计数，避免上一批的取消影响本批统计。
+    cancelledInBatchIdsRef.current.clear();
+    cancelledSettleCountRef.current = 0;
 
     uploadConfig.onUploadStart?.(uploadableFiles);
 
@@ -332,7 +359,13 @@ export function useBatchUploader(): BatchUploaderActions {
             return;
           }
 
-          setBatchInfo((prev) => applySettled(prev, success));
+          // E2E-R4：被用户取消的文件既不算成功也不算失败，避免污染批量统计。
+          if (cancelledInBatchIdsRef.current.delete(item.id)) {
+            cancelledSettleCountRef.current += 1;
+            setBatchInfo(applySettledCancelled);
+          } else {
+            setBatchInfo((prev) => applySettled(prev, success));
+          }
           syncFile(item);
         },
       });
@@ -341,7 +374,16 @@ export function useBatchUploader(): BatchUploaderActions {
         return false;
       }
 
-      await finalizeBatch(summary, uploadableFiles.length);
+      await finalizeBatch(
+        {
+          successCount: summary.successCount,
+          failedCount: Math.max(
+            summary.failedCount - cancelledSettleCountRef.current,
+            0
+          ),
+        },
+        uploadableFiles.length
+      );
       return true;
     } finally {
       endBatchSession(batchController);
@@ -487,6 +529,43 @@ export function useBatchUploader(): BatchUploaderActions {
       );
     },
     [engine, getMessageApi, processFileUpload]
+  );
+
+  /**
+   * E2E-R4：取消单个文件的上传。
+   * 与「删除」的区别：
+   * - 取消：中止 Worker 传输，保留记录与进度（置 PAUSED，可点「继续」重新开始），
+   *   不清理服务端分片，也不清理本地分片缓存；
+   * - 删除：移除记录，并清理服务端分片与本地缓存（见 useFileOperations.handleDelete）。
+   */
+  const cancelUploadFile = useCallback(
+    async (file: UploadFile) => {
+      if (file.status !== UploadStatus.UPLOADING) {
+        return;
+      }
+
+      // 标记「用户取消」意图：Worker 返回 cancelled 后写 PAUSED 而非回 QUEUED。
+      userCancelledIdsRef.current.add(file.id);
+      cancelledInBatchIdsRef.current.add(file.id);
+
+      // 乐观更新：立即置 PAUSED，保留当前进度与 fileRef；缓存不清理，
+      // 因此中断后既可点「继续」回归当前会话，也可刷新后走续传。
+      engine.store.getState().patchFile(file.id, {
+        status: UploadStatus.PAUSED,
+        errorMessage: undefined,
+      });
+      await engine.storage.setItem(file.id, {
+        ...file,
+        status: UploadStatus.PAUSED,
+        errorMessage: undefined,
+      });
+
+      engine.workerPool.cancelUploadTask(file.id);
+      getMessageApi().info(
+        `已取消「${file.fileName}」的上传，记录已保留，可点击「继续」重新开始`
+      );
+    },
+    [engine, getMessageApi]
   );
 
   const clearBatchInfo = useCallback(() => {
@@ -638,6 +717,7 @@ export function useBatchUploader(): BatchUploaderActions {
       clearBatchInfo,
       pauseUploadFile,
       resumeUploadFile,
+      cancelUploadFile,
       retryUploadFile,
       retryAllFailedFiles,
       forceCleanupUI,
@@ -649,6 +729,7 @@ export function useBatchUploader(): BatchUploaderActions {
       clearBatchInfo,
       pauseUploadFile,
       resumeUploadFile,
+      cancelUploadFile,
       retryUploadFile,
       retryAllFailedFiles,
       forceCleanupUI,
