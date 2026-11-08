@@ -7,7 +7,10 @@ import {
   useNetworkDetection,
 } from "./hooks";
 
-import { recoverUploadQueueOnMount } from "./services/uploadStorage";
+import {
+  recoverUploadQueueOnMount,
+  type UploadRecoverySnapshot,
+} from "./services/uploadStorage";
 import { useUploadStore } from "./store/upload";
 import { useUploadEngine } from "./context/UploadEngineContext";
 import { UploadProvider } from "./context/UploadContext";
@@ -49,7 +52,13 @@ const ZustandFileUploadCore: React.FC = () => {
 
   const uploadConfig = useUploadContext();
   const inputRef = useRef<HTMLInputElement>(null);
-  const hasRecoveredOnceRef = useRef(false);
+  // E2E-R1：StrictMode 会「挂载 → 清理 → 再挂载」。旧实现用 hasRecoveredOnceRef
+  // 让第二次 effect 直接 return，同时第一次的异步结果又因 disposed 被丢弃，
+  // 导致唯一一次恢复结果永远应用不到列表。这里改为复用同一个恢复 Promise：
+  // 两次挂载共享一次 IDB 读写，最终由仍然存活的那次 effect 应用快照。
+  const recoveryPromiseRef = useRef<ReturnType<
+    typeof recoverUploadQueueOnMount
+  > | null>(null);
 
   useNetworkDetection();
 
@@ -96,32 +105,46 @@ const ZustandFileUploadCore: React.FC = () => {
       networkDisplayMode: uploadConfig.networkDisplayMode,
       settingsSource: uploadConfig.settingsSource,
     });
+  }, [
+    initSettings,
+    uploadConfig.autoUpload,
+    uploadConfig.autoCleanup,
+    uploadConfig.cleanupDelay,
+    uploadConfig.networkDisplayMode,
+    uploadConfig.settingsSource,
+  ]);
 
-    if (hasRecoveredOnceRef.current) {
-      return;
+  // E2E-R1：恢复只在挂载期做一次；恢复 Promise 在 StrictMode 的两次挂载间复用，
+  // 由仍然存活的那次 effect 应用结果，既不会丢失也不会重复恢复。
+  useEffect(() => {
+    let active = true;
+    if (!recoveryPromiseRef.current) {
+      recoveryPromiseRef.current = recoverUploadQueueOnMount(engine.storage);
     }
-    hasRecoveredOnceRef.current = true;
-
-    let disposed = false;
+    const recoveryPromise = recoveryPromiseRef.current;
 
     const recoverInterruptedUploads = async () => {
-      // VU-39：一次 IDB 快照内完成「中断恢复」+「历史 QUEUED 治理」，
-      // 内部把彼此独立的写入用 Promise.all 并发落库，并返回最终有序快照。
-      // 旧链路的 3 次 iterate（恢复读 / 治理读 / refreshFiles 读）收敛为 1 次。
-      const { files, summary: recovery } = await recoverUploadQueueOnMount(
-        engine.storage
-      );
-      if (disposed) return;
+      let snapshot: UploadRecoverySnapshot;
+      try {
+        // VU-39：一次 IDB 快照内完成「中断恢复」+「历史 QUEUED 治理」。
+        snapshot = await recoveryPromise;
+      } catch {
+        // 读取失败：清空缓存，允许后续挂载重试。
+        recoveryPromiseRef.current = null;
+        return;
+      }
+      if (!active) return;
 
+      const { files, summary: recovery } = snapshot;
       // 用已知快照刷新 store：不再为了「确认自己刚写进去的内容」再读一遍全表。
+      // 两次挂载都送达同一份快照时是「整体替换」，不会产生重复行。
       await refreshFiles(files);
-
-      // 同步判断已在唯一的异步 IO 之后立即执行，其后只剩纯内存的消息派发。
-      if (disposed || recovery.totalInterrupted === 0) {
+      if (!active || recovery.totalInterrupted === 0) {
         return;
       }
 
-      const messageApi = engine.store.getState().getMessageApi();
+      const state = engine.store.getState();
+      const messageApi = state.getMessageApi();
 
       if (recovery.recoveredCount > 0) {
         messageApi.info(
@@ -136,8 +159,8 @@ const ZustandFileUploadCore: React.FC = () => {
       }
 
       const shouldAutoResume =
-        uploadConfig.autoUpload &&
-        !engine.store.getState().isNetworkOffline &&
+        state.autoUpload &&
+        !state.isNetworkOffline &&
         recovery.recoveredCount > 0;
 
       if (shouldAutoResume) {
@@ -149,18 +172,9 @@ const ZustandFileUploadCore: React.FC = () => {
     void recoverInterruptedUploads();
 
     return () => {
-      disposed = true;
+      active = false;
     };
-  }, [
-    engine,
-    initSettings,
-    refreshFiles,
-    uploadConfig.autoUpload,
-    uploadConfig.autoCleanup,
-    uploadConfig.cleanupDelay,
-    uploadConfig.networkDisplayMode,
-    uploadConfig.settingsSource,
-  ]);
+  }, [engine, refreshFiles]);
 
   const triggerFileInput = useCallback(() => {
     inputRef.current?.click();
