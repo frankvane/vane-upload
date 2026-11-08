@@ -165,6 +165,29 @@ describe("useFileProcessor 行为断言", () => {
     expect(h.instances.length).toBe(0);
   });
 
+  it("E2E-R2：危险扩展名/危险 MIME 在选择阶段即被拦截并给出可读原因", () => {
+    // 即使白名单显式放行该 MIME，危险扩展名仍必须被拒（与服务端 /merge 同口径）
+    h.config.allowedFileTypes = ["application/octet-stream"];
+    const exe = makeFile("virus.exe", "application/octet-stream", 100);
+    const htmlMime = makeFile("page.txt", "text/html", 100);
+    const valid = makeFile("ok.bin", "application/octet-stream", 100);
+
+    const { result } = renderHook(() => useFileProcessor({ uploadAll: vi.fn() }));
+
+    act(() => {
+      result.current.handleFileChange(makeEvent([exe, htmlMime, valid]));
+    });
+
+    expect(h.messageApi.error).toHaveBeenCalledWith(
+      '文件 "virus.exe" 不允许上传的类型（危险扩展名 .exe）'
+    );
+    expect(h.messageApi.error).toHaveBeenCalledWith(
+      '文件 "page.txt" 不允许上传的类型（危险内容类型 text/html）'
+    );
+    // 合法文件照常进入预处理，不因同批危险文件被整体拒绝
+    expect(h.instances.length).toBe(1);
+  });
+
   it("MIME 白名单拦截：不在 allowedFileTypes 的文件类型被拒绝", () => {
     h.config.allowedFileTypes = ["image/png"];
     const disallowed = makeFile("doc.txt", "text/plain", 100);

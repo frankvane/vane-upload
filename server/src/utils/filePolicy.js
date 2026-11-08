@@ -16,32 +16,12 @@
 const path = require("path");
 const { config } = require("../config");
 
-const DANGEROUS_EXTENSIONS = new Set([
-  "html", "htm", "xhtml", "shtml", "svg", "svgz",
-  "js", "mjs", "cjs", "jsx", "ts", "wasm",
-  "exe", "dll", "com", "scr", "msi", "pif", "cpl",
-  "bat", "cmd", "ps1", "vbs", "vbe", "hta", "sh", "bash",
-  "php", "phtml", "phar", "asp", "aspx", "jsp", "cgi", "pl", "py", "rb",
-  "jar", "war", "htaccess",
-]);
+// E2E-R2：与前端共用同一份清单（src/shared/fileSafety.ts 读取同一文件），
+// 避免前端放行、后端 415 的双口径问题。
+const dangerousFileTypes = require("../config/dangerous-file-types.json");
 
-const DANGEROUS_MIMES = new Set([
-  "text/html",
-  "application/xhtml+xml",
-  "image/svg+xml",
-  "application/javascript",
-  "text/javascript",
-  "application/x-msdownload",
-  "application/x-dosexec",
-  "application/x-executable",
-  "application/vnd.microsoft.portable-executable",
-  "application/x-shockwave-flash",
-  "application/x-httpd-php",
-  "text/x-php",
-  "application/x-wasm",
-  "text/x-shellscript",
-  "application/x-cgi",
-]);
+const DANGEROUS_EXTENSIONS = new Set(dangerousFileTypes.extensions);
+const DANGEROUS_MIMES = new Set(dangerousFileTypes.mimes);
 
 const httpError = (statusCode, message, details = undefined) => {
   const error = new Error(message);

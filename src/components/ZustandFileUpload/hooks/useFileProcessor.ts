@@ -7,6 +7,10 @@ import { ProcessingStats, UploadFile, UploadStatus } from "../types/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { useShallow } from "zustand/react/shallow";
 import { compileAllowedTypes, isFileTypeAllowed } from "../../../shared/fileType";
+import {
+  findDangerousFileViolation,
+  formatDangerousFileReason,
+} from "../../../shared/fileSafety";
 import { reconcileIncomingFiles } from "../services/uploadDedupe";
 import {
   primeChunkCache,
@@ -139,6 +143,16 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
     const allowedTypes = compileAllowedTypes(uploadConfig.allowedFileTypes);
 
     files.forEach((file) => {
+      // E2E-R2：危险类型用与服务端 /merge 相同的清单，在选择阶段直接拦截，
+      // 不再「传完所有分片才拿到 415」。这一条优先于白名单，避免被白名单误放行。
+      const dangerous = findDangerousFileViolation(file);
+      if (dangerous) {
+        errors.push(
+          `文件 "${file.name}" ${formatDangerousFileReason(dangerous)}`
+        );
+        return;
+      }
+
       if (file.size > uploadConfig.maxFileSize) {
         errors.push(
           `文件 "${file.name}" 大小超过限制 (${Math.round(

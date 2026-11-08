@@ -1,0 +1,28 @@
+{
+  "_comment": "前后端共用的危险文件类型口径（E2E-R2）。前端选择阶段与后端合并落盘前都读取本文件，避免一边放行一边拒绝。修改时两边自动同步。",
+  "extensions": [
+    "html", "htm", "xhtml", "shtml", "svg", "svgz",
+    "js", "mjs", "cjs", "jsx", "ts", "wasm",
+    "exe", "dll", "com", "scr", "msi", "pif", "cpl",
+    "bat", "cmd", "ps1", "vbs", "vbe", "hta", "sh", "bash",
+    "php", "phtml", "phar", "asp", "aspx", "jsp", "cgi", "pl", "py", "rb",
+    "jar", "war", "htaccess"
+  ],
+  "mimes": [
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-dosexec",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-shockwave-flash",
+    "application/x-httpd-php",
+    "text/x-php",
+    "application/x-wasm",
+    "text/x-shellscript",
+    "application/x-cgi"
+  ]
+}
