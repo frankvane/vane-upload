@@ -58,7 +58,8 @@ const h = vi.hoisted(() => {
     },
     storage: {
       setItem: vi.fn(async () => undefined),
-      getItem: vi.fn(async () => undefined),
+      // E2E-03：getItem 用于「记录是否仍存在」的守卫，默认视为存在。
+      getItem: vi.fn(async (): Promise<UploadFile | null> => ({} as UploadFile)),
       removeItem: vi.fn(async () => undefined),
       clear: vi.fn(async () => undefined),
     },
@@ -169,6 +170,7 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     h.engine.workerPool.pauseUploadTask.mockClear();
     h.engine.workerPool.resumeUploadTask.mockReturnValue(true);
     h.engine.storage.setItem.mockResolvedValue(undefined);
+    h.engine.storage.getItem.mockResolvedValue({} as UploadFile);
     h.orchestrator.loadAllUploadFiles.mockResolvedValue([]);
     h.orchestrator.runConcurrentQueue.mockReset();
   });
@@ -382,6 +384,42 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(h.message.info).toHaveBeenCalledWith("没有需要上传的文件");
     expect(h.orchestrator.runConcurrentQueue).not.toHaveBeenCalled();
     expect(h.storeState.setIsUploading).toHaveBeenCalledWith(false);
+  });
+
+  it("uploadAll：排队期间记录被删除时不再写回、不启动上传（E2E-03）", async () => {
+    const queued = makeFile({ id: "gone", status: UploadStatus.QUEUED });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([queued]);
+    h.engine.storage.getItem.mockResolvedValue(null);
+    h.orchestrator.runConcurrentQueue.mockImplementation(
+      async (opts: {
+        items: UploadFile[];
+        beforeEach?: (f: UploadFile, i: number) => Promise<void>;
+        task: (f: UploadFile, i: number) => Promise<boolean>;
+        onSettled?: (r: {
+          item: UploadFile;
+          index: number;
+          success: boolean;
+        }) => Promise<void> | void;
+      }) => {
+        let failedCount = 0;
+        for (const item of opts.items) {
+          await opts.beforeEach?.(item, 0);
+          const success = await opts.task(item, 0);
+          if (!success) failedCount += 1;
+          await opts.onSettled?.({ item, index: 0, success });
+        }
+        return { successCount: 0, failedCount };
+      }
+    );
+
+    const { result } = renderHook(() => useBatchUploader());
+
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    expect(h.engine.workerPool.runUploadTask).not.toHaveBeenCalled();
+    expect(h.engine.storage.setItem).not.toHaveBeenCalled();
   });
 
   it("uploadAll：离线时直接报错并返回 false", async () => {

@@ -225,6 +225,32 @@ exports.statusQuery = async (req, res) => {
   }
 };
 
+/**
+ * E2E-03：删除上传任务时清理服务端残留分片。
+ *
+ * 客户端删除本地记录后会调用本接口；服务端清空该 file_id 下的分片文件与
+ * FileChunk 记录。清理后即使旧客户端仍尝试 /merge，也会因缺少分片而失败，
+ * 不会把「已删除」的文件合并落盘。
+ */
+exports.abortUpload = async (req, res) => {
+  try {
+    const safeFileId = sanitizeFileId(req.body?.file_id);
+    if (!safeFileId) {
+      return jsonError(res, 400, "missing required parameters");
+    }
+    const userId = getUserId(req);
+    const storageId = getStorageId(req, safeFileId);
+
+    const cleared = await resetChunkResults(storageId, userId);
+    return jsonOk(res, { cleared });
+  } catch (error) {
+    if (isSqliteBusyError(error)) {
+      return jsonError(res, 503, "database is busy, please retry later");
+    }
+    return jsonError(res, 500, redactErrorMessage(error));
+  }
+};
+
 exports.uploadChunk = async (req, res) => {
   try {
     const { file_id, index: rawIndex, chunk_md5 } = req.body;

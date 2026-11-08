@@ -95,6 +95,12 @@ export function useBatchUploader(): BatchUploaderActions {
         return false;
       }
 
+      // E2E-03：文件可能在排队 / 预处理期间被删除。记录已不存在时不得写回
+      // 任何状态（包括 ERROR），否则刷新后列表会「复活」这条记录并继续上传。
+      if (!(await engine.storage.getItem<UploadFile>(file.id))) {
+        return false;
+      }
+
       // T3.1：文件字节不再驻留 IndexedDB，改由主线程 fileRegistry 持有运行时引用。
       // 页面刷新后注册表清空 → 需用户重新选择同一文件方可续传（服务端分片检查决定跳过范围）。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
@@ -147,7 +153,14 @@ export function useBatchUploader(): BatchUploaderActions {
         },
       });
 
-      const latest = (await engine.storage.getItem<UploadFile>(file.id)) ?? file;
+      // E2E-03：任务结束前记录被删除（删除即中止）时直接收尾，绝不写回。
+      // 旧实现回退到内存里的 file 对象，cancelled/paused/error/success 分支
+      // 都会把已删除的记录重新 setItem，造成刷新后「复活」。
+      const persisted = await engine.storage.getItem<UploadFile>(file.id);
+      if (!persisted) {
+        return false;
+      }
+      const latest = persisted;
       const kind = classifyUploadResult(result);
 
       if (kind.kind === "cancelled") {
@@ -274,6 +287,11 @@ export function useBatchUploader(): BatchUploaderActions {
         shouldStop: () => batchController.signal.aborted,
         beforeEach: async (file) => {
           if (batchController.signal.aborted) {
+            return;
+          }
+
+          // E2E-03：排队期间被删除的文件不得再写回 PREPARING_UPLOAD。
+          if (!(await engine.storage.getItem<UploadFile>(file.id))) {
             return;
           }
 
@@ -509,6 +527,11 @@ export function useBatchUploader(): BatchUploaderActions {
         shouldStop: () => batchController.signal.aborted,
         beforeEach: async (file) => {
           if (batchController.signal.aborted) {
+            return;
+          }
+
+          // E2E-03：排队期间被删除的文件不得再写回 PREPARING_UPLOAD。
+          if (!(await engine.storage.getItem<UploadFile>(file.id))) {
             return;
           }
 

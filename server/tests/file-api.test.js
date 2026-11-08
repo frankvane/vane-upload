@@ -272,3 +272,58 @@ test("merge stores same-name uploads with distinct physical files", async () => 
   assert.equal(md5Buffer(firstBuffer), first.chunkMd5);
   assert.equal(md5Buffer(secondBuffer), second.chunkMd5);
 });
+
+test("E2E-03：POST /api/file/abort 清理残留分片，删除后不会被合并落盘", async () => {
+  const chunkBuffer = Buffer.from("abort-chunk-payload", "utf8");
+  const chunkMd5 = md5Buffer(chunkBuffer);
+  const fileId = "abort_case_file";
+
+  const uploadRes = await request(app)
+    .post("/api/file/upload")
+    .field("file_id", fileId)
+    .field("index", "0")
+    .field("chunk_md5", chunkMd5)
+    .attach("chunk", chunkBuffer, { filename: "chunk-0.bin" });
+  assert.equal(uploadRes.status, 200);
+
+  const chunkPath = buildChunkPath(scoped(fileId), 0);
+  assert.equal(fs.existsSync(chunkPath), true);
+
+  const abortRes = await request(app)
+    .post("/api/file/abort")
+    .send({ file_id: fileId });
+  assert.equal(abortRes.status, 200);
+  assert.equal(abortRes.body.data.cleared, 1);
+  assert.equal(fs.existsSync(chunkPath), false, "分片文件必须被删除");
+
+  const statusRes = await request(app)
+    .get("/api/file/status")
+    .query({ file_id: fileId, md5: "unused-in-status-check" });
+  assert.deepEqual(statusRes.body.data.chunks, [], "分片状态必须被清空");
+
+  // 已删除的分片不能再被合并落盘。
+  const mergeRes = await request(app).post("/api/file/merge").send({
+    file_id: fileId,
+    md5: chunkMd5,
+    name: "aborted.bin",
+    size: chunkBuffer.length,
+    total: 1,
+  });
+  assert.equal(mergeRes.status, 400);
+
+  const mergedFile = await File.findOne({
+    where: { md5: chunkMd5, size: chunkBuffer.length, status: 1 },
+  });
+  assert.equal(mergedFile, null, "已删除的上传不得产生落盘文件");
+});
+
+test("E2E-03：POST /api/file/abort 幂等，缺少 file_id 时返回 400", async () => {
+  const emptyRes = await request(app)
+    .post("/api/file/abort")
+    .send({ file_id: "abort_none_file" });
+  assert.equal(emptyRes.status, 200);
+  assert.equal(emptyRes.body.data.cleared, 0);
+
+  const missingRes = await request(app).post("/api/file/abort").send({});
+  assert.equal(missingRes.status, 400);
+});

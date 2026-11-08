@@ -5,7 +5,7 @@
  * 各 action 的副作用顺序、返回值，以及错误分支（catch）的提示文案。
  */
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadFile } from "../types/upload";
 
 // 共享的可控状态（hoisted 以便 mock 工厂引用）
@@ -29,7 +29,25 @@ const h = vi.hoisted(() => ({
       removeItem: vi.fn(async () => undefined),
       clear: vi.fn(async () => undefined),
     },
+    store: {
+      getState: vi.fn(() => ({ files: [] as UploadFile[] })),
+    },
+    workerPool: {
+      cancelUploadTask: vi.fn(),
+    },
+    fileRegistry: {
+      releaseFileRef: vi.fn(),
+    },
   },
+  uploadConfig: {
+    baseURL: "",
+    uploadApi: "/api/file/upload",
+    checkApi: "/api/file/instant",
+    mergeApi: "/api/file/merge",
+    chunkSize: 1024,
+    withCredentials: false,
+  },
+  fetch: vi.fn(async () => ({ ok: true })),
   retryUploadFile: vi.fn(),
   retryAllFailedFiles: vi.fn(),
 }));
@@ -48,6 +66,10 @@ vi.mock("../context/UploadEngineContext", () => ({
   useUploadEngine: vi.fn(() => h.engine),
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   UploadEngineContext: {} as any,
+}));
+
+vi.mock("./useEffectiveConfig", () => ({
+  useEffectiveUploadConfig: vi.fn(() => h.uploadConfig),
 }));
 
 import { useFileOperations } from "./useFileOperations";
@@ -85,6 +107,11 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     h.storeState.refreshFiles.mockResolvedValue(undefined);
     h.engine.storage.removeItem.mockResolvedValue(undefined);
     h.engine.storage.clear.mockResolvedValue(undefined);
+    h.engine.store.getState.mockReturnValue({ files: [] });
+    h.engine.workerPool.cancelUploadTask.mockClear();
+    h.engine.fileRegistry.releaseFileRef.mockClear();
+    h.fetch.mockClear();
+    vi.stubGlobal("fetch", h.fetch);
     h.retryUploadFile.mockResolvedValue({ success: true, message: "ok" });
     h.retryAllFailedFiles.mockResolvedValue({
       success: true,
@@ -104,6 +131,10 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     expect(result.current.isRetryingAll).toBe(false);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("handleDeleteFile 成功：移除存储 + 刷新 + 成功提示", async () => {
     const { result } = renderHook(() => useFileOperations(makeBatch()));
 
@@ -115,6 +146,52 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     expect(h.storeState.refreshFiles).toHaveBeenCalledTimes(1);
     expect(h.message.success).toHaveBeenCalledWith("文件已删除");
     expect(h.message.error).not.toHaveBeenCalled();
+  });
+
+  it("E2E-03：删除即中止 Worker，并清理服务端残留分片", async () => {
+    h.engine.store.getState.mockReturnValue({
+      files: [
+        makeFile({
+          id: "f1",
+          hash: "a".repeat(32),
+          fileSize: 100,
+          chunkSize: 1024,
+        }),
+      ],
+    });
+    const { result } = renderHook(() => useFileOperations(makeBatch()));
+
+    await act(async () => {
+      await result.current.handleDeleteFile("f1");
+    });
+
+    // 1) Worker 侧真实取消，2) 释放 File 引用，避免任务收尾继续写回
+    expect(h.engine.workerPool.cancelUploadTask).toHaveBeenCalledWith("f1");
+    expect(h.engine.fileRegistry.releaseFileRef).toHaveBeenCalledWith("f1");
+
+    // 3) 通知服务端清理分片（file_id 为跨会话稳定的复合分片键）
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalledTimes(1));
+    const [url, init] = h.fetch.mock.calls[0] as unknown as [
+      string,
+      RequestInit
+    ];
+    expect(url).toBe("/api/file/abort");
+    expect(JSON.parse(String(init.body))).toEqual({
+      file_id: `${"a".repeat(32)}_100_1024`,
+    });
+  });
+
+  it("E2E-03：未完成哈希的文件跳过 abort 请求", async () => {
+    h.engine.store.getState.mockReturnValue({
+      files: [makeFile({ id: "f1", fileSize: 100 })],
+    });
+    const { result } = renderHook(() => useFileOperations(makeBatch()));
+
+    await act(async () => {
+      await result.current.handleDeleteFile("f1");
+    });
+
+    expect(h.fetch).not.toHaveBeenCalled();
   });
 
   it("handleDeleteFile 失败：进入 catch 并显示错误提示", async () => {

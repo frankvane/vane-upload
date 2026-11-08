@@ -4,6 +4,46 @@ import { useUploadStore } from "../store/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import type { BatchUploaderActions } from "./useBatchUploader";
 import { useShallow } from "zustand/react/shallow";
+import { buildChunkKey } from "../../../shared/chunkKey";
+import { joinUrl } from "../../../shared/url";
+import { resolveAuthHeaders, resolveRequestCredentials } from "../utils/auth";
+import { useEffectiveUploadConfig } from "./useEffectiveConfig";
+
+const DEFAULT_ABORT_API = "/api/file/abort";
+
+/** 由 uploadApi 推导 abort 接口（`/…/upload` → `/…/abort`），无法推导时回落默认路径。 */
+const resolveAbortApi = (uploadApi: string): string =>
+  /\/upload\/?$/.test(uploadApi)
+    ? uploadApi.replace(/\/upload\/?$/, "/abort")
+    : DEFAULT_ABORT_API;
+
+/**
+ * E2E-03：删除文件时清理服务端已落的分片。
+ * 暂停态没有存活 Worker，删除后这些分片永远不会被合并成文件，
+ * 必须由客户端显式通知服务端清理，否则会变成永久孤儿分片。
+ * best-effort：失败不阻塞本地删除，分片最终由 janitor 兜底。
+ */
+const abortServerChunks = async (
+  file: UploadFile,
+  config: ReturnType<typeof useEffectiveUploadConfig>
+): Promise<void> => {
+  const fileId = buildChunkKey(
+    file.hash,
+    file.fileSize,
+    file.chunkSize ?? config.chunkSize
+  );
+  if (!fileId) {
+    return;
+  }
+
+  const authHeaders = await resolveAuthHeaders(config);
+  await fetch(joinUrl(config.baseURL, resolveAbortApi(config.uploadApi)), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders },
+    credentials: resolveRequestCredentials(config.withCredentials),
+    body: JSON.stringify({ file_id: fileId }),
+  });
+};
 
 type RetryBatchUploaderActions = Pick<
   BatchUploaderActions,
@@ -47,18 +87,33 @@ export function useFileOperations(
   const { retryUploadFile, retryAllFailedFiles } = batchUploader;
 
   const engine = useUploadEngine();
+  const uploadConfig = useEffectiveUploadConfig();
 
   const handleDeleteFile = useCallback(
     async (id: string): Promise<void> => {
       try {
+        const { files } = engine.store.getState();
+        const file = files.find((item) => item.id === id);
+
+        // E2E-03：删除即中止。先通知 Worker 取消在途分片请求——只删 IndexedDB
+        // 记录无法阻止 worker 继续发分片，任务收尾还会把记录写回导致「复活」。
+        engine.workerPool.cancelUploadTask(id);
+        engine.fileRegistry.releaseFileRef(id);
+
         await engine.storage.removeItem(id);
+
+        // 暂停态无存活 Worker：服务端已落的分片不会再有合并机会，需主动清理。
+        if (file?.hash) {
+          void abortServerChunks(file, uploadConfig).catch(() => undefined);
+        }
+
         await refreshFiles();
         getMessageApi().success("文件已删除");
       } catch {
         getMessageApi().error("删除文件失败");
       }
     },
-    [engine, refreshFiles, getMessageApi]
+    [engine, refreshFiles, getMessageApi, uploadConfig]
   );
 
   const handleRetryUpload = useCallback(

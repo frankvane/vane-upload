@@ -14,5 +14,7 @@ router.post("/instant", asyncHandler(uploadController.instantCheck));
 router.get("/status", asyncHandler(uploadController.statusQuery));
 router.post("/upload", uploadChunk, asyncHandler(uploadController.uploadChunk));
 router.post("/merge", asyncHandler(uploadController.mergeChunks));
+// E2E-03：删除上传任务时清理服务端残留分片
+router.post("/abort", asyncHandler(uploadController.abortUpload));
 
 module.exports = router;

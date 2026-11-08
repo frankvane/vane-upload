@@ -159,7 +159,9 @@ const FileTable: React.FC<FileTableProps> = ({
               size="small"
               danger
               onClick={() => handleDeleteFile(id)}
-              disabled={isRetrying || isUploading}
+              // E2E-03：上传中必须可删除——删除会真实中止 Worker，而不是把
+              // 记录留在列表里等待一个已无人接手的任务继续写回。
+              disabled={isRetrying}
             >
               删除
             </Button>
