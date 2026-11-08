@@ -311,6 +311,29 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(h.orchestrator.loadAllUploadFiles).not.toHaveBeenCalled();
   });
 
+  it("uploadAll：只拾取自动可上传状态，历史 ERROR 记录需用户显式重试（E2E-R3）", async () => {
+    const failed = makeFile({ id: "failed", status: UploadStatus.ERROR });
+    const queued = makeFile({ id: "queued", status: UploadStatus.QUEUED });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([failed, queued]);
+    h.orchestrator.runConcurrentQueue.mockResolvedValue({
+      successCount: 1,
+      failedCount: 0,
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    const queuedItems = h.orchestrator.runConcurrentQueue.mock.calls.at(-1)![0]
+      .items as UploadFile[];
+    expect(queuedItems.map((file) => file.id)).toEqual(["queued"]);
+    expect(h.storeState.setBatchInfo).toHaveBeenCalledWith(
+      createInitialBatchInfo(1)
+    );
+  });
+
   it("uploadAll：批次状态机——初始批次信息→并发结算→收尾完成", async () => {
     const queued = makeFile({ id: "q", status: UploadStatus.QUEUED });
     h.orchestrator.loadAllUploadFiles.mockResolvedValue([queued]);

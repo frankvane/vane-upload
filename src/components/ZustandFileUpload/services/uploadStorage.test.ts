@@ -73,14 +73,15 @@ describe("uploadStorage（T2.8 补齐）", () => {
     setItemMock.mockReset();
   });
 
-  it("isUploadableStatus 覆盖全部分支（T3.3 状态机收敛后 PAUSED 需显式继续）", () => {
-    // T3.3：可上传状态收敛为 QUEUED | QUEUED_FOR_UPLOAD | PREPARING_UPLOAD | UPLOADING | ERROR
+  it("isUploadableStatus 覆盖全部分支（PAUSED/ERROR 均需用户显式触发）", () => {
+    // 自动可上传集合：QUEUED | QUEUED_FOR_UPLOAD | PREPARING_UPLOAD | UPLOADING
     expect(isUploadableStatus(UploadStatus.QUEUED)).toBe(true);
     expect(isUploadableStatus(UploadStatus.QUEUED_FOR_UPLOAD)).toBe(true);
     expect(isUploadableStatus(UploadStatus.PREPARING_UPLOAD)).toBe(true);
     expect(isUploadableStatus(UploadStatus.UPLOADING)).toBe(true);
-    expect(isUploadableStatus(UploadStatus.ERROR)).toBe(true);
-    // PAUSED 不再自动续传：必须由用户点击「继续」触发 resume，避免与暂停中的 Worker 重复运行
+    // PAUSED 需显式「继续」；ERROR 需显式「重试」（E2E-R3）：
+    // 新选文件触发的 uploadAll 不应顺带重跑历史失败记录
+    expect(isUploadableStatus(UploadStatus.ERROR)).toBe(false);
     expect(isUploadableStatus(UploadStatus.PAUSED)).toBe(false);
     expect(isUploadableStatus(UploadStatus.DONE)).toBe(false);
     expect(isUploadableStatus(UploadStatus.INSTANT)).toBe(false);

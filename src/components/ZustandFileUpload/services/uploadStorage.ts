@@ -59,13 +59,13 @@ const interruptedUploadStatuses = new Set<UploadStatus>([
 ]);
 
 export const isUploadableStatus = (status: UploadStatus) =>
-  // PAUSED 需显式「继续」才续传（T3.3），不纳入自动可上传集合，避免与暂停中的
-  // Worker 挂起任务双跑；ERROR/QUEUED 等仍可由 uploadAll/重试自动拾起。
+  // PAUSED 需显式「继续」才续传（T3.3），ERROR 需用户显式「重试」（E2E-R3），
+  // 两者都不纳入自动可上传集合：新选文件触发的 uploadAll 不应顺带重跑历史失败记录，
+  // 否则会重复上传失败文件并污染批量失败计数。
   status === UploadStatus.QUEUED ||
   status === UploadStatus.QUEUED_FOR_UPLOAD ||
   status === UploadStatus.PREPARING_UPLOAD ||
-  status === UploadStatus.UPLOADING ||
-  status === UploadStatus.ERROR;
+  status === UploadStatus.UPLOADING;
 
 export interface UploadRecoverySummary {
   totalInterrupted: number;
