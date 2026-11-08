@@ -27,3 +27,8 @@ npm-debug.log*
 # playwright e2e output artifacts
 test-results/
 playwright-report/
+.e2e-out*
+
+# generated artifact dirs (trae html share packages / screenshots)
+.trae-html-share-packages
+.screenshots

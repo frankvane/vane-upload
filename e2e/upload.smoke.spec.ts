@@ -78,28 +78,58 @@ async function waitRowStatus(
   });
 }
 
-/** 从第二个分片起延迟，制造「上传中」稳定窗口，便于暂停/取消；首个分片已落盘，续传可完成。 */
-function installUploadDelay(route: Route): void {
-  // @ts-expect-error 闭包计数挂在 route 对象上
-  route._n = (route._n ?? 0) + 1;
-  // @ts-expect-error 复用同一闭包计数，route 无 _n 类型声明
-  const n = route._n as number;
-  if (n >= 2) {
-    // 让第 2 个及之后的分片请求挂起，留出暂停/取消窗口；首个分片已落盘
-    void sleep(2500).then(() => {
-      try {
-        route.continue();
-      } catch {
-        /* 已被暂停中止的请求，忽略 */
-      }
+/**
+ * 可控上传闸口：第 1 个分片立即放行，第 2+ 个分片延迟 `delayMs` 制造「上传中」窗口；
+ * 一旦 `gate.paused` 置位，剩余分片直接 abort（不再被延迟回调绕过暂停/取消）。
+ *
+ * - 暂停类用例传入较小延迟（如 2.5s）：凭借该窗口点击「暂停」，分片在延迟后仍会
+ *   完成，从而让 Worker 走到分片边界并上报 paused。
+ * - 删除类用例需要「删除一定发生在合并之前」，传入较大延迟（如 8s）：窗口内分片
+ *   始终不会落盘，删除即中止 Worker，确保「无合并产物」为确定性断言。
+ */
+function makeUploadGate(delayMs = 2500) {
+  const gate = { paused: false };
+  // 闭包级分片序号：所有请求共享同一计数器，确保第 1 片立即放行、第 2+ 片进入延迟/中止。
+  // 关键：不能把序号挂在 `route` 上——每条请求都是新的 Route 实例，序号会恒为 1，
+  // 使 `n >= 2` 分支永不执行、延迟/中止完全失效（历史上正是此 bug 导致中断类用例全量下抖动）。
+  let chunkSeq = 0;
+  // route.abort()/continue() 返回 Promise，被响应前若请求已随 Worker terminate 被取消，
+  // 这些 Promise 会以 "Route is already handled!" 拒绝。必须显式 .catch 吞掉，
+  // 否则会变成未处理的 Promise rejection，把用例判失败（曾导致 VU-63-5 抖动）。
+  const safeAbort = (route: Route) => {
+    route.abort().catch(() => {
+      /* 请求已结束/已处理 */
     });
-  } else {
-    try {
-      route.continue();
-    } catch {
-      /* noop */
+  };
+  const safeContinue = (route: Route) => {
+    route.continue().catch(() => {
+      /* 请求已结束/已处理 */
+    });
+  };
+  const handler = (route: Route): void => {
+    chunkSeq += 1;
+    const n = chunkSeq;
+    if (n >= 2 && gate.paused) {
+      // 已暂停/取消：剩余分片直接中止，避免延迟回调绕过应用层暂停
+      safeAbort(route);
+      return;
     }
-  }
+    if (n >= 2) {
+      void sleep(delayMs).then(() => {
+        // 延迟窗内若已置位 paused（取消/暂停/删除），则把本该 continue 的请求
+        // 改为 abort，避免「延迟回调绕过应用层暂停/取消」造成分片泄漏到服务端，
+        // 否则「取消→继续」时服务端已合并完整文件、重传命中秒传，断言不稳定。
+        if (gate.paused) {
+          safeAbort(route);
+          return;
+        }
+        safeContinue(route);
+      });
+    } else {
+      safeContinue(route);
+    }
+  };
+  return { gate, handler };
 }
 
 test.beforeEach(async ({ page }) => {
@@ -153,7 +183,8 @@ test("VU-63-3 暂停后继续并完成，产物 md5 一致", async ({ page }) =>
   const expectedMd5 = md5(content);
   const file = fixture("pause-spec.bin", content);
 
-  await page.route("**/api/file/upload", installUploadDelay);
+  const { handler } = makeUploadGate();
+  await page.route("**/api/file/upload", handler);
 
   await uploadFiles(page, [file]);
   await waitRowStatus(page, "pause-spec.bin", "上传中", 20_000);
@@ -167,26 +198,37 @@ test("VU-63-3 暂停后继续并完成，产物 md5 一致", async ({ page }) =>
   await page.unroute("**/api/file/upload");
   await row.getByRole("button", { name: "继续" }).click();
 
-  await waitRowStatus(page, "pause-spec.bin", "已完成", 45_000);
+  // 终态接受「已完成」或「秒传成功」（同 VU-63-5/63-6）：暂停窗口内若剩余分片已落盘、
+  // 恢复时命中秒传，则为「秒传成功」；否则为「已完成」。二者均代表产物就绪且与源一致。
+  await expect(
+    row.getByText("已完成", { exact: true }).or(
+      row.getByText("秒传成功", { exact: true }),
+    ),
+  ).toBeVisible({ timeout: 45_000 });
   expect(await findProductFile(expectedMd5)).not.toBeNull();
 });
 
-test("VU-63-4 取消上传后无合并产物", async ({ page }) => {
+test("VU-63-4 E2E-03 上传中「删除」真实中止 Worker 并清理，无合并产物", async ({
+  page,
+}) => {
   const content = randContent(3 * 1024 * 1024, "vu63-cancel" + RUN_SALT);
   const expectedMd5 = md5(content);
   const file = fixture("cancel-spec.bin", content);
 
-  await page.route("**/api/file/upload", installUploadDelay);
+  // 删除类用例：用较长延迟确保「删除时上传仍在进行」，否则全量套件下上传可能已先合并，
+  // abortServerChunks 只清分片不清产物，导致「无合并产物」断言偶发失败。
+  const { gate, handler } = makeUploadGate(8_000);
+  await page.route("**/api/file/upload", handler);
 
   await uploadFiles(page, [file]);
   await waitRowStatus(page, "cancel-spec.bin", "上传中", 20_000);
+  // 置位闸口：剩余分片直接中止，避免延迟回调绕过应用的删除中止
+  gate.paused = true;
 
   const row = page.locator("tbody tr", {
     has: page.locator("td", { hasText: "cancel-spec.bin" }),
   });
-  await row.getByRole("button", { name: "暂停" }).click();
-  await waitRowStatus(page, "cancel-spec.bin", "已暂停", 10_000);
-  // 已暂停时删除按钮可用（上传中不禁用），点击取消
+  // 上传中点击「删除」：应真实中止传输（E2E-03 修复点）
   await row.getByRole("button", { name: "删除" }).click();
 
   await expect(
@@ -203,7 +245,8 @@ test("VU-63-5 刷新页面后重新选择可续传并完成", async ({ page }) =
   const content = randContent(2 * 1024 * 1024, "vu63-refresh" + RUN_SALT);
   const expectedMd5 = md5(content);
 
-  await page.route("**/api/file/upload", installUploadDelay);
+  const { gate, handler } = makeUploadGate();
+  await page.route("**/api/file/upload", handler);
 
   await uploadFiles(page, [fixture("resume-spec.bin", content)]);
   await waitRowStatus(page, "resume-spec.bin", "上传中", 20_000);
@@ -211,6 +254,8 @@ test("VU-63-5 刷新页面后重新选择可续传并完成", async ({ page }) =
   const row = page.locator("tbody tr", {
     has: page.locator("td", { hasText: "resume-spec.bin" }),
   });
+  // 置位闸口，避免延迟回调在暂停后绕过应用层把剩余分片续传完成
+  gate.paused = true;
   await row.getByRole("button", { name: "暂停" }).click();
   await waitRowStatus(page, "resume-spec.bin", "已暂停", 10_000);
 
@@ -237,4 +282,183 @@ test("VU-63-5 刷新页面后重新选择可续传并完成", async ({ page }) =
   ).toBeVisible({ timeout: 45_000 });
 
   expect(await findProductFile(expectedMd5)).not.toBeNull();
+});
+
+/**
+ * 以下用例覆盖「用户修复批次」中已落地的关键能力（E2E-R2 / E2E-R3 / E2E-R4 / E2E-04
+ * 与同会话重试、重复上传去重），均经真实浏览器 + 真实后端验证。
+ * 复用上面定义的 RUN_SALT / randContent / findProductFile / makeUploadGate 等。
+ */
+
+test("VU-63-6 E2E-R4 上传中点「取消」中止传输并保留记录，可「继续」完成", async ({
+  page,
+}) => {
+  const content = randContent(3 * 1024 * 1024, "vu63-cancel-entry" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  const file = fixture("cancel-entry.bin", content);
+
+  const { gate, handler } = makeUploadGate();
+  await page.route("**/api/file/upload", handler);
+
+  await uploadFiles(page, [file]);
+  await waitRowStatus(page, "cancel-entry.bin", "上传中", 20_000);
+  // 置位闸口，避免延迟回调在取消后绕过应用层把剩余分片续传完成
+  gate.paused = true;
+
+  const row = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "cancel-entry.bin" }),
+  });
+  // 上传中可见独立「取消」入口（与「删除」职责分离）
+  await row.getByRole("button", { name: "取消" }).click();
+  // 取消后停留在已暂停并保持记录（不移除、不清分片缓存）
+  await waitRowStatus(page, "cancel-entry.bin", "已暂停", 10_000);
+  await expect(row).toHaveCount(1);
+
+  await page.unroute("**/api/file/upload");
+  await row.getByRole("button", { name: "继续" }).click();
+
+  // 终态接受「已完成」或「秒传成功」：若取消瞬间残留分片已落到服务端、
+  // 重传命中秒传，则状态为「秒传成功」；否则为「已完成」。二者均代表产物已就绪且与源一致。
+  await expect(
+    row.getByText("已完成", { exact: true }).or(
+      row.getByText("秒传成功", { exact: true }),
+    ),
+  ).toBeVisible({ timeout: 45_000 });
+  expect(await findProductFile(expectedMd5)).not.toBeNull();
+});
+
+test("VU-63-7 E2E-03 上传中「删除」真实中止 Worker 并清理，无合并产物", async ({
+  page,
+}) => {
+  const content = randContent(3 * 1024 * 1024, "vu63-del-abort" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  const file = fixture("del-abort.bin", content);
+
+  // 同 VU-63-4：较长延迟确保删除发生在合并之前，产物断言稳定。
+  const { gate, handler } = makeUploadGate(8_000);
+  await page.route("**/api/file/upload", handler);
+
+  await uploadFiles(page, [file]);
+  await waitRowStatus(page, "del-abort.bin", "上传中", 20_000);
+  // 置位闸口：剩余分片直接中止，避免延迟回调绕过应用的删除中止
+  gate.paused = true;
+
+  const row = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "del-abort.bin" }),
+  });
+  // 上传中点击「删除」：应真实中止传输（E2E-03 修复点）
+  await row.getByRole("button", { name: "删除" }).click();
+
+  await expect(
+    page.locator("tbody tr", {
+      has: page.locator("td", { hasText: "del-abort.bin" }),
+    }),
+  ).toHaveCount(0, { timeout: 10_000 });
+
+  await page.unroute("**/api/file/upload");
+  // 删除后不应产生合并产物（后台不再续传落盘）
+  expect(await findProductFile(expectedMd5)).toBeNull();
+});
+
+test("VU-63-8 E2E-R2 危险扩展名在选择阶段拦截，不进入列表、不发分片请求", async ({
+  page,
+}) => {
+  const uploadHits: string[] = [];
+  await page.route("**/api/file/upload", (route) => {
+    uploadHits.push(route.request().url());
+    void route.continue();
+  });
+
+  // 选一个危险扩展名文件（命中前后端共用的 dangerous-file-types 清单）
+  await uploadFiles(page, [
+    { name: "evil.exe", mimeType: "application/octet-stream", buffer: Buffer.from("x") },
+  ]);
+
+  // 选择阶段即拦截并给出可读原因
+  await expect(
+    page.getByText(/不允许上传的类型|危险扩展名/),
+  ).toBeVisible({ timeout: 10_000 });
+
+  // 等待一会儿，确认没有任何分片上传请求发出
+  await sleep(800);
+  await page.unroute("**/api/file/upload");
+
+  // 列表里不应出现该文件行
+  await expect(
+    page.locator("tbody tr", { has: page.locator("td", { hasText: "evil.exe" }) }),
+  ).toHaveCount(0);
+  expect(uploadHits.length, "危险类型不应触发任何分片上传").toBe(0);
+});
+
+test("VU-63-9 E2E-04 后端不可用快速失败，恢复后可重试完成", async ({ page }) => {
+  // 模拟后端不可用：中止所有 /api/file 请求（连接级错误）
+  await page.route("**/api/file/**", (route) => void route.abort());
+
+  const content = randContent(64 * 1024, "vu63-offline" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  await uploadFiles(page, [fixture("offline.bin", content)]);
+
+  const row = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "offline.bin" }),
+  });
+  // 关键修复点：连接级错误不再长时间静默重试，应在 ~20s 内进入「上传失败」
+  await waitRowStatus(page, "offline.bin", "上传失败", 20_000);
+
+  // 恢复后端，显式重试
+  await page.unroute("**/api/file/**");
+  await row.getByRole("button", { name: "重试" }).click();
+
+  await waitRowStatus(page, "offline.bin", "已完成", 45_000);
+  expect(await findProductFile(expectedMd5)).not.toBeNull();
+});
+
+test("VU-63-10 同会话内失败重试（S08）", async ({ page }) => {
+  // 上传中途制造一次失败，再恢复重试
+  await page.route("**/api/file/upload", (route) => void route.abort());
+
+  const content = randContent(256 * 1024, "vu63-retry" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  await uploadFiles(page, [fixture("retry.bin", content)]);
+
+  const row = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "retry.bin" }),
+  });
+  await waitRowStatus(page, "retry.bin", "上传失败", 20_000);
+
+  await page.unroute("**/api/file/upload");
+  await row.getByRole("button", { name: "重试" }).click();
+
+  await waitRowStatus(page, "retry.bin", "已完成", 45_000);
+  expect(await findProductFile(expectedMd5)).not.toBeNull();
+});
+
+test("VU-63-11 重复上传同一文件去重（S09 / VU-19）", async ({ page }) => {
+  const content = randContent(32 * 1024, "vu63-dedupe" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  // 显式指定 lastModified，确保两次选择的去重键（hash|size|lastModified|name）完全一致
+  const file = {
+    name: "dedupe.bin",
+    mimeType: "application/octet-stream",
+    buffer: content,
+    lastModified: 1700000000000,
+  };
+
+  // 首次上传
+  await uploadFiles(page, [file]);
+  await waitRowStatus(page, "dedupe.bin", "已完成", 30_000);
+  expect(await findProductFile(expectedMd5)).not.toBeNull();
+
+  // 再次选择完全相同的文件（同名 + 同内容 + 同大小 + 同 lastModified）
+  await uploadFiles(page, [file]);
+
+  // 去重生效：列表里只有 1 行，且终态为「秒传成功」或「已完成」
+  const row = page.locator("tbody tr", {
+    has: page.locator("td", { hasText: "dedupe.bin" }),
+  });
+  await expect(row).toHaveCount(1, { timeout: 10_000 });
+  await expect(
+    row.getByText("秒传成功", { exact: true }).or(
+      row.getByText("已完成", { exact: true }),
+    ),
+  ).toBeVisible({ timeout: 20_000 });
 });

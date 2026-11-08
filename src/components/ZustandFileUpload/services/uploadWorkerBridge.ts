@@ -377,6 +377,13 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         }
 
         if (payload.type === "cancelled") {
+          // E2E-R4 修复点：取消后 Worker 的异步 onmessage 调用可能仍在执行，
+          // 会继续向主线程投递残留消息（cancelled/debug）。若直接回收复用，
+          // 这些残留消息会被「取消→继续」重传时复用的同一 worker.onmessage 槽
+          // 错误接收：要么把新任务误判为 cancelled，要么把新任务的 progress/done
+          // 丢弃，造成「服务端已合并、客户端卡在上传中」的假死。
+          // 因此取消后必须 terminate 而非回池——与 paused 分支保持一致。
+          shouldRecycleWorker = false;
           // Worker 确认已中断该文件的在途请求
           finish({
             success: false,
