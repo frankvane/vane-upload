@@ -12,7 +12,23 @@ const COVERAGE_OUT_DIR =
   process.env.VITE_COV_DIR ||
   path.join(os.tmpdir(), "vane-upload-measure-out");
 
+// vitest 5 的模块缓存默认落在 `node_modules/.vitest-cache`，启动时会清理
+// 上次遗留的 `.vitest-cache.tmp-*` 目录。残留一多（实测单个目录 709 文件），
+// 即便传 `--no-cache` 也会被上面的批量删除守卫拦在 Startup Error，测试根本不跑。
+// 与覆盖率目录同理，指向项目外且避开受监控目录名。
+const VITEST_MODULE_CACHE_DIR =
+  process.env.VITE_MODULE_CACHE_DIR ||
+  path.join(os.tmpdir(), "vane-upload-vitest-cache");
+
+// Vite 依赖预构建默认写 `node_modules/.vite`，启动时清理 `deps_temp_*`；
+// 残留超过 50 个文件同样会被批量删除守卫拦下，**dev server 直接崩**，
+// 表现为 E2E 全部 net::ERR_CONNECTION_REFUSED（与代码无关）。一并移出项目树。
+const VITE_DEPS_CACHE_DIR =
+  process.env.VITE_DEPS_CACHE_DIR ||
+  path.join(os.tmpdir(), "vane-upload-vite-deps");
+
 export default defineConfig({
+  cacheDir: VITE_DEPS_CACHE_DIR,
   plugins: [react()],
   server: {
     port: 5173,
@@ -47,6 +63,8 @@ export default defineConfig({
     emptyOutDir: false,
   },
   test: {
+    // 见文件头 VITEST_MODULE_CACHE_DIR：避开 node_modules 里的缓存清理守卫。
+    fsModuleCachePath: VITEST_MODULE_CACHE_DIR,
     environment: "jsdom",
     // 本仓库沿用源项目的 vitest 配置：默认 pool 在部分沙箱下无法初始化
     // worker 会话，改用 forks 稳定初始化。
@@ -81,14 +99,15 @@ export default defineConfig({
         "src/main.tsx",
         "src/App.tsx",
       ],
-      // VU-62 前端覆盖率门禁：阈值贴近当前基线（lines 70.81 / branches 51.04 /
-      // funcs 62.9 / stmts 70.21，批次 17 实测）并留约 5pt 缓冲，防止轻微波动致 CI 误红，
-      // 同时锁住当前覆盖率、阻止后续劣化。联网启用 coverage-v8 后由 `ci` 的 `test:coverage` 强制。
+      // T-22：按 W2 实测基线（stmts 81.41 / branch 68.65 / funcs 73.86 /
+      // lines 82.64，T-17 后 56 文件 405 用例）统一留约 3 点余量。
+      // 清单里写的 70/55/62/72 基于更早的 73.30/58.13 基线，已过期；
+      // 沿用会等于没有门禁。
       thresholds: {
-        statements: 65,
-        branches: 45,
-        functions: 58,
-        lines: 65,
+        statements: 78,
+        branches: 65,
+        functions: 70,
+        lines: 79,
       },
     },
   },

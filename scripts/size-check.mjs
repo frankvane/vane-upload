@@ -1,12 +1,13 @@
 // Zero-dependency bundle size gate for the published library artifact.
 //
 // Measures the gzip size of the library ENTRY points under dist/lib and fails
-// if any exceeds SIZE_LIMIT_KB (default 90). The demo app (dist/assets) and the
+// if any exceeds SIZE_LIMIT_KB (default 40). The demo app (dist/assets) and the
 // server workspace package are intentionally excluded — they are NOT published
 // to npm (see package.json `files: ["dist/lib"]` and `exports`), so they must
 // not count against the library's size budget.
 //
-// Run after build:  npm run build:lib && node scripts/size-check.mjs
+// 40KB 是实测 ESM ≈19.6KB / CJS ≈17.2KB 的两倍余量：既允许正常增长，
+// 又能拦住「引入一个 30KB 不可压缩依赖」这类真实回归。
 // Override limit:   SIZE_LIMIT_KB=120 node scripts/size-check.mjs
 
 import { gzipSync } from "node:zlib";
@@ -17,7 +18,7 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 
-const LIMIT_KB = Number(process.env.SIZE_LIMIT_KB ?? "90");
+const LIMIT_KB = Number(process.env.SIZE_LIMIT_KB ?? "40");
 const LIMIT_BYTES = LIMIT_KB * 1024;
 
 // Only the published entry points matter — these are what a consumer receives.

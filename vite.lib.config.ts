@@ -6,11 +6,10 @@ import react from "@vitejs/plugin-react-swc";
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 /**
- * VU-25 / VU-24 的取舍：
- * - 应用（demo）构建保留 `?worker`，产出独立 worker asset，主包更小、可缓存。
- * - 库构建把 `?worker` 重写为 `?worker&inline`，让分发产物自包含；
- *   否则 `import.meta.ROLLDOWN_FILE_URL_*` 指向的资产路径在消费方 dev server
- *   下会被 SPA fallback 吞掉（历史注释记录的「文件预处理失败」根因）。
+ * 库构建把 `?worker` 重写为 `?worker&inline`，让分发产物自包含；
+ * demo 构建保留独立 worker asset，主包更小、可缓存。
+ * 不内联的话，`import.meta.ROLLDOWN_FILE_URL_*` 指向的资产路径在消费方
+ * dev server 下会被 SPA fallback 吞掉，表现为文件预处理失败。
  */
 function inlineWorkersForLibrary(): Plugin {
   return {
