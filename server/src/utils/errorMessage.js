@@ -12,7 +12,7 @@ const { config } = require("../config");
  * @param {unknown} error 捕获到的异常
  * @param {string} [fallback] 非安全环境下使用的通用文案
  */
-const redactErrorMessage = (error, fallback = "internal server error") => {
+const redactErrorMessage = (error, fallback = "服务器内部错误，请稍后重试") => {
   // VU-55：环境判定统一走 config，不再各自读 NODE_ENV。
   if (config.isDevOrTest()) {
     const message = error && error.message;

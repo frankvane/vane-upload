@@ -144,7 +144,7 @@ test("P2-10：生产环境不回传原始 error.message，测试环境保留以�
   const original = process.env.NODE_ENV;
 
   process.env.NODE_ENV = "production";
-  assert.equal(redactErrorMessage(error), "internal server error");
+  assert.equal(redactErrorMessage(error), "服务器内部错误，请稍后重试");
 
   process.env.NODE_ENV = "test";
   assert.equal(redactErrorMessage(error), error.message);

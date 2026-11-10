@@ -99,7 +99,7 @@ exports.instantCheck = async (req, res) => {
     const safeFileId = sanitizeFileId(file_id);
 
     if (!safeFileId || !md5 || !name || size === undefined) {
-      return jsonError(res, 400, "missing required parameters");
+      return jsonError(res, 400, "缺少必填参数");
     }
     // VU-29：size 必须是安全非负整数（VU-59 起允许 0，支持真 0 字节文件秒传查询），
     // 否则 SQLite BIGINT 比较会静默不命中秒传。
@@ -109,24 +109,24 @@ exports.instantCheck = async (req, res) => {
         ? null
         : parseStrictInt(chunk_size, { min: 1 });
     if (sizeValue === null || (chunk_size !== undefined && chunkSizeValue === null)) {
-      return jsonError(res, 400, "size / chunk_size must be valid integers");
+      return jsonError(res, 400, "size 与 chunk_size 必须是有效的整数");
     }
     // VU-09：chunk_md5s 是客户端可控的数组，旧实现只查长度不查元素，
     // 单个元素塞进几 MB 字符串照样能在鉴权后吃满内存与 JSON 解析时间。
     // 元素必须是短字符串；非数组直接拒绝，避免后续 `.map` 抛 TypeError 变 500。
     if (chunk_md5s !== undefined && !Array.isArray(chunk_md5s)) {
-      return jsonError(res, 400, "chunk_md5s must be an array");
+      return jsonError(res, 400, "chunk_md5s 必须是数组");
     }
     if (Array.isArray(chunk_md5s)) {
       if (chunk_md5s.length > getMaxChunks()) {
-        return jsonError(res, 400, "chunk_md5s exceeds maximum allowed chunks");
+        return jsonError(res, 400, "chunk_md5s 的数量超过允许的最大分片数");
       }
       if (
         chunk_md5s.some(
           (value) => typeof value !== "string" || value.length > 64 || /\s/.test(value)
         )
       ) {
-        return jsonError(res, 400, "invalid chunk_md5s element");
+        return jsonError(res, 400, "chunk_md5s 中存在非法元素");
       }
     }
     const userId = getUserId(req);
@@ -184,7 +184,7 @@ exports.instantCheck = async (req, res) => {
     return jsonOk(res, { uploaded: false, chunkCheckResult });
   } catch (error) {
     if (isSqliteBusyError(error)) {
-      return jsonError(res, 503, "database is busy, please retry later");
+      return jsonError(res, 503, "数据库繁忙，请稍后重试");
     }
     return jsonError(res, 500, redactErrorMessage(error));
   }
@@ -198,7 +198,7 @@ exports.statusQuery = async (req, res) => {
     // VU-35：md5 此前被强制必填却从不参与查询，是个假校验；
     // 现在显式忽略它（前端仍会带上，属于无害的多余参数）。
     if (!safeFileId) {
-      return jsonError(res, 400, "missing required parameters");
+      return jsonError(res, 400, "缺少必填参数");
     }
     const userId = getUserId(req);
     const storageId = getStorageId(req, safeFileId);
@@ -219,7 +219,7 @@ exports.statusQuery = async (req, res) => {
     });
   } catch (error) {
     if (isSqliteBusyError(error)) {
-      return jsonError(res, 503, "database is busy, please retry later");
+      return jsonError(res, 503, "数据库繁忙，请稍后重试");
     }
     return jsonError(res, 500, redactErrorMessage(error));
   }
@@ -236,7 +236,7 @@ exports.abortUpload = async (req, res) => {
   try {
     const safeFileId = sanitizeFileId(req.body?.file_id);
     if (!safeFileId) {
-      return jsonError(res, 400, "missing required parameters");
+      return jsonError(res, 400, "缺少必填参数");
     }
     const userId = getUserId(req);
     const storageId = getStorageId(req, safeFileId);
@@ -245,7 +245,7 @@ exports.abortUpload = async (req, res) => {
     return jsonOk(res, { cleared });
   } catch (error) {
     if (isSqliteBusyError(error)) {
-      return jsonError(res, 503, "database is busy, please retry later");
+      return jsonError(res, 503, "数据库繁忙，请稍后重试");
     }
     return jsonError(res, 500, redactErrorMessage(error));
   }
@@ -257,19 +257,19 @@ exports.uploadChunk = async (req, res) => {
     const safeFileId = sanitizeFileId(file_id);
 
     if (!safeFileId || rawIndex === undefined) {
-      return jsonError(res, 400, "missing required parameters");
+      return jsonError(res, 400, "缺少必填参数");
     }
     if (!req.file || !req.file.buffer) {
-      return jsonError(res, 400, "missing chunk file");
+      return jsonError(res, 400, "缺少分片文件");
     }
 
     // VU-29：parseInt("1.9"/"12abc") 会静默截断，必须严格校验。
     const index = parseStrictInt(rawIndex, { min: 0, max: getMaxChunks() - 1 });
     if (index === null) {
-      return jsonError(res, 400, "index must be an integer in range");
+      return jsonError(res, 400, "index 必须是范围内的整数");
     }
     if (chunk_md5 && typeof chunk_md5 === "string" && !isValidMd5(chunk_md5)) {
-      return jsonError(res, 400, "invalid chunk_md5");
+      return jsonError(res, 400, "chunk_md5 不合法");
     }
 
     const userId = getUserId(req);
@@ -282,7 +282,7 @@ exports.uploadChunk = async (req, res) => {
     const existingChunk = await inspectWriteTarget(chunkPath);
     const chunkMd5 = md5Buffer(req.file.buffer);
     if (chunk_md5 && chunk_md5 !== chunkMd5) {
-      return jsonError(res, 400, "chunk md5 mismatch", {
+      return jsonError(res, 400, "分片 MD5 校验不匹配", {
         index,
         expected: chunk_md5,
         actual: chunkMd5,
@@ -298,12 +298,12 @@ exports.uploadChunk = async (req, res) => {
     const nextBytes = usage.bytes - replacedBytes + req.file.buffer.length;
     const nextCount = usage.count + (existingChunk ? 0 : 1);
     if (nextBytes > getMaxUploadSizeBytes()) {
-      return jsonError(res, 413, "file size exceeds maximum allowed", {
+      return jsonError(res, 413, "文件大小超过允许的最大值", {
         maxMb: Math.round(getMaxUploadSizeBytes() / 1024 / 1024),
       });
     }
     if (nextCount > getMaxChunks()) {
-      return jsonError(res, 400, "total exceeds maximum allowed chunks", {
+      return jsonError(res, 400, "total 超过允许的最大分片数", {
         max: getMaxChunks(),
       });
     }
@@ -313,12 +313,12 @@ exports.uploadChunk = async (req, res) => {
     const nextGlobalBytes = globalUsage.bytes - replacedBytes + req.file.buffer.length;
     const nextGlobalCount = globalUsage.count + (existingChunk ? 0 : 1);
     if (nextGlobalBytes > getMaxTotalUploadSizeBytes()) {
-      return jsonError(res, 413, "storage quota exceeded", {
+      return jsonError(res, 413, "存储配额已用尽", {
         maxMb: Math.round(getMaxTotalUploadSizeBytes() / 1024 / 1024),
       });
     }
     if (nextGlobalCount > getMaxTotalChunks()) {
-      return jsonError(res, 400, "storage chunks quota exceeded", {
+      return jsonError(res, 400, "分片存储配额已用尽", {
         max: getMaxTotalChunks(),
       });
     }
@@ -334,12 +334,12 @@ exports.uploadChunk = async (req, res) => {
       req.file.buffer.length;
     const nextUserCount = userUsage.count + (replacedCounted ? 0 : 1);
     if (nextUserBytes > getMaxUserUploadSizeBytes()) {
-      return jsonError(res, 413, "user storage quota exceeded", {
+      return jsonError(res, 413, "用户存储配额已用尽", {
         maxMb: Math.round(getMaxUserUploadSizeBytes() / 1024 / 1024),
       });
     }
     if (nextUserCount > getMaxUserChunks()) {
-      return jsonError(res, 400, "user chunks quota exceeded", {
+      return jsonError(res, 400, "用户分片配额已用尽", {
         max: getMaxUserChunks(),
       });
     }
@@ -362,7 +362,7 @@ exports.uploadChunk = async (req, res) => {
     return jsonOk(res);
   } catch (error) {
     if (isSqliteBusyError(error)) {
-      return jsonError(res, 503, "database is busy, please retry later");
+      return jsonError(res, 503, "数据库繁忙，请稍后重试");
     }
     // VU-34：inspectWriteTarget / writeRegularFile 的 403 必须原样回传，
     // 不能被吞成 500（否则客户端会无意义重试）。
@@ -403,41 +403,41 @@ exports.mergeChunks = async (req, res) => {
     const safeName = sanitizeFilename(name);
 
     if (!safeFileId || !safeName || size === undefined || total === undefined) {
-      return jsonError(res, 400, "missing required parameters");
+      return jsonError(res, 400, "缺少必填参数");
     }
     // P0-2：md5 会参与落盘文件名拼接，必须强制为 32 位十六进制，
     // 否则 "../" 等字符可让 path.join 逃出 UPLOADS_DIR。
     if (!isValidMd5(md5)) {
-      return jsonError(res, 400, "invalid md5");
+      return jsonError(res, 400, "md5 不合法");
     }
     // VU-29：hash_mode 是客户端可控的校验强度开关，必须白名单化。
     const hashMode = hash_mode === undefined ? "full" : hash_mode;
     if (hashMode !== "full" && hashMode !== "sample") {
-      return jsonError(res, 400, "invalid hash_mode");
+      return jsonError(res, 400, "hash_mode 不合法");
     }
     const categoryId =
       category_id === undefined ? 1 : parseStrictInt(category_id, { min: 1 });
     if (categoryId === null) {
-      return jsonError(res, 400, "invalid category_id");
+      return jsonError(res, 400, "category_id 不合法");
     }
 
     const totalChunks = parseStrictInt(total, { min: 1 });
     if (totalChunks === null) {
-      return jsonError(res, 400, "total must be a positive integer");
+      return jsonError(res, 400, "total 必须是正整数");
     }
 
     const fileSize = parseStrictInt(size, { min: 0 });
     if (fileSize === null) {
-      return jsonError(res, 400, "size must be a non-negative integer");
+      return jsonError(res, 400, "size 必须是非负整数");
     }
     // S3 容量 / 分片数上限（DoS 防护）
     if (totalChunks > getMaxChunks()) {
-      return jsonError(res, 400, "total exceeds maximum allowed chunks", {
+      return jsonError(res, 400, "total 超过允许的最大分片数", {
         max: getMaxChunks(),
       });
     }
     if (fileSize > getMaxUploadSizeBytes()) {
-      return jsonError(res, 413, "file size exceeds maximum allowed", {
+      return jsonError(res, 413, "文件大小超过允许的最大值", {
         maxMb: Math.round(getMaxUploadSizeBytes() / 1024 / 1024),
       });
     }
@@ -454,7 +454,7 @@ exports.mergeChunks = async (req, res) => {
       if (mergedFile) {
         return jsonOk(res, { alreadyMerged: true, file: toPublicFile(mergedFile) });
       }
-      return jsonError(res, 503, "file is being merged, please retry later");
+      return jsonError(res, 503, "文件正在合并中，请稍后重试");
     }
     releaseMergeLock = mergeLocks.acquire(mergeKey);
 
@@ -500,7 +500,7 @@ exports.mergeChunks = async (req, res) => {
       // 绝不跟随链接读取/删除目录外文件。
       const chunkStat = await inspectWriteTarget(chunkPath);
       if (!chunkStat) {
-        throw httpError(400, `chunk ${i} not found`);
+        throw httpError(400, `第 ${i} 个分片不存在`);
       }
 
       const chunkBuffer = await fs.promises.readFile(chunkPath);
@@ -508,10 +508,10 @@ exports.mergeChunks = async (req, res) => {
       const dbChunk = chunkMap.get(i);
 
       if (!dbChunk) {
-        throw httpError(400, `chunk ${i} not found in database`);
+        throw httpError(400, `第 ${i} 个分片未落库`);
       }
       if (dbChunk.chunk_md5 && dbChunk.chunk_md5 !== chunkMd5) {
-        throw httpError(409, `chunk ${i} md5 does not match database`, {
+        throw httpError(409, `第 ${i} 个分片的 MD5 与数据库记录不一致`, {
           index: i,
           db_md5: dbChunk.chunk_md5,
           real_md5: chunkMd5,
@@ -536,7 +536,7 @@ exports.mergeChunks = async (req, res) => {
     // 是客户端已明示的设计取舍，不应以牺牲秒传能力为代价隐藏它。
     const mergedStat = await fs.promises.stat(stagingPath);
     if (mergedStat.size !== fileSize) {
-      throw httpError(422, "file size verification failed", {
+      throw httpError(422, "文件大小校验未通过", {
         expected: fileSize,
         actual: mergedStat.size,
       });
@@ -544,7 +544,7 @@ exports.mergeChunks = async (req, res) => {
     const authoritativeMd5 = await md5File(stagingPath);
     if (hashMode !== "sample") {
       if (authoritativeMd5 !== md5) {
-        throw httpError(422, "file md5 verification failed", {
+        throw httpError(422, "文件 MD5 校验未通过", {
           expected: md5,
           actual: authoritativeMd5,
         });
@@ -649,7 +649,7 @@ exports.mergeChunks = async (req, res) => {
     // P2-10：业务错误（4xx，由 httpError 显式抛出）保留原文便于客户端定位；
     // 5xx / 未预期错误一律走脱敏，避免 SQL、绝对路径等内部细节外泄。
     const message = isSqliteBusyError(error)
-      ? "database is busy, please retry later"
+      ? "数据库繁忙，请稍后重试"
       : statusCode < 500
       ? error.message
       : redactErrorMessage(error);

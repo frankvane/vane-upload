@@ -59,7 +59,7 @@ test("VU-09：鉴权通过后，超大 JSON 由 body 上限返回结构化 413",
   const res = await postInstant(bigPayload, true);
   assert.equal(res.status, 413);
   assert.equal(res.body.code, 413);
-  assert.equal(res.body.message, "request body too large");
+  assert.equal(res.body.message, "请求体超过允许的大小");
 });
 
 test("VU-09：正常大小的已鉴权请求仍可走通业务链路", async () => {

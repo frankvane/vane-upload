@@ -50,13 +50,13 @@ const assertSafeFileType = async ({ filePath, fileName }) => {
   const ext = detected?.ext || fromName;
 
   if (DANGEROUS_EXTENSIONS.has(fromName)) {
-    throw httpError(415, `file extension .${fromName} is not allowed`, {
+    throw httpError(415, `不允许上传 .${fromName} 类型的文件`, {
       extension: fromName,
       reason: "dangerous-extension",
     });
   }
   if (mime && DANGEROUS_MIMES.has(mime)) {
-    throw httpError(415, `file type ${mime} is not allowed`, {
+    throw httpError(415, `不允许上传 ${mime} 类型的文件`, {
       mime,
       reason: "dangerous-mime",
     });
@@ -65,7 +65,7 @@ const assertSafeFileType = async ({ filePath, fileName }) => {
   const allowed = config.allowedMimeTypes();
   if (allowed.length > 0) {
     if (!mime || !allowed.includes(mime.toLowerCase())) {
-      throw httpError(415, "file type is not in ALLOWED_MIME_TYPES", {
+      throw httpError(415, "文件类型不在允许的白名单内", {
         mime,
         reason: "mime-not-allowlisted",
       });

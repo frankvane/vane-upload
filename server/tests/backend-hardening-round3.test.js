@@ -74,7 +74,7 @@ test("VU-33：危险扩展名 evil.html / evil.svg / evil.exe 合并返回 415�
     assert.equal((await uploadChunk(fileId, 0, content)).status, 200);
     const res = await mergeOne({ fileId, name, buffer: content });
     assert.equal(res.status, 415, `${name} 应被拒绝`);
-    assert.match(res.body.message, /not allowed|not in ALLOWED/);
+    assert.match(res.body.message, /不允许上传|不在允许的白名单/);
   }
 
   const leaked = fs

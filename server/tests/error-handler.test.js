@@ -45,6 +45,6 @@ test("production 环境：仅返回通用文案，不泄漏原始 message", () =
   process.env.NODE_ENV = prev;
   assert.equal(res.statusCode, 500);
   assert.equal(res.body.code, 500);
-  assert.equal(res.body.message, "internal server error");
+  assert.equal(res.body.message, "服务器内部错误，请稍后重试");
   assert.notEqual(res.body.message, "secret/path/or/sql/leak");
 });

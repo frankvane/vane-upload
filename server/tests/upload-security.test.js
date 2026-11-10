@@ -80,7 +80,7 @@ test("P0-2：md5 含路径分隔符 → 400（不得进入落盘路径拼接）"
     total: 1,
   });
   assert.equal(res.status, 400);
-  assert.equal(res.body.message, "invalid md5");
+  assert.equal(res.body.message, "md5 不合法");
 });
 
 test("P0-2：md5 非 32 位十六进制 → 400", async () => {
@@ -91,7 +91,7 @@ test("P0-2：md5 非 32 位十六进制 → 400", async () => {
     total: 1,
   });
   assert.equal(res.status, 400);
-  assert.equal(res.body.message, "invalid md5");
+  assert.equal(res.body.message, "md5 不合法");
 });
 
 test("S3：上传分片 index 为负 → 400", async () => {

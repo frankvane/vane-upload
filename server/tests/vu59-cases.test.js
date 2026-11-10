@@ -558,7 +558,7 @@ test("TC-13 缺失分片（只传 0、2，total=3）→ 400，staging 清理且�
   });
   assert.equal(mr.status, 400);
   assert.equal(mr.body.code, 400);
-  assert.match(mr.body.message, /chunk 1 not found/);
+  assert.match(mr.body.message, /第 1 个分片不存在/);
 
   // VU-59 修复：合并失败（缺失分片）时，循环内不删除任何分片，gap 之前（chunk 0）
   // 与 gap 之后（chunk 2）的已传分片都原样保留，客户端可补传 chunk 1 后继续合并。
@@ -864,7 +864,7 @@ test("TC-23 鉴权+租户：无/错/畸形/过期 token → 401；跨用户越�
     extra: { user_id: "forged-principal" },
   });
   assert.equal(mB.status, 400);
-  assert.match(mB.body.message, /chunk 0 not found/);
+  assert.match(mB.body.message, /第 0 个分片不存在/);
 });
 
 // =========================================================================

@@ -163,20 +163,20 @@ function errorHandler(error, _req, res, _next) {
   // VU-10 / VU-32：multer 与 body-parser 的确定性客户端错误不该变成 500，
   // 否则客户端 fetchWithRetry 会对必然失败的请求反复重试。
   let statusCode = 500;
-  let message = (error && error.message) || "internal server error";
+  let message = (error && error.message) || "服务器内部错误，请稍后重试";
   const details = {};
 
   if (error && error.name === "MulterError") {
     statusCode = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
     message =
       error.code === "LIMIT_FILE_SIZE"
-        ? "chunk exceeds maximum allowed size"
-        : `invalid multipart request: ${error.code}`;
+        ? "分片大小超过允许的最大值"
+        : `multipart 请求格式非法：${error.code}`;
     details.code = error.code;
     details.maxMb = config.chunkMaxSizeMb();
   } else if (error && (error.type === "entity.too.large" || error.status === 413)) {
     statusCode = 413;
-    message = "request body too large";
+    message = "请求体超过允许的大小";
   } else if (Number.isInteger(error && error.statusCode)) {
     statusCode = error.statusCode;
   }
@@ -184,10 +184,10 @@ function errorHandler(error, _req, res, _next) {
   if (statusCode >= 500 && !isSafeEnv) {
     // VU-38：完整 stack 含绝对路径 / SQL 片段，logger 会统一脱敏后再落服务端日志。
     logger.error("[server] unhandled error:", error);
-    message = "internal server error";
+    message = "服务器内部错误，请稍后重试";
   } else if (statusCode >= 500 && isSafeEnv) {
     // test/development 保留原始 message 便于定位；已有单测依赖该行为。
-    message = (error && error.message) || "internal server error";
+    message = (error && error.message) || "服务器内部错误，请稍后重试";
   }
 
   res.status(statusCode).json({ code: statusCode, message, data: details });

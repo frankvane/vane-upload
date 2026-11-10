@@ -42,7 +42,7 @@ const createMergeLockRegistry = (options = {}) => {
     const entry = locks.get(key);
     if (!entry) return false;
     if (entry.waiters >= maxWaiters()) {
-      throw httpError(429, "too many concurrent merges for this file");
+      throw httpError(429, "该文件并发合并过多，请稍后重试");
     }
     entry.waiters += 1;
     try {

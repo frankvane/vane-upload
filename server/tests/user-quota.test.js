@@ -59,7 +59,7 @@ test("P1-4：同一用户更换 file_id 仍受累计字节配额限制", async (
     Buffer.alloc(2000, 2)
   );
   assert.equal(second.status, 413);
-  assert.equal(second.body.message, "user storage quota exceeded");
+  assert.equal(second.body.message, "用户存储配额已用尽");
 });
 
 test("P1-4：同一用户更换 file_id 仍受分片数配额限制", async () => {
@@ -68,5 +68,5 @@ test("P1-4：同一用户更换 file_id 仍受分片数配额限制", async () =
 
   const second = await uploadChunk("quota-b", "q-b-2", 0, Buffer.alloc(10, 4));
   assert.equal(second.status, 400);
-  assert.equal(second.body.message, "user chunks quota exceeded");
+  assert.equal(second.body.message, "用户分片配额已用尽");
 });
