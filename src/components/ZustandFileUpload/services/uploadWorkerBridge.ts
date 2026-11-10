@@ -12,12 +12,17 @@ import { buildChunkKey } from "../../../shared/chunkKey";
 import { markPerf } from "../../../shared/perfTrace";
 import { createProgressThrottle } from "./progressThrottle";
 
+/**
+ * T-18：只保留**上传 Worker 实际读取**的字段（uploadWorker.ts 的
+ * `networkParams?.chunkConcurrency / maxRetries / timeout / retryInterval`）。
+ * 此前还塞了 networkType / fileConcurrency / chunkSize，三者都只服务主线程
+ * 的 UI 展示、批次并发与文件分片键计算，Worker 从不消费——每次任务都白克隆一遍。
+ */
 interface UploadWorkerNetworkParams {
-  networkType: string;
-  fileConcurrency: number;
   chunkConcurrency: number;
-  chunkSize: number;
   maxRetries: number;
+  timeout?: number;
+  retryInterval?: number;
 }
 
 interface UploadWorkerApiConfig {
@@ -25,6 +30,8 @@ interface UploadWorkerApiConfig {
   uploadApi: string;
   checkApi: string;
   mergeApi: string;
+  /** T-19：显式指定续传状态接口；缺省时 Worker 自行按命名约定推导。 */
+  statusApi?: string;
   authHeaders?: Record<string, string>;
   withCredentials?: boolean;
   /** 调试日志开关（默认 false，关闭时 Worker 内不产生日志） */
@@ -448,7 +455,14 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         },
         fileRef: options.fileRef,
         chunkCache: options.chunkCache,
-        networkParams: options.networkParams,
+        // T-18：按白名单组装，上游对象即使混入额外字段也不会进 Worker 消息。
+        // 类型收敛之外再给一道运行时保证（库消费方可能用 JS 调用）。
+        networkParams: {
+          chunkConcurrency: options.networkParams.chunkConcurrency,
+          maxRetries: options.networkParams.maxRetries,
+          timeout: options.networkParams.timeout,
+          retryInterval: options.networkParams.retryInterval,
+        },
         uploadConfig: options.uploadConfig,
       };
 

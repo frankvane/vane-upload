@@ -42,6 +42,8 @@ vi.mock("../services/uploadWorkerBridge", () => ({
   createUploadWorkerPool: h.createUploadWorkerPool,
 }));
 
+vi.mock("../../../shared/isDev", () => ({ IS_DEV: true }));
+
 vi.mock("../store/upload", async () => {
   const ReactNS = await import("react");
   return {
@@ -138,5 +140,21 @@ describe("UploadProvider / UploadContext", () => {
     expect(h.createUploadStorage).toHaveBeenCalledWith("tenant-A");
     expect(second.engine.instanceId).toBe("tenant-A");
     expect(second.engine).not.toBe(first.engine);
+  });
+});
+
+// T-27：告警由 Provider 渲染期触发，且模块级单次标记让多实例不刷屏。
+describe("T-27 静态 authToken 开发期告警（组件层）", () => {
+  it("渲染带静态 token 的 Provider 只告警一次", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      renderWithProvider(<div>dev-warn-a</div>, { authToken: "hardcoded-1" });
+      renderWithProvider(<div>dev-warn-b</div>, { authToken: "hardcoded-2" });
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("getAuthToken");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

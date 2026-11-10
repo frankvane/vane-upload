@@ -63,10 +63,8 @@ export interface BatchUploaderActions {
 export function useBatchUploader(): BatchUploaderActions {
   const {
     isNetworkOffline,
-    networkType,
     fileConcurrency,
     chunkConcurrency,
-    chunkSize,
     maxRetries,
     refreshFiles,
     setProgressDetail,
@@ -76,10 +74,8 @@ export function useBatchUploader(): BatchUploaderActions {
   } = useUploadStore(
     useShallow((state) => ({
       isNetworkOffline: state.isNetworkOffline,
-      networkType: state.networkType,
       fileConcurrency: state.fileConcurrency,
       chunkConcurrency: state.chunkConcurrency,
-      chunkSize: state.chunkSize,
       maxRetries: state.maxRetries,
       refreshFiles: state.refreshFiles,
       setProgressDetail: state.setProgressDetail,
@@ -126,17 +122,12 @@ export function useBatchUploader(): BatchUploaderActions {
         return false;
       }
 
-      // 分片缓存（方案 A）：会话内 fileRef 优先；刷新后 fileRef 丢失，
-      // 只要缓存就绪即可零点击续传。
+      // 分片缓存：会话内优先用 fileRef；刷新后 fileRef 丢失，缓存就绪即可零点击续传。
       //
-      // T-05（P1-2）：预热不再阻塞上传启动。缓存只服务于「刷新后零点击续传」，
-      // 上传字节来自 fileRef（会话内）或缓存本身（刷新后），二者互不依赖；
-      // 此前在置 UPLOADING 前 await 全量预热，首字节延迟正比于文件大小
-      // （100MB 文件要先读 100MB、再写 100MB，才发出第一个分片）。
-      //
-      // 安全性不依赖启动顺序，只依赖 chunkCache 的「就绪标记最后写入」：
-      // 标记存在 ⟹ 全部分片已落盘，续传判定永远看不到缺片状态。
-      // 预热未完成时刷新 → 无就绪标记 → 走既有「需重新选择」降级，不新增失败模式。
+      // 预热不阻塞上传启动：上传字节来自 fileRef（会话内）或缓存（刷新后），
+      // 二者互不依赖；等全量预热会让首字节延迟正比于文件大小。
+      // 安全性只依赖 chunkCache「就绪标记最后写入」：标记存在 ⟹ 分片齐全；
+      // 预热未完成时刷新 → 无标记 → 降级为「需重新选择」，不新增失败模式。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
       const cacheOptions = {
         instanceId: engine.instanceId,
@@ -169,10 +160,7 @@ export function useBatchUploader(): BatchUploaderActions {
         chunkCache: { instanceId: engine.instanceId },
         signal,
         networkParams: {
-          networkType,
-          fileConcurrency,
           chunkConcurrency,
-          chunkSize,
           maxRetries,
         },
         uploadConfig: {
@@ -180,6 +168,7 @@ export function useBatchUploader(): BatchUploaderActions {
           uploadApi: uploadConfig.uploadApi,
           checkApi: uploadConfig.checkApi,
           mergeApi: uploadConfig.mergeApi,
+          statusApi: uploadConfig.statusApi,
           authHeaders: await resolveAuthHeaders(uploadConfig),
           withCredentials: uploadConfig.withCredentials,
           debug: uploadConfig.debug,
@@ -280,10 +269,7 @@ export function useBatchUploader(): BatchUploaderActions {
     [
       engine,
       syncFile,
-      networkType,
-      fileConcurrency,
       chunkConcurrency,
-      chunkSize,
       maxRetries,
       setProgressDetail,
       uploadConfig,

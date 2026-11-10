@@ -15,6 +15,7 @@ import { createUploadWorkerPool } from "../services/uploadWorkerBridge";
 import { DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE } from "../services/chunkCache";
 import { createUploadStore, UploadStoreContext } from "../store/upload";
 import { UploadEngine, UploadEngineContext } from "./UploadEngineContext";
+import { warnIfStaticAuthToken } from "../../../shared/authHeaders";
 
 const DEFAULT_CONFIG: UploadConfig = {
   baseURL: API_BASE_URL,
@@ -65,6 +66,8 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   uploadApi = DEFAULT_CONFIG.uploadApi,
   checkApi = DEFAULT_CONFIG.checkApi,
   mergeApi = DEFAULT_CONFIG.mergeApi,
+  statusApi,
+  abortApi,
   chunkSize = DEFAULT_CONFIG.chunkSize,
   fileConcurrency = DEFAULT_CONFIG.fileConcurrency,
   chunkConcurrency = DEFAULT_CONFIG.chunkConcurrency,
@@ -98,6 +101,10 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   withCredentials = false,
   instanceId,
 }) => {
+  // 渲染期就提示一次，别等首次上传才发现 token 是硬编码的。告警本身带模块级
+  // 单次标记，StrictMode 双渲染与多实例不会刷屏；生产构建里是空调用。
+  warnIfStaticAuthToken({ authToken, getAuthToken });
+
   // T3.2 单例治理：每个 <FileUpload> 实例持有一套独立的引擎资源
   // （store / storage / fileRegistry / workerPool），经 context 下发，
   // 实现多实例互不串数据；卸载时仅释放自身资源。
@@ -149,6 +156,8 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       uploadApi,
       checkApi,
       mergeApi,
+      statusApi,
+      abortApi,
       chunkSize,
       fileConcurrency,
       chunkConcurrency,
@@ -186,6 +195,8 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       uploadApi,
       checkApi,
       mergeApi,
+      statusApi,
+      abortApi,
       chunkSize,
       fileConcurrency,
       chunkConcurrency,

@@ -256,12 +256,8 @@ describe("useFileProcessor 行为断言", () => {
       expect.objectContaining({
         files: [valid],
         hashMode: "full",
-        networkParams: expect.objectContaining({
-          networkType: "wifi",
-          fileConcurrency: 2,
-          chunkConcurrency: 2,
-          chunkSize: 1024 * 1024,
-        }),
+        // T-18：预处理 Worker 只读 chunkSize，其余网络参数不再白传。
+        networkParams: { chunkSize: 1024 * 1024 },
       })
     );
 

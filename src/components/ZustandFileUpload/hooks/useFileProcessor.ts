@@ -7,7 +7,7 @@ import { ProcessingStats, UploadFile, UploadStatus } from "../types/upload";
 import { DEFAULT_AUTO_UPLOAD_DELAY_MS } from "../types/upload";
 
 /**
- * T-30：自动上传合并窗口的取值保护。
+ * 自动上传合并窗口的取值保护。
  *
  * 这个值直接喂给 `setTimeout`，所以脏输入必须有明确行为：
  * - 负数 / NaN / Infinity → 回落默认 120ms。`setTimeout` 收到负数或 NaN 会当 0
@@ -85,9 +85,6 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
   const {
     existingFiles,
     isNetworkOffline,
-    networkType,
-    fileConcurrency,
-    chunkConcurrency,
     chunkSize,
     refreshFiles,
     setProcessProgress,
@@ -99,9 +96,6 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
     useShallow((state) => ({
       existingFiles: state.files,
       isNetworkOffline: state.isNetworkOffline,
-      networkType: state.networkType,
-      fileConcurrency: state.fileConcurrency,
-      chunkConcurrency: state.chunkConcurrency,
       chunkSize: state.chunkSize,
       refreshFiles: state.refreshFiles,
       setProcessProgress: state.setProcessProgress,
@@ -465,12 +459,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
         worker.postMessage({
           files: validFiles,
           hashMode: uploadConfig.hashMode,
-          networkParams: {
-            networkType,
-            fileConcurrency,
-            chunkConcurrency,
-            chunkSize,
-          },
+          // T-18：预处理 Worker 只读 chunkSize（决定分片数与分片键），
+          // 其余网络参数由主线程各自消费，不再白传一遍。
+          networkParams: { chunkSize },
         });
       });
     } catch (error) {

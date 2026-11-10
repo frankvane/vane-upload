@@ -6,6 +6,7 @@ import type { BatchUploaderActions } from "./useBatchUploader";
 import { useShallow } from "zustand/react/shallow";
 import { buildChunkKey } from "../../../shared/chunkKey";
 import { joinUrl } from "../../../shared/url";
+import { resolveAbortApi } from "../../../shared/uploadApiPaths";
 import { resolveAuthHeaders, resolveRequestCredentials } from "../utils/auth";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
 import {
@@ -13,13 +14,8 @@ import {
   clearInstanceChunkCache,
 } from "../services/chunkCache";
 
-const DEFAULT_ABORT_API = "/api/file/abort";
-
-/** 由 uploadApi 推导 abort 接口（`/…/upload` → `/…/abort`），无法推导时回落默认路径。 */
-const resolveAbortApi = (uploadApi: string): string =>
-  /\/upload\/?$/.test(uploadApi)
-    ? uploadApi.replace(/\/upload\/?$/, "/abort")
-    : DEFAULT_ABORT_API;
+// T-19：路径推导收敛到 shared/uploadApiPaths.ts，与 Worker 侧共用同一套兜底规则；
+// 宿主可通过 config.abortApi 显式指定，不再受 `/upload → /abort` 命名约定约束。
 
 /**
  * E2E-03：删除文件时清理服务端已落的分片。
@@ -41,7 +37,7 @@ const abortServerChunks = async (
   }
 
   const authHeaders = await resolveAuthHeaders(config);
-  await fetch(joinUrl(config.baseURL, resolveAbortApi(config.uploadApi)), {
+  await fetch(joinUrl(config.baseURL, resolveAbortApi(config.uploadApi, config.abortApi)), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders },
     credentials: resolveRequestCredentials(config.withCredentials),

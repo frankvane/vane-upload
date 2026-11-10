@@ -92,6 +92,17 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
   uploadApi?: string;
   checkApi?: string;
   mergeApi?: string;
+  /**
+   * 续传状态查询接口（T-19）。默认由 `checkApi` 按 `/instant → /status` 推导，
+   * 推导不出来时回落 `/api/file/status`。自定义了接口路径、且服务端状态接口
+   * 不符合该命名约定时必须显式传，否则续传会静默退化成「全部重传」。
+   */
+  statusApi?: string;
+  /**
+   * 删除文件时清理服务端分片的接口（T-19）。默认由 `uploadApi` 按
+   * `/upload → /abort` 推导，推导不出来时回落 `/api/file/abort`。
+   */
+  abortApi?: string;
 
   // Network/upload tuning
   chunkSize?: number;
@@ -113,14 +124,11 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
   autoUpload?: boolean;
   /**
    * 自动上传的「合并窗口」（毫秒）：文件预处理完成后等这么久再开跑，
-   * 让连续几次选择合并成一批上传（T-30）。
+   * 让连续几次选择合并成一批上传。默认 120ms。
    *
-   * 默认 **120ms**（原为写死的 500ms）：实测这 500ms 是「选完到首个请求」
-   * 的 89% 固定开销（1KB 文件也要 571ms），而下调几乎不影响「一次选多个文件」
-   * （它们本来就在同一批）。代价是「间隔 > delay 的两次选择」会变成两批，
-   * 服务端多一轮 `/merge` —— 需要旧行为时可显式传大（如 500）。
-   *
-   * 传 0 表示立即上传；负数/非数字回落默认值。
+   * 它是行为开关而不是性能优化：调大能合并更多次选择（少一轮 `/merge`），
+   * 代价是「选完到首个请求」的等待。传 0 表示立即上传；
+   * 负数 / NaN / Infinity 回落默认值，上限 5000ms。
    */
   autoUploadDelay?: number;
   autoCleanup?: boolean;
@@ -203,6 +211,10 @@ export interface UploadConfig {
   uploadApi: string;
   checkApi: string;
   mergeApi: string;
+  /** 见 ZustandFileUploadProps.statusApi；推导仅作兜底。 */
+  statusApi?: string;
+  /** 见 ZustandFileUploadProps.abortApi；推导仅作兜底。 */
+  abortApi?: string;
   chunkSize: number;
   fileConcurrency: number;
   chunkConcurrency: number;
@@ -254,12 +266,9 @@ export interface UploadProgressDetail {
 export type AlignItem = "left" | "center" | "right";
 
 /**
- * 自动上传合并窗口默认值（毫秒）。
- *
- * T-30：原实现写死 500ms。T-29 实测这 500ms 占「选完 → 首个网络请求」的 89%
- * （1KB 文件也只有 571ms 总量），而它换来的只是「连续几次选择合并成一批」。
- * 下调到 120ms 后，首字节固定开销降为约 1/5，而「一次选多个文件」完全不受影响
- * （同一批本来就只有一个 `change` 事件）。需要旧行为的宿主可显式传 500。
+ * 自动上传合并窗口默认值（毫秒）：在「合并连续选择」与「首字节等待」之间取平衡。
+ * 一次选多个文件本来就是同一批 change，窗口长短不影响它们，只影响间隔选择。
+ * 该值可由 autoUploadDelay 覆盖。
  */
 export const DEFAULT_AUTO_UPLOAD_DELAY_MS = 120;
 

@@ -7,7 +7,11 @@ import type { FileOperationsActions } from "../hooks/useFileOperations";
 import { useEffectiveUploadConfig } from "../hooks/useEffectiveConfig";
 import { useUploadStore } from "../store/upload";
 import { useShallow } from "zustand/react/shallow";
-import { NetworkStatusBadge, ProcessProgressDisplay } from "./";
+// T-20：从具体模块导入，不再走 components/index.ts barrel。
+// barrel 会静态 re-export FileTable / StorageStatsDrawer，此前靠 tree-shaking
+// 才没把表格代码拉进这条链路；改成具体导入是结构性保证，不依赖打包器的摇树运气。
+import NetworkStatusBadge from "./NetworkStatusBadge";
+import ProcessProgressDisplay from "./ProcessProgressDisplay";
 
 interface FileUploadActionsProps {
   triggerFileInput: () => void;

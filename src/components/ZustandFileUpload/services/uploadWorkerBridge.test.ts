@@ -6,6 +6,7 @@ interface PostedMessage {
   type: string;
   fileId?: string;
   uploadConfig?: Record<string, unknown>;
+  networkParams?: Record<string, unknown>;
 }
 
 class FakeUploadWorker {
@@ -74,10 +75,7 @@ const baseOptions = () => ({
   file: createFile(),
   fileRef: new File([new Uint8Array(8)], "demo.bin"),
   networkParams: {
-    networkType: "wifi",
-    fileConcurrency: 2,
     chunkConcurrency: 2,
-    chunkSize: 1024 * 1024,
     maxRetries: 3,
   },
 });
@@ -124,6 +122,31 @@ describe("runUploadTask uploadConfig 贯通（T2.1 mergeApi）", () => {
 
     const posted = FakeUploadWorker.instances[0]!.posted[0]!;
     expect(posted.uploadConfig?.mergeApi).toBe("/custom/merge-endpoint");
+  });
+
+  it("T-18：消息只带 Worker 实际消费的网络参数（上游混入死字段也进不来）", async () => {
+    // 模拟 JS 消费方或旧调用点仍带着 networkType / fileConcurrency / chunkSize。
+    const dirty = {
+      ...baseOptions().networkParams,
+      networkType: "wifi",
+      fileConcurrency: 9,
+      chunkSize: 777,
+    } as unknown as Parameters<typeof pool.runUploadTask>[0]["networkParams"];
+
+    await pool.runUploadTask({
+      ...baseOptions(),
+      networkParams: dirty,
+      uploadConfig: apiConfig,
+    });
+
+    const posted = FakeUploadWorker.instances[0]!.posted[0]!;
+    expect(posted.networkParams).toMatchObject({
+      chunkConcurrency: 2,
+      maxRetries: 3,
+    });
+    for (const dead of ["networkType", "fileConcurrency", "chunkSize"]) {
+      expect(posted.networkParams).not.toHaveProperty(dead);
+    }
   });
 
   it("完成后的 Worker 被回收进空闲池（不泄漏）", async () => {
