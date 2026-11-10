@@ -2,6 +2,9 @@
   "name": "vane-upload",
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.8.0"
+  },
   "main": "./dist/lib/index.cjs",
   "module": "./dist/lib/index.js",
   "types": "./dist/lib/index.d.ts",
@@ -37,7 +40,7 @@
     "dev:server": "npm run dev -w server",
     "test:server": "npm test -w server",
     "size:check": "node scripts/size-check.mjs",
-    "ci": "npm run typecheck && npm run lint && npm run test:coverage && npm run test:server:coverage && npm run build && npm run size:check",
+    "ci": "node scripts/check-node.mjs && npm run typecheck && npm run lint && npm run test:coverage && npm run test:server:coverage && npm run build && npm run size:check",
     "test:e2e": "playwright test",
     "test:e2e:report": "playwright show-report"
   },

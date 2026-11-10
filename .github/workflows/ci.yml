@@ -18,9 +18,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      # 必须 ≥22.8：后端覆盖率门禁用 `--test-coverage-lines/branches/functions`
+      # （v22.8.0 引入）与 `--test-coverage-include/exclude`（v22.5.0 引入）。
+      # 钉在 20 时 Node 把它们当未知启动参数，**以退出码 9 静默退出且不打印任何错误**
+      # —— run #1 的失败就是这个，日志里只有一句 "Process completed with exit code 9"。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install
         run: npm ci
