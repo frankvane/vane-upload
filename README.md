@@ -78,8 +78,10 @@ export default function UploadPage() {
 | --- | --- | --- | --- |
 | `baseURL` | `string` | `""` | 接口前缀。空字符串表示同源相对路径；跨域时填 `https://api.example.com` |
 | `uploadApi` | `string` | `"/api/file/upload"` | 分片上传接口路径 |
-| `checkApi` | `string` | `"/api/file/instant"` | 秒传预检接口路径。续传用的 `/status` 接口按命名约定由它推导（`/instant` → `/status`），自定义路径请保持同一约定 |
+| `checkApi` | `string` | `"/api/file/instant"` | 秒传预检接口路径。续传用的 `/status` 接口默认按命名约定由它推导（`/instant` → `/status`），自定义路径请显式传 `statusApi` |
 | `mergeApi` | `string` | `"/api/file/merge"` | 分片合并接口路径 |
+| `statusApi` | `string` | 由 `checkApi` 推导，推导不出来回落 `"/api/file/status"` | 续传状态查询接口（T-19）。**自定义了 `checkApi` 且不符合 `/instant` 命名约定时必须显式传**，否则续传会静默退化成「全部重传」 |
+| `abortApi` | `string` | 由 `uploadApi` 推导，推导不出来回落 `"/api/file/abort"` | 删除记录时清理服务端分片的接口（T-19）。自定义了 `uploadApi` 且不符合 `/upload` 命名约定时必须显式传 |
 
 ### 上传参数
 
@@ -123,7 +125,7 @@ export default function UploadPage() {
 
 | 属性 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `authToken` | `string` | — | 静态 Token（适合演示，不建议硬编码） |
+| `authToken` | `string` | — | 静态 Token（仅演示；开发环境会提示一次「可能被打进前端 bundle」，生产构建无该提示） |
 | `getAuthToken` | `() => string \| undefined \| Promise<...>` | — | 每次请求前动态取 Token（推荐，支持从异步存储/刷新逻辑取值） |
 | `getAuthHeaders` | `() => Record<string, string> \| Promise<...>` | — | 完全自定义请求头，**优先级最高**，覆盖上面两者 |
 | `authScheme` | `string` | `"Bearer"` | Token 前缀，最终头为 `Authorization: <scheme> <token>` |
@@ -286,7 +288,7 @@ const validator = (file: File) => {
 | GET | `/api/file/status` | 查询某文件已成功上传的分片索引（`file_id`、`md5`） |
 | POST | `/api/file/upload` | 上传单个分片，`multipart/form-data`：`file_id`、`index`、`chunk_md5`、`chunk` |
 | POST | `/api/file/merge` | 合并分片并落库：`file_id`、`md5`、`name`、`size`、`total` |
-| POST | `/api/file/abort` | **删除记录时清理服务端分片**。请求体：`{ file_id }`。由 `uploadApi` 自动推导（`/xxx/upload` → `/xxx/abort`），推导失败回落 `/api/file/abort` |
+| POST | `/api/file/abort` | **删除记录时清理服务端分片**。请求体：`{ file_id }`。默认由 `uploadApi` 推导（`/xxx/upload` → `/xxx/abort`），推导失败回落 `/api/file/abort`；可用 `abortApi` 显式覆盖 |
 | GET | `/api/health` | 健康检查 |
 
 `baseURL` 与三个接口路径均可通过 props 覆盖，无需改组件源码。
@@ -343,11 +345,14 @@ npm test             # 前端单测（vitest）
 npm run test:server  # 后端接口测试
 npm run typecheck    # TypeScript
 npm run lint         # ESLint
-npm run ci           # 以上全部 + build
+npm run ci           # 以上全部 + 双端覆盖率 + build + 体积门禁 + dev-only 产物检查
+npm run check:dev-only  # 单独复查开发期告警未进入 dist/lib、dist/demo
 ```
 
+质量状态与 VU 编号索引：见 [`docs/质量档案.md`](docs/质量档案.md)；部署运维基线见
+[`docs/部署检查表-2026-11-10.md`](docs/部署检查表-2026-11-10.md)。
 浏览器端到端与人工回归：见 [`docs/浏览器功能回归手册.md`](docs/浏览器功能回归手册.md)
-（含 30 分钟全功能复测路径）与 [`docs/浏览器E2E测试报告-2026-11-08.md`](docs/浏览器E2E测试报告-2026-11-08.md)。
+（含 30 分钟全功能复测路径）与 [`docs/archive/浏览器E2E测试报告-2026-11-08.md`](docs/archive/浏览器E2E测试报告-2026-11-08.md)（归档证据）。
 Playwright 冒烟共 **12 条**用例（`npx playwright test`）：上传主流程 VU-63-1 ~ VU-63-11（编号连续无重复），
 外加 1 条首字节延迟预算用例（`e2e/first-byte.budget.spec.ts`，守护「上传启动不随文件大小劣化」）。
 
