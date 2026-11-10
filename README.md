@@ -109,6 +109,7 @@ export default function UploadPage() {
 | --- | --- | --- | --- |
 | `uiMode` | `"full" \| "simple"` | `"full"` | `simple` 仅保留「选择文件 + 文件表格」，隐藏上传/清除/批量重试按钮、批次信息、存储统计抽屉与网络徽标 |
 | `autoUpload` | `boolean` | `true` | 选完文件立即开始上传；`false` 时文件停在「排队中」，需点「上传文件」 |
+| `autoUploadDelay` | `number` | `120` | 自动上传的**合并窗口**（毫秒）：预处理完成后等这么久再开跑，把「连续几次选择」合成一批。传 `0` 表示立即上传（间隔超过窗口的两次选择会变成两批，服务端多一轮 `/merge`）；旧版本是写死的 `500`，需要旧观感就显式传 `500`。手动点「上传文件」不经过该窗口 |
 | `autoCleanup` | `boolean` | `true` | 上传完成后自动移除记录 |
 | `cleanupDelay` | `number` | `10` | 自动清理延时（秒） |
 | `networkDisplayMode` | `"tooltip" \| "direct"` | `"tooltip"` | 网络徽标（如 `4G 1MB \| 2文件 \| 2分片`）的展开方式：悬停提示 / 直接显示 |
@@ -139,7 +140,7 @@ export default function UploadPage() {
 | `onUploadProgress` | `(file, progress: number) => void` | 同上，仅百分比。**已废弃**，新项目请用 `onUploadProgressDetail` |
 | `onUploadComplete` | `(file, success: boolean) => void` | 单个文件上传成功时。**「已完成」和「秒传成功」都会触发，`success` 均为 `true`** |
 | `onUploadError` | `(file, error: string) => void` | 单个文件进入**终态失败**时（重试耗尽后），`error` 为可直接展示的文案 |
-| `onBatchComplete` | `(results: { success; failed; total }) => void` | 一批上传结束时（**含存在失败的情况**） |
+| `onBatchComplete` | `(results: { success; failed; total; skipped? }) => void` | 一批上传结束时（**含存在失败的情况**）。`skipped` 是排队期间被删除、未执行也不计失败的数量（可选，旧代码忽略即可） |
 
 `UploadProgressDetail` 结构：
 
@@ -157,6 +158,7 @@ interface UploadProgressDetail {
 
 1. **暂停 / 取消 / 删除不会触发任何回调。** 它们只改变行状态，需要感知请订阅进度停止或自行记录操作。
 2. **整批「取消上传」（批次详情抽屉里的按钮）不触发 `onBatchComplete`。** 只有跑完的批次才回调。
+   单个文件被取消 / 排队期间被删除也一样：前者算「取消」不计入失败，后者计入 `skipped`（不是 `failed`）。
 3. **批量重试不触发 `onUploadStart`**，但它引发的成功/失败仍会触发 `onUploadComplete` / `onUploadError`。
 4. **内置 message 的覆盖范围**：文件校验失败、网络断开、删除/清空/重试失败会由组件自己弹提示（若你也弹 toast 会重复）；
    而**单个文件上传到终态失败只走 `onUploadError`**，组件不额外弹提示，需要你自行提示用户。
@@ -330,7 +332,7 @@ npm run dev          # 前端 http://localhost:5173，/api 代理到 3000
 构建：
 
 ```bash
-npm run build        # demo（dist/）+ 库产物（dist/lib/）
+npm run build        # 演示站点（dist/demo/）+ 库产物（dist/lib/）
 npm run build:lib    # 仅库：index.js / index.cjs / index.d.ts / style.css
 ```
 
@@ -346,6 +348,8 @@ npm run ci           # 以上全部 + build
 
 浏览器端到端与人工回归：见 [`docs/浏览器功能回归手册.md`](docs/浏览器功能回归手册.md)
 （含 30 分钟全功能复测路径）与 [`docs/浏览器E2E测试报告-2026-11-08.md`](docs/浏览器E2E测试报告-2026-11-08.md)。
+Playwright 冒烟共 **12 条**用例（`npx playwright test`）：上传主流程 VU-63-1 ~ VU-63-11（编号连续无重复），
+外加 1 条首字节延迟预算用例（`e2e/first-byte.budget.spec.ts`，守护「上传启动不随文件大小劣化」）。
 
 ## 调试
 
