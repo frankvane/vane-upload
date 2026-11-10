@@ -50,4 +50,18 @@ jobs:
             fi
           done
       - name: Container image smoke
-        run: docker build -t vane-upload-server:ci .
+        run: |
+          # 失败时把关键几行打进 annotation：Actions 日志需要权限才能读，
+          # 而 annotation 是公开可见的，否则这一步失败只剩一句 "exit code 1"。
+          #
+          # 必须显式开 pipefail：`run` 的默认 shell 是 `bash -e {0}`，
+          # 不带 pipefail，`docker build | tee` 的退出码会变成 tee 的 0，
+          # 失败会被吞掉、这一步永远绿。
+          set -o pipefail
+          if docker build -t vane-upload-server:ci . 2>&1 | tee /tmp/docker-build.log; then
+            exit 0
+          fi
+          FIRST=$(grep -m1 -iE 'ERR!|error|failed|not found' /tmp/docker-build.log | cut -c1-300)
+          TAIL=$(tail -n 3 /tmp/docker-build.log | tr '\n' ' ' | cut -c1-300)
+          echo "::error title=镜像构建失败::首个错误行为「${FIRST}」；尾部「${TAIL}」"
+          exit 1
