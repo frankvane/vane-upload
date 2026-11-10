@@ -25,7 +25,25 @@ jobs:
       - name: Install
         run: npm ci
       # 与本地 `npm run ci` 完全同一条命令，避免 CI 与本地门禁漂移。
+      # 单条命令的代价是「失败时只报这一整步失败」，看不出断在哪个阶段，
+      # 下面的 Locate failing stage 专门补这个可观测性缺口。
       - name: Full gate (typecheck / lint / tests / build)
         run: npm run ci
+      # 仅在上面失败时执行：逐阶段重跑，把「哪个阶段 + 报错日志尾部」直接打进
+      # job 摘要。正常路径不额外耗时；阶段列表与 package.json 的 ci 脚本同序，
+      # 增删阶段时两处要一起改（`ci` 仍是唯一权威，这里只做定位）。
+      - name: Locate failing stage
+        if: failure()
+        run: |
+          for s in typecheck lint test:coverage test:server:coverage build size:check; do
+            if npm run "$s" >"/tmp/$s.log" 2>&1; then
+              echo "PASS  $s"
+            else
+              echo "::error title=门禁失败::npm run $s"
+              echo "===== $s（日志尾部） ====="
+              tail -n 80 "/tmp/$s.log"
+              exit 1
+            fi
+          done
       - name: Container image smoke
         run: docker build -t vane-upload-server:ci .
