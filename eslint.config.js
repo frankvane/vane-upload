@@ -34,9 +34,18 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       // VU-64：UI 库需导出非组件常量（Typography 对象、confirm 函数、UploadContext），
       // 允许常量导出，从而删掉各处的 react-refresh/only-export-components 行内禁用。
+      //
+      // VU-65（T-03）：allowConstantExport 只放行字面量常量，覆盖不到以下三个符号——
+      // 它们分别是「上下文对象 + Provider 同文件」「命令式 API + 组件同文件」
+      // 「组件聚合对象」，都是本库有意的对外形态，且行内禁用会随重构失效（曾留下 5 条
+      // 失效禁用）。改为在配置里**逐名**放行：新出现的非组件导出仍会告警，
+      // 不会因整目录关规则而失守。
       "react-refresh/only-export-components": [
         "warn",
-        { allowConstantExport: true },
+        {
+          allowConstantExport: true,
+          allowExportNames: ["UploadContext", "Typography", "confirm"],
+        },
       ],
     },
   },

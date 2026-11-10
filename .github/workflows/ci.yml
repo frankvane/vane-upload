@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # D-03 决策：主干保留 master（仓库默认分支即 master），不迁移 main。
+    # 原配置监听 main，而主干从未向 main 推送，导致门禁在主干上从未真正执行。
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
