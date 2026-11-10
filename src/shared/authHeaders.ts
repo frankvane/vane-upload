@@ -6,6 +6,7 @@
 // - 否则用 `getAuthToken` / `authToken` 拼成 `Authorization: <scheme> <token>`。
 // - 同域 Cookie 场景下浏览器会自动携带（fetch 默认 same-origin、axios 默认
 //   withCredentials:false），此处不强制塞 Cookie，避免重复。
+import { IS_DEV } from "./isDev";
 export interface AuthHeadersConfig {
   /** 静态 Bearer Token（不推荐长期硬编码，适合演示） */
   authToken?: string;
@@ -26,9 +27,34 @@ export interface AuthHeadersConfig {
 /** 历史别名：上传侧 props 一直使用 UploadAuthConfig 命名，保留以兼容公共 API */
 export type UploadAuthConfig = AuthHeadersConfig;
 
+// 静态 token 会随宿主源码被打进前端 bundle，任何访问者都能读到；开发期提示一次，
+// 生产环境请改用 getAuthToken 或同域 Cookie。文案同时是构建产物的检查标记
+// （scripts/check-dev-only-code.mjs 会确认它没进 dist）。
+const STATIC_TOKEN_WARNING =
+  "[vane-upload][dev-only] 静态 authToken 可能会被打进前端 bundle：任何访问者都能读到该值。生产环境请改用 getAuthToken 动态取 token，或走同域 Cookie 鉴权。";
+
+let staticTokenWarningShown = false;
+
+/**
+ * 开发期对静态 authToken 提示一次。判据是「写了静态值且没有动态取数」——
+ * 即使 `getAuthHeaders` 覆盖了它，字面量仍留在 bundle 里，所以不看 getAuthHeaders。
+ * 单次标记是模块级的：同一页面多个 <ZustandFileUpload> 实例、StrictMode 双渲染
+ * 都只告警一次，避免刷屏。生产构建中 IS_DEV 为 false，整个函数体会被移除。
+ */
+export function warnIfStaticAuthToken(
+  config: Pick<AuthHeadersConfig, "authToken" | "getAuthToken">
+): void {
+  if (!IS_DEV || staticTokenWarningShown) return;
+  if (!config.authToken || config.getAuthToken) return;
+  staticTokenWarningShown = true;
+  console.warn(STATIC_TOKEN_WARNING);
+}
+
 export async function resolveAuthHeaders(
   config: AuthHeadersConfig
 ): Promise<Record<string, string>> {
+  warnIfStaticAuthToken(config);
+
   if (config.getAuthHeaders) {
     const headers = await config.getAuthHeaders();
     return headers ?? {};

@@ -1,5 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAuthHeaders, resolveRequestCredentials } from "./authHeaders";
+
+// T-27 的开发期告警在这些用例里属于噪音，专门的行为断言放在
+// staticAuthTokenWarning.test.ts；此处只静音，不改变断言。
+beforeEach(() => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("resolveAuthHeaders", () => {
   it("getAuthHeaders 优先级最高，直接使用自定义头", async () => {
