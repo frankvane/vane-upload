@@ -20,6 +20,13 @@ let instantFails = false;
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
   const target = String(input);
+  // T-19：自定义路径 + 显式 statusApi 的场景，按对应语义返回。
+  if (target.includes("/v2/quick-check")) {
+    return jsonResponse({ code: 200, data: { uploaded: false } });
+  }
+  if (target.includes("/v2/resume-state")) {
+    return jsonResponse({ code: 200, data: { chunks: [0] } });
+  }
   if (target.includes("/instant")) {
     if (instantFails) {
       throw new TypeError("network down");
@@ -62,6 +69,36 @@ describe("uploadWorker P2-1 分片 MD5 按需计算", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.resetModules();
+  });
+
+  it("T-19：自定义 checkApi 不符合命名约定时，显式 statusApi 生效而非静默回落", async () => {
+    const fileRef = new File([new Uint8Array(3072).fill(7)], "t19.bin");
+
+    await dispatch({
+      type: "upload",
+      fileInfo: {
+        id: "t19-case",
+        fileName: "t19.bin",
+        fileSize: 3072,
+        hash: "3".repeat(32),
+        chunkSize: 1024,
+        chunkKey: `${"3".repeat(32)}_3072_1024`,
+      },
+      fileRef,
+      networkParams: { chunkConcurrency: 1, maxRetries: 1 },
+      uploadConfig: {
+        baseURL: "",
+        uploadApi: "/api/file/upload",
+        // 不含 /instant，旧实现的正则推导必然失败并回落 /api/file/status
+        checkApi: "/v2/quick-check",
+        mergeApi: "/api/file/merge",
+        statusApi: "/v2/resume-state",
+      },
+    });
+
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls.some((url) => url.includes("/v2/resume-state"))).toBe(true);
+    expect(urls.some((url) => url.includes("/api/file/status"))).toBe(false);
   });
 
   it("先查 status 只传缺失分片，且请求体不含全量 chunk_md5s", async () => {
