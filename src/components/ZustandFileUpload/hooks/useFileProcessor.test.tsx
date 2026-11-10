@@ -165,6 +165,23 @@ describe("useFileProcessor 行为断言", () => {
     expect(h.instances.length).toBe(0);
   });
 
+  it("D-01：0 字节文件在选择阶段即被拒绝（服务端 /merge 不接受 total=0）", () => {
+    const empty = makeFile("empty.bin", "application/octet-stream", 0);
+    const valid = makeFile("ok.bin", "application/octet-stream", 100);
+
+    const { result } = renderHook(() => useFileProcessor({ uploadAll: vi.fn() }));
+
+    act(() => {
+      result.current.handleFileChange(makeEvent([empty, valid]));
+    });
+
+    expect(h.messageApi.error).toHaveBeenCalledWith(
+      '文件 "empty.bin" 为空文件，不支持上传'
+    );
+    // 空文件被拒不影响同批合法文件入队
+    expect(h.instances.length).toBe(1);
+  });
+
   it("E2E-R2：危险扩展名/危险 MIME 在选择阶段即被拦截并给出可读原因", () => {
     // 即使白名单显式放行该 MIME，危险扩展名仍必须被拒（与服务端 /merge 同口径）
     h.config.allowedFileTypes = ["application/octet-stream"];
@@ -297,6 +314,112 @@ describe("useFileProcessor 行为断言", () => {
     expect(h.storeState.setCost).toHaveBeenCalled();
   });
 
+  it("T-29：埋点开启时按阶段产出 mark，关闭时一个都不产出", async () => {
+    const host = globalThis as unknown as Record<string, unknown>;
+    const vaneMarks = () =>
+      performance
+        .getEntriesByType("mark")
+        .map((entry) => entry.name)
+        .filter((name) => name.startsWith("vane:"));
+
+    const driveOnce = async (uploadAll: () => Promise<boolean>) => {
+      const valid = makeFile("trace.png", "image/png", 100);
+      // 命中「新文件入队」分支，才能走到持久化 → queue:persisted
+      vi.mocked(reconcileIncomingFiles).mockReturnValueOnce({
+        newItems: [
+          {
+            id: "trace-id",
+            fileName: "trace.png",
+            fileSize: 100,
+            fileType: "image/png",
+            lastModified: 0,
+            hash: "h-trace",
+            hashMode: "full",
+            chunkSize: 1024,
+            chunkCount: 1,
+            status: UploadStatus.QUEUED,
+            progress: 0,
+            createdAt: 1,
+            order: 0,
+          } as UploadFile,
+        ],
+        rebindItems: [],
+        skipped: 0,
+      });
+      const { result } = renderHook(() => useFileProcessor({ uploadAll }));
+      act(() => {
+        result.current.handleFileChange(makeEvent([valid]));
+      });
+      const worker = h.instances[h.instances.length - 1]!;
+      act(() => {
+        worker.onmessage!({
+          data: {
+            type: "progress",
+            processed: 1,
+            total: 1,
+            success: 1,
+            failed: 0,
+            oversized: 0,
+            fileDetails: {
+              id: "trace-id",
+              fileName: "trace.png",
+              fileSize: 100,
+              fileType: "image/png",
+              index: 1,
+              total: 1,
+            },
+          },
+        } as MessageEvent);
+      });
+      await act(async () => {
+        worker.onmessage!({
+          data: {
+            type: "complete",
+            uploadFiles: [],
+            stats: { processed: 1, total: 1, success: 1, failed: 0, oversized: 0 },
+            timings: { boot: 12, waitForMessage: 1, hash: 3 },
+          },
+        } as MessageEvent);
+      });
+    };
+
+    // 关闭态（默认）：不能污染业务 timeline
+    performance.clearMarks();
+    host.__VANE_PERF_TRACE__ = false;
+    await driveOnce(vi.fn());
+    expect(vaneMarks()).toEqual([]);
+    expect(host.__VANE_PERF_TRACE_DETAILS__).toBeUndefined();
+
+    // 开启态：整条链路的关键阶段都要有点，且 Worker 内部耗时进明细包
+    performance.clearMarks();
+    host.__VANE_PERF_TRACE__ = true;
+    let enabledMarks: string[] = [];
+    let enabledDetails: unknown;
+    try {
+      await driveOnce(vi.fn());
+      enabledMarks = vaneMarks();
+      enabledDetails = host.__VANE_PERF_TRACE_DETAILS__;
+    } finally {
+      host.__VANE_PERF_TRACE__ = false;
+      delete host.__VANE_PERF_TRACE_DETAILS__;
+      performance.clearMarks();
+    }
+
+    expect(enabledMarks).toEqual(
+      expect.arrayContaining([
+        "vane:change:enter",
+        "vane:change:validated",
+        "vane:prepare:worker-created",
+        "vane:prepare:first-progress",
+        "vane:prepare:complete",
+        "vane:queue:persisted",
+      ])
+    );
+    expect(enabledDetails).toEqual({
+      prepareWorker: { boot: 12, waitForMessage: 1, hash: 3 },
+    });
+  });
+
   it("E2E-02：重选同一文件时复用既有 id 与 chunkSize，保证分片键稳定", async () => {
     const fileRef = new File(["abc"], "a.bin");
     const existing: UploadFile = {
@@ -371,5 +494,162 @@ describe("useFileProcessor 行为断言", () => {
       expect.stringContaining("断点继续上传")
     );
     expect(h.storeState.refreshFiles).toHaveBeenCalled();
+  });
+});
+
+describe("T-30 自动上传合并窗口（autoUploadDelay）", () => {
+  /** 造一份「新文件入队」的 dedupe 结果，让链路能走到持久化与定时器 */
+  const queueNewFile = (id: string) => {
+    vi.mocked(reconcileIncomingFiles).mockReturnValueOnce({
+      newItems: [
+        {
+          id,
+          fileName: `${id}.png`,
+          fileSize: 100,
+          fileType: "image/png",
+          lastModified: 0,
+          hash: `h-${id}`,
+          hashMode: "full",
+          chunkSize: 1024,
+          chunkCount: 1,
+          status: UploadStatus.QUEUED,
+          progress: 0,
+          createdAt: 1,
+          order: 0,
+        } as UploadFile,
+      ],
+      rebindItems: [],
+      skipped: 0,
+    });
+  };
+
+  /** 选一次文件并把预处理 Worker 的 complete 回灌，等价于「选完 + 预处理完成」 */
+  const selectAndComplete = async (result: {
+    current: { handleFileChange: (e: ChangeEvent<HTMLInputElement>) => void };
+  }) => {
+    act(() => {
+      result.current.handleFileChange(makeEvent([makeFile("x.png", "image/png", 100)]));
+    });
+    const worker = h.instances[h.instances.length - 1]!;
+    await act(async () => {
+      worker.onmessage!({
+        data: {
+          type: "complete",
+          uploadFiles: [],
+          stats: { processed: 1, total: 1, success: 1, failed: 0, oversized: 0 },
+        },
+      } as MessageEvent);
+    });
+  };
+
+  it("默认 120ms：窗口内的第二次选择被合并为一批，只开跑一次", async () => {
+    vi.useFakeTimers();
+    try {
+      h.config.autoUpload = true;
+      h.config.autoUploadDelay = undefined; // 走默认值
+      const uploadAll = vi.fn(async () => true);
+      const { result } = renderHook(() => useFileProcessor({ uploadAll }));
+
+      queueNewFile("t30-a");
+      await selectAndComplete(result);
+
+      // 距第一次选择 100ms —— 未到默认窗口
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(uploadAll).not.toHaveBeenCalled();
+
+      // 窗口内再选一次：定时器被重置（旧实现 500ms 也是这个语义，这里锁住「合并」行为）
+      queueNewFile("t30-b");
+      await selectAndComplete(result);
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(uploadAll).not.toHaveBeenCalled();
+
+      // 从第二次选择算起再过 20ms 才到点，且整批只开跑一次
+      await act(async () => {
+        vi.advanceTimersByTime(20);
+      });
+      expect(uploadAll).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("autoUploadDelay=0：两次选择各自开跑（退化为「不合并」）", async () => {
+    vi.useFakeTimers();
+    try {
+      h.config.autoUpload = true;
+      h.config.autoUploadDelay = 0;
+      const uploadAll = vi.fn(async () => true);
+      const { result } = renderHook(() => useFileProcessor({ uploadAll }));
+
+      queueNewFile("t30-c");
+      await selectAndComplete(result);
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+      });
+
+      queueNewFile("t30-d");
+      await selectAndComplete(result);
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+      });
+
+      expect(uploadAll).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["负数", -5],
+    ["NaN", Number.NaN],
+  ])("脏值 %s 回落默认窗口，不会「永不触发」也不会「立即触发」", async (_label, dirty) => {
+    vi.useFakeTimers();
+    try {
+      h.config.autoUpload = true;
+      h.config.autoUploadDelay = dirty as number;
+      const uploadAll = vi.fn(async () => true);
+      const { result } = renderHook(() => useFileProcessor({ uploadAll }));
+
+      queueNewFile("t30-e");
+      await selectAndComplete(result);
+
+      // 未到默认 120ms 之前不该开跑（Infinity 的旧行为是永远不开跑，这里必须能到点）
+      await act(async () => {
+        vi.advanceTimersByTime(119);
+      });
+      expect(uploadAll).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(uploadAll).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("autoUpload=false 时窗口完全不参与（不会定时开跑）", async () => {
+    vi.useFakeTimers();
+    try {
+      h.config.autoUpload = false;
+      h.config.autoUploadDelay = 120;
+      const uploadAll = vi.fn(async () => true);
+      const { result } = renderHook(() => useFileProcessor({ uploadAll }));
+
+      queueNewFile("t30-f");
+      await selectAndComplete(result);
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(uploadAll).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

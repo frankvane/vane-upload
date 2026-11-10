@@ -9,6 +9,7 @@ import {
 // 保证发布产物自包含、消费方无需解析外部 worker 资产。
 import UploadWorker from "../worker/uploadWorker.ts?worker";
 import { buildChunkKey } from "../../../shared/chunkKey";
+import { markPerf } from "../../../shared/perfTrace";
 import { createProgressThrottle } from "./progressThrottle";
 
 interface UploadWorkerNetworkParams {
@@ -454,6 +455,9 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
       // 注意：File 通过结构化克隆传入 Worker（不转移）。主线程注册表仍持有该引用，
       // 以支持会话内重试；刷新后引用丢失时由分片缓存接管字节来源。
       bumpIdleTimer();
+      // T-29：任务已投递给上传 Worker。此点到「首个网络请求」之间就是
+      // 上传 Worker 的启动开销 + 秒传预检发起，是首字节固定开销的最后一段。
+      markPerf("upload:dispatch");
       worker.postMessage(message);
     });
   };

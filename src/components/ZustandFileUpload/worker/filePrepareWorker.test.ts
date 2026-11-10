@@ -100,4 +100,25 @@ describe("filePrepareWorker.prepareFiles（VU-43 哈希并发池）", () => {
     expect(uploadFiles[0]?.hash).toMatch(/^[a-f0-9]{32}$/);
     expect(uploadFiles[0]?.chunkCount).toBe(4);
   });
+
+  it("T-29：回传哈希窗口耗时（并发下为首片开始→末片结束，而非逐文件累加）", async () => {
+    // 注入耗时哈希，验证窗口确实包住 computeHash 的等待时间；
+    // 若把 hashWindowStart/End 记错位置（例如记在 await 之前），窗口会塌成 0。
+    const { timings } = await prepareFiles(
+      [makeFile("a.bin"), makeFile("b.bin")],
+      {
+        hashFile: async () => {
+          // 40ms 而非 30ms：给沙箱高负载下的 timer 抖动留余量，
+          // 判据仍是「并发窗口 < 串行累加」，靠 40 vs 80 的差距区分。
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          return "b".repeat(32);
+        },
+      },
+    );
+
+    // 两个文件并发（HASH_CONCURRENCY=2），窗口 ≈ 一次哈希的 40ms，而不是 80ms。
+    // 上界取 75ms：既容得下计时器抖动，又与「串行累加 ≈80ms」拉开差距。
+    expect(timings.hash).toBeGreaterThanOrEqual(25);
+    expect(timings.hash).toBeLessThan(75);
+  });
 });

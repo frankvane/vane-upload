@@ -75,4 +75,50 @@ describe("ZustandFileUpload 挂载恢复（E2E-R1）", () => {
     // 两次挂载共享同一个恢复 Promise，IDB 快照只读一次。
     expect(recoverMock).toHaveBeenCalledTimes(1);
   });
+
+  it("T-06：instanceId 变更后不复用上一个实例的恢复 Promise（防跨实例串台）", async () => {
+    const emptySnapshot = {
+      files: [] as typeof snapshot.files,
+      summary: {
+        totalInterrupted: 0,
+        recoveredCount: 0,
+        missingFileRefCount: 0,
+      },
+      writeCount: 0,
+    };
+    let call = 0;
+    recoverMock.mockImplementation(async () => {
+      call += 1;
+      // 只有 alpha 实例的存储分区里有数据；beta 是全新分区。
+      return call === 1 ? snapshot : emptySnapshot;
+    });
+
+    const { rerender } = render(
+      <ZustandFileUpload
+        instanceId="alpha"
+        autoUpload={false}
+        autoCleanup={false}
+        cleanupDelay={5}
+        uiMode="simple"
+        settingsSource="props"
+      />
+    );
+    expect(await screen.findByText("restored.bin")).toBeInTheDocument();
+
+    rerender(
+      <ZustandFileUpload
+        instanceId="beta"
+        autoUpload={false}
+        autoCleanup={false}
+        cleanupDelay={5}
+        uiMode="simple"
+        settingsSource="props"
+      />
+    );
+
+    // 换实例后必须为新引擎重新读一次快照……
+    await waitFor(() => expect(recoverMock).toHaveBeenCalledTimes(2));
+    // ……且绝不能把 alpha 的队列写进 beta 的列表（旧实现会复用旧 Promise）。
+    await waitFor(() => expect(screen.queryByText("restored.bin")).toBeNull());
+  });
 });

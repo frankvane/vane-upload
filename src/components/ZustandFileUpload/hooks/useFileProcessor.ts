@@ -4,6 +4,22 @@ import { useEffect, useRef } from "react";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
 import { useUploadStore } from "../store/upload";
 import { ProcessingStats, UploadFile, UploadStatus } from "../types/upload";
+import { DEFAULT_AUTO_UPLOAD_DELAY_MS } from "../types/upload";
+
+/**
+ * T-30：自动上传合并窗口的取值保护。
+ *
+ * 这个值直接喂给 `setTimeout`，所以脏输入必须有明确行为：
+ * - 负数 / NaN / Infinity → 回落默认 120ms。`setTimeout` 收到负数或 NaN 会当 0
+ *   立即触发，收到 Infinity 则**永不触发** —— 后者等于「自动上传静默失效」，最糟；
+ * - 上限 5000ms：再大已不是「合并窗口」而是「延迟启动」，几乎必然是配置写错。
+ */
+const resolveAutoUploadDelay = (delay?: number): number => {
+  if (typeof delay !== "number" || !Number.isFinite(delay) || delay < 0) {
+    return DEFAULT_AUTO_UPLOAD_DELAY_MS;
+  }
+  return Math.min(delay, 5000);
+};
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { useShallow } from "zustand/react/shallow";
 import { compileAllowedTypes, isFileTypeAllowed } from "../../../shared/fileType";
@@ -12,6 +28,11 @@ import {
   formatDangerousFileReason,
 } from "../../../shared/fileSafety";
 import { reconcileIncomingFiles } from "../services/uploadDedupe";
+import {
+  clearPerfMarks,
+  markPerf,
+  recordPerfDetail,
+} from "../../../shared/perfTrace";
 import {
   primeChunkCache,
   type ChunkCacheStatus,
@@ -44,6 +65,12 @@ interface WorkerCompleteMessage {
   /** 含 fileRef 回传（T3.1）：主线程登记后剥离再持久化 */
   uploadFiles: Array<UploadFile & { fileRef?: File }>;
   stats: ProcessingStats;
+  /** T-29：Worker 内部阶段耗时，仅在埋点开启时消费 */
+  timings?: {
+    boot: number;
+    waitForMessage: number;
+    hash: number;
+  };
 }
 
 type WorkerMessage = WorkerProgressMessage | WorkerCompleteMessage;
@@ -153,6 +180,14 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
         return;
       }
 
+      // D-01 决策：不支持空文件。此前前端放行 0 字节文件（chunkCount = 0），
+      // 而服务端 /merge 要求 total 为正整数，必然 400 且文案对用户不可执行；
+      // 在选文件阶段直接拒绝，避免「分片全部跳过、卡在合并阶段失败」。
+      if (file.size === 0) {
+        errors.push(`文件 "${file.name}" 为空文件，不支持上传`);
+        return;
+      }
+
       if (file.size > uploadConfig.maxFileSize) {
         errors.push(
           `文件 "${file.name}" 大小超过限制 (${Math.round(
@@ -184,6 +219,10 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
 
+    // T-29：首字节归因的起点。每次选文件先清掉上一轮的 mark。
+    clearPerfMarks();
+    markPerf("change:enter");
+
     const files = Array.from(e.target.files);
     e.target.value = "";
 
@@ -193,6 +232,7 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
     }
 
     const { validFiles, errors } = validateFiles(files);
+    markPerf("change:validated");
 
     if (errors.length > 0) {
       errors.forEach((error) => messageApi.error(error));
@@ -217,6 +257,8 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
     const worker = createFilePrepareWorker();
     prepareWorkerRef.current = worker;
+    markPerf("prepare:worker-created");
+    let firstProgressMarked = false;
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -230,6 +272,10 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
             const data = event.data;
 
             if (data.type === "progress") {
+              if (!firstProgressMarked) {
+                firstProgressMarked = true;
+                markPerf("prepare:first-progress");
+              }
               setProcessProgress({
                 processed: data.processed,
                 total: data.total,
@@ -252,6 +298,13 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
             if (data.type !== "complete") {
               return;
+            }
+
+            markPerf("prepare:complete");
+            // T-29：Worker 内部耗时（脚本加载/等待/哈希）只有它自己知道，
+            // 挂到明细包里供归因脚本读取；未开启埋点时该函数直接返回。
+            if (data.timings) {
+              recordPerfDetail("prepareWorker", { ...data.timings });
             }
 
             setProcessProgress(null);
@@ -315,8 +368,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
             };
             /**
              * 方案 A：选文件即预热分片缓存（全部待传分片）。
-             * 不阻塞选择流程；上传启动前 processFileUpload 会 await 同一个预热 Promise，
-             * 保证「上传开始时缓存已完整」，否则刷新续传会静默缺片。
+             * 不阻塞选择流程；也不阻塞上传启动（T-05）：预热只决定「刷新后能否
+             * 零点击续传」，上传字节在会话内来自 fileRef，两者互不依赖。
+             * 因此这里 fire-and-forget，processFileUpload 只是幂等地接上同一个 Promise。
              */
             const primeCache = (file: UploadFile, fileRef?: File) => {
               if (!fileRef) {
@@ -371,6 +425,7 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
             ]);
 
             await refreshFiles();
+            markPerf("queue:persisted");
 
             const resultMessage = `处理完成: ${data.stats.success}个成功, ${
               data.stats.failed
@@ -398,8 +453,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               }
               autoUploadTimerRef.current = setTimeout(() => {
                 autoUploadTimerRef.current = null;
+                markPerf("autoupload:timer-fired");
                 void uploadAll();
-              }, 500);
+              }, resolveAutoUploadDelay(uploadConfig.autoUploadDelay));
             }
 
             resolve();

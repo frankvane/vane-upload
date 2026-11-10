@@ -181,3 +181,49 @@ describe("createUploadStore.refreshFiles（VU-18 / VU-39 已知快照刷新）",
     expect(store.getState().files).toEqual([]);
   });
 });
+
+describe("T-07 store 文件对象不可变（原地改写防线）", () => {
+  const makeStore = () =>
+    createUploadStore(
+      localforage.createInstance({ name: "t07-upload-store", storeName: "t07" })
+    );
+
+  it("进入 store 的文件对象在开发环境下被冻结，原地改写会抛 TypeError", () => {
+    const store = makeStore();
+    const file = { id: "f1", status: "queued", progress: 0 } as unknown as UploadFile;
+
+    store.getState().setFiles([file]);
+
+    // 冻结是「兜底」而非唯一防线：真正的修法是调用方复制 draft。
+    // 但只要有人改回原地改写，这里会立刻炸出具体字段，而不是悄悄错帧。
+    expect(Object.isFrozen(store.getState().files[0])).toBe(true);
+    expect(() => {
+      (store.getState().files[0] as { status: string }).status = "error";
+    }).toThrow(TypeError);
+  });
+
+  it("patchFile 生成新数组与新元素（订阅者才会收到通知）", () => {
+    const store = makeStore();
+    const file = { id: "f1", status: "queued", progress: 0 } as unknown as UploadFile;
+    store.getState().setFiles([file]);
+    const beforeFiles = store.getState().files;
+
+    // 模拟订阅：选择首个元素，引用变化才重渲染
+    let renders = 0;
+    const unsubscribe = store.subscribe((state) => {
+      if (state.files[0] !== beforeFiles[0]) {
+        renders += 1;
+      }
+    });
+
+    store.getState().patchFile("f1", { progress: 50 });
+    unsubscribe();
+
+    expect(renders).toBe(1);
+    expect(store.getState().files).not.toBe(beforeFiles);
+    expect(store.getState().files[0]).not.toBe(file);
+    expect(store.getState().files[0]!.progress).toBe(50);
+    // 原对象未被顺手改（否则引用不变，上面的 renders 会是 0）
+    expect(file.progress).toBe(0);
+  });
+});

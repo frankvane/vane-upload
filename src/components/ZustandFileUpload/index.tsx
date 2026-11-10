@@ -13,7 +13,7 @@ import {
 } from "./services/uploadStorage";
 import { listReadyFileIds } from "./services/chunkCacheStore";
 import { useUploadStore } from "./store/upload";
-import { useUploadEngine } from "./context/UploadEngineContext";
+import { useUploadEngine, type UploadEngine } from "./context/UploadEngineContext";
 import { UploadProvider } from "./context/UploadContext";
 import { useUploadContext } from "./context/useUploadContext";
 import { ZustandFileUploadProps } from "./types/upload";
@@ -57,9 +57,13 @@ const ZustandFileUploadCore: React.FC = () => {
   // 让第二次 effect 直接 return，同时第一次的异步结果又因 disposed 被丢弃，
   // 导致唯一一次恢复结果永远应用不到列表。这里改为复用同一个恢复 Promise：
   // 两次挂载共享一次 IDB 读写，最终由仍然存活的那次 effect 应用快照。
-  const recoveryPromiseRef = useRef<ReturnType<
-    typeof recoverUploadQueueOnMount
-  > | null>(null);
+  // T-06：恢复 Promise 必须和**创建它的引擎**绑定。宿主切换 instanceId 时
+  // UploadContext 会重建引擎（新 store / 新 IndexedDB 分区），若仍复用上一个引擎的
+  // 恢复 Promise，就会把 A 实例的队列写进 B 实例的列表里（跨实例串台）。
+  const recoveryPromiseRef = useRef<{
+    engine: UploadEngine;
+    promise: ReturnType<typeof recoverUploadQueueOnMount>;
+  } | null>(null);
 
   useNetworkDetection();
 
@@ -121,13 +125,21 @@ const ZustandFileUploadCore: React.FC = () => {
   // 由仍然存活的那次 effect 应用结果，既不会丢失也不会重复恢复。
   useEffect(() => {
     let active = true;
+    // T-06：引擎变了就先丢掉旧 Promise —— 它的结果属于另一个实例的存储分区。
+    if (recoveryPromiseRef.current?.engine !== engine) {
+      recoveryPromiseRef.current = null;
+    }
     if (!recoveryPromiseRef.current) {
       // 方案 A：把“分片缓存是否就绪”注入恢复流程，就绪即零点击续传。
-      recoveryPromiseRef.current = recoverUploadQueueOnMount(engine.storage, {
-        listReadyFileIds: () => listReadyFileIds(engine.instanceId),
-      });
+      recoveryPromiseRef.current = {
+        engine,
+        promise: recoverUploadQueueOnMount(engine.storage, {
+          listReadyFileIds: () => listReadyFileIds(engine.instanceId),
+        }),
+      };
     }
-    const recoveryPromise = recoveryPromiseRef.current;
+    // 解构出来：下面 await 期间 ref 可能已被引擎切换重置。
+    const { promise: recoveryPromise } = recoveryPromiseRef.current;
 
     const recoverInterruptedUploads = async () => {
       let snapshot: UploadRecoverySnapshot;
@@ -136,7 +148,10 @@ const ZustandFileUploadCore: React.FC = () => {
         snapshot = await recoveryPromise;
       } catch {
         // 读取失败：清空缓存，允许后续挂载重试。
-        recoveryPromiseRef.current = null;
+        // 仅当仍是本次引擎的 Promise 时才清 —— 否则旧引擎的失败会把新引擎的在途恢复也清掉。
+        if (recoveryPromiseRef.current?.engine === engine) {
+          recoveryPromiseRef.current = null;
+        }
         return;
       }
       if (!active) return;

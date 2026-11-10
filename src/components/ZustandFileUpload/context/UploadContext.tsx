@@ -1,5 +1,6 @@
 import React, { createContext, useEffect, useMemo } from "react";
 import {
+  DEFAULT_AUTO_UPLOAD_DELAY_MS,
   UploadConfig,
   UploadSettingsSource,
   UploadUIMode,
@@ -74,6 +75,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   maxFiles = DEFAULT_CONFIG.maxFiles,
   chunkCacheMaxFileSize = DEFAULT_CONFIG.chunkCacheMaxFileSize,
   autoUpload = true,
+  autoUploadDelay = DEFAULT_AUTO_UPLOAD_DELAY_MS,
   autoCleanup = true,
   cleanupDelay = 10,
   networkDisplayMode = "tooltip",
@@ -157,6 +159,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       maxFiles,
       chunkCacheMaxFileSize,
       autoUpload,
+      autoUploadDelay,
       autoCleanup,
       cleanupDelay,
       networkDisplayMode,
@@ -193,6 +196,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       maxFiles,
       chunkCacheMaxFileSize,
       autoUpload,
+      autoUploadDelay,
       autoCleanup,
       cleanupDelay,
       networkDisplayMode,

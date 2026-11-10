@@ -1,18 +1,7 @@
-﻿import { UploadFile, UploadStatus } from "../types/upload";
+﻿import { type BatchInfo, UploadFile, UploadStatus, type UploadStorage } from "../types/upload";
 import type { FileRegistry } from "./fileRegistry";
 import { listUploadFiles } from "./uploadStorage";
 import { clearFileChunkCache } from "./chunkCache";
-
-interface BatchInfo {
-  current: number;
-  total: number;
-  queued: number;
-  active: number;
-  completed: number;
-  failed: number;
-  retried: number;
-  countdown?: number;
-}
 
 interface CleanupPolicyOptions {
   getFiles: () => UploadFile[];
@@ -28,7 +17,7 @@ interface CleanupPolicyOptions {
   clearBatchInfo: () => void;
   getCleanupDelay: () => number;
   /** 该实例的 IndexedDB 存储（T3.2：替换全局 localforage 默认实例） */
-  storage: LocalForage;
+  storage: UploadStorage;
   /** 该实例的 File 引用注册表（T3.2：替换模块级单例） */
   fileRegistry: FileRegistry;
   /** 实例 id：用于按实例/文件清理分片缓存（方案 A）。缺省 "default" */

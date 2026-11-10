@@ -1,7 +1,12 @@
 ﻿import { useCallback, useMemo, useRef } from "react";
-import { UploadFile, UploadStatus } from "../types/upload";
+import { BatchInfo, UploadFile, UploadStatus } from "../types/upload";
 
-import { loadAllUploadFiles, runConcurrentQueue } from "../services/uploadOrchestrator";
+import {
+  loadAllUploadFiles,
+  runConcurrentQueue,
+  type BeforeEachOutcome,
+  type QueueSummary,
+} from "../services/uploadOrchestrator";
 import { useUploadStore } from "../store/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
@@ -18,6 +23,7 @@ import {
   applyFinalized,
   applySettled,
   applySettledCancelled,
+  applySettledSkipped,
   classifyUploadResult,
   createInitialBatchInfo,
   isUploadSuccessKind,
@@ -93,8 +99,6 @@ export function useBatchUploader(): BatchUploaderActions {
    */
   const userCancelledIdsRef = useRef<Set<string>>(new Set());
   const cancelledInBatchIdsRef = useRef<Set<string>>(new Set());
-  /** 本批次内实际结算的取消数（用于从 summary.failedCount 中剔除） */
-  const cancelledSettleCountRef = useRef(0);
 
   const {
     cleanupPolicy,
@@ -123,27 +127,36 @@ export function useBatchUploader(): BatchUploaderActions {
       }
 
       // 分片缓存（方案 A）：会话内 fileRef 优先；刷新后 fileRef 丢失，
-      // 只要缓存就绪即可零点击续传。上传启动前必须确认缓存完整，
-      // 否则刷新后只覆盖部分分片会造成静默丢数据。
+      // 只要缓存就绪即可零点击续传。
+      //
+      // T-05（P1-2）：预热不再阻塞上传启动。缓存只服务于「刷新后零点击续传」，
+      // 上传字节来自 fileRef（会话内）或缓存本身（刷新后），二者互不依赖；
+      // 此前在置 UPLOADING 前 await 全量预热，首字节延迟正比于文件大小
+      // （100MB 文件要先读 100MB、再写 100MB，才发出第一个分片）。
+      //
+      // 安全性不依赖启动顺序，只依赖 chunkCache 的「就绪标记最后写入」：
+      // 标记存在 ⟹ 全部分片已落盘，续传判定永远看不到缺片状态。
+      // 预热未完成时刷新 → 无就绪标记 → 走既有「需重新选择」降级，不新增失败模式。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
       const cacheOptions = {
         instanceId: engine.instanceId,
         maxFileSize: uploadConfig.chunkCacheMaxFileSize,
       };
-      const cacheStatus = fileRef
-        ? await primeChunkCache(file, fileRef, cacheOptions)
-        : (await isFileCacheReady(engine.instanceId, file.id))
-          ? "ready"
-          : "unavailable";
 
-      if (!fileRef && cacheStatus !== "ready") {
-        file.status = UploadStatus.ERROR;
-        file.progress = 0;
-        file.errorMessage = "本地续传缓存缺失，请重新选择该文件以继续上传";
-        file.awaitingReselect = true;
-        await engine.storage.setItem(file.id, file);
-        syncFile(file);
-        return false;
+      if (!fileRef) {
+        // 刷新后续传：缓存是唯一字节来源，必须确认就绪（此时也没有可并行的预热）。
+        if (!(await isFileCacheReady(engine.instanceId, file.id))) {
+          file.status = UploadStatus.ERROR;
+          file.progress = 0;
+          file.errorMessage = "本地续传缓存缺失，请重新选择该文件以继续上传";
+          file.awaitingReselect = true;
+          await engine.storage.setItem(file.id, file);
+          syncFile(file);
+          return false;
+        }
+      } else {
+        // 会话内上传：预热在后台继续推进（幂等，接上选文件阶段那次），不进关键路径。
+        void primeChunkCache(file, fileRef, cacheOptions).catch(() => undefined);
       }
 
       file.status = UploadStatus.UPLOADING;
@@ -280,7 +293,7 @@ export function useBatchUploader(): BatchUploaderActions {
 
   const finalizeBatch = useCallback(
     async (
-      summary: { successCount: number; failedCount: number },
+      summary: { successCount: number; failedCount: number; skippedCount?: number },
       total: number
     ) => {
       setIsUploading(false);
@@ -297,6 +310,7 @@ export function useBatchUploader(): BatchUploaderActions {
         success: summary.successCount,
         failed: summary.failedCount,
         total,
+        skipped: summary.skippedCount ?? 0,
       });
 
       if (uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
@@ -304,6 +318,112 @@ export function useBatchUploader(): BatchUploaderActions {
       }
     },
     [setIsUploading, flushRefresh, setBatchInfo, uploadConfig, cleanupPolicy]
+  );
+
+  /**
+   * T-08：批次编排唯一实现。
+   *
+   * 「上传全部」与「重试全部」原本各写一份 `beginBatchSession → runConcurrentQueue →
+   * finalizeBatch`，差异只有三处（是否重置取消计数、是否同步 store 行、
+   * 批结束怎么算失败数）。两份实现各自演进时，「取消不计入失败」这条语义要改两遍，
+   * 漏一处就出现「点全部重试后取消，失败数凭空多 1」。
+   *
+   * 现在把三处差异收敛成两个开关，并把**取消不该计失败**的账算在这里：
+   * 返回的 `summary.failedCount` 已经剔除本批被用户取消的任务。
+   */
+  const runBatch = useCallback(
+    async (
+      files: UploadFile[],
+      options: {
+        /** 起始批信息；重试批的 retryTotal 之类的差异由调用方算好传进来 */
+        batchInfo: BatchInfo;
+        /** 新批次是否重置取消计数（连续两次「上传全部」之间必须重置） */
+        resetCancelCounters?: boolean;
+        /** 是否按「用户取消」剔除失败数（uploadAll 需要，重试批沿用原始口径） */
+        trackCancelled?: boolean;
+        /** 行状态落盘后的回调（uploadAll 用它把新引用同步进 store） */
+        onFileSynced?: (file: UploadFile) => void;
+      }
+    ): Promise<{ aborted: boolean; summary: QueueSummary }> => {
+      const controller = beginBatchSession();
+      setIsUploading(true);
+      if (options.resetCancelCounters) {
+        cancelledInBatchIdsRef.current.clear();
+      }
+      setBatchInfo(options.batchInfo);
+
+      // 本批被取消并已结算的任务数：只在本批次内有效，不必做成 ref
+      let cancelledCount = 0;
+
+      try {
+        const summary = await runConcurrentQueue({
+          items: files,
+          concurrency: Math.min(fileConcurrency, files.length),
+          shouldStop: () => controller.signal.aborted,
+          beforeEach: async (file): Promise<BeforeEachOutcome> => {
+            if (controller.signal.aborted) {
+              return;
+            }
+
+            // E2E-03：排队期间被删除的文件不得再写回 PREPARING_UPLOAD。
+            // T-14：返回 "skip" 让队列把这条记为「已跳过」，而不是落到 task 的
+            // false 上去，凭空多出一个失败。
+            if (!(await engine.storage.getItem<UploadFile>(file.id))) {
+              return "skip";
+            }
+
+            file.status = UploadStatus.PREPARING_UPLOAD;
+            file.progress = 0;
+            file.errorMessage = undefined;
+            await engine.storage.setItem(file.id, file);
+            options.onFileSynced?.(file);
+
+            setBatchInfo(applyBeforeEach);
+          },
+          task: (file) => processFileUpload(file, controller.signal),
+          onSettled: ({ item, success, skipped }) => {
+            if (controller.signal.aborted) {
+              return;
+            }
+
+            // T-14：跳过的一件只推进批次进度，不计成功也不计失败。
+            if (skipped) {
+              setBatchInfo(applySettledSkipped);
+              return;
+            }
+
+            // E2E-R4：被用户取消的文件既不算成功也不算失败，避免污染批量统计。
+            if (options.trackCancelled && cancelledInBatchIdsRef.current.delete(item.id)) {
+              cancelledCount += 1;
+              setBatchInfo(applySettledCancelled);
+            } else {
+              setBatchInfo((prev) => applySettled(prev, success));
+            }
+            options.onFileSynced?.(item);
+          },
+        });
+
+        return {
+          aborted: controller.signal.aborted,
+          summary: {
+            successCount: summary.successCount,
+            failedCount: Math.max(summary.failedCount - cancelledCount, 0),
+            skippedCount: summary.skippedCount,
+          },
+        };
+      } finally {
+        endBatchSession(controller);
+      }
+    },
+    [
+      engine,
+      beginBatchSession,
+      endBatchSession,
+      setIsUploading,
+      setBatchInfo,
+      fileConcurrency,
+      processFileUpload,
+    ]
   );
 
   const uploadAll = useCallback(async (): Promise<boolean> => {
@@ -321,85 +441,29 @@ export function useBatchUploader(): BatchUploaderActions {
       return false;
     }
 
-    const batchController = beginBatchSession();
-    setIsUploading(true);
-    // E2E-R4：新批次重置取消计数，避免上一批的取消影响本批统计。
-    cancelledInBatchIdsRef.current.clear();
-    cancelledSettleCountRef.current = 0;
-
     uploadConfig.onUploadStart?.(uploadableFiles);
 
-    setBatchInfo(createInitialBatchInfo(uploadableFiles.length));
+    const { aborted, summary } = await runBatch(uploadableFiles, {
+      batchInfo: createInitialBatchInfo(uploadableFiles.length),
+      resetCancelCounters: true,
+      trackCancelled: true,
+      onFileSynced: syncFile,
+    });
 
-    try {
-      const summary = await runConcurrentQueue({
-        items: uploadableFiles,
-        concurrency: Math.min(fileConcurrency, uploadableFiles.length),
-        shouldStop: () => batchController.signal.aborted,
-        beforeEach: async (file) => {
-          if (batchController.signal.aborted) {
-            return;
-          }
-
-          // E2E-03：排队期间被删除的文件不得再写回 PREPARING_UPLOAD。
-          if (!(await engine.storage.getItem<UploadFile>(file.id))) {
-            return;
-          }
-
-          file.status = UploadStatus.PREPARING_UPLOAD;
-          file.progress = 0;
-          await engine.storage.setItem(file.id, file);
-          syncFile(file);
-
-          setBatchInfo(applyBeforeEach);
-        },
-        task: (file) => processFileUpload(file, batchController.signal),
-        onSettled: async ({ item, success }) => {
-          if (batchController.signal.aborted) {
-            return;
-          }
-
-          // E2E-R4：被用户取消的文件既不算成功也不算失败，避免污染批量统计。
-          if (cancelledInBatchIdsRef.current.delete(item.id)) {
-            cancelledSettleCountRef.current += 1;
-            setBatchInfo(applySettledCancelled);
-          } else {
-            setBatchInfo((prev) => applySettled(prev, success));
-          }
-          syncFile(item);
-        },
-      });
-
-      if (batchController.signal.aborted) {
-        return false;
-      }
-
-      await finalizeBatch(
-        {
-          successCount: summary.successCount,
-          failedCount: Math.max(
-            summary.failedCount - cancelledSettleCountRef.current,
-            0
-          ),
-        },
-        uploadableFiles.length
-      );
-      return true;
-    } finally {
-      endBatchSession(batchController);
+    if (aborted) {
+      return false;
     }
+
+    await finalizeBatch(summary, uploadableFiles.length);
+    return true;
   }, [
     isNetworkOffline,
     getMessageApi,
     engine,
-    beginBatchSession,
-    endBatchSession,
     setIsUploading,
     uploadConfig,
-    fileConcurrency,
-    processFileUpload,
+    runBatch,
     syncFile,
-    setBatchInfo,
     finalizeBatch,
   ]);
 
@@ -589,13 +653,20 @@ export function useBatchUploader(): BatchUploaderActions {
         };
       }
 
-      file.status = UploadStatus.PREPARING_UPLOAD;
-      file.progress = 0;
-      file.errorMessage = undefined;
-      await engine.storage.setItem(file.id, file);
+      // T-07：入参通常是 store 里的那个对象。原地改写它等于私改 React state ——
+      // 数组引用不变、行组件的 props 引用不变，重试期间的「准备中」根本不会重渲染，
+      // 而 `store.files` 里却已经是新值，DevTools 与实际渲染帧对不上。
+      // 从入口复制一份 draft，之后所有写入都落在 draft 上，由 syncFile/patchFile 换引用。
+      const draft: UploadFile = {
+        ...file,
+        status: UploadStatus.PREPARING_UPLOAD,
+        progress: 0,
+        errorMessage: undefined,
+      };
+      await engine.storage.setItem(draft.id, draft);
 
       try {
-        const success = await processFileUpload(file);
+        const success = await processFileUpload(draft);
         await flushRefresh();
 
         if (success && uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
@@ -643,71 +714,30 @@ export function useBatchUploader(): BatchUploaderActions {
       };
     }
 
-    const batchController = beginBatchSession();
-    setIsUploading(true);
-    setBatchInfo(createInitialBatchInfo(failedFiles.length, failedFiles.length));
+    const { aborted, summary } = await runBatch(failedFiles, {
+      batchInfo: createInitialBatchInfo(failedFiles.length, failedFiles.length),
+    });
 
-    try {
-      const summary = await runConcurrentQueue({
-        items: failedFiles,
-        concurrency: Math.min(fileConcurrency, failedFiles.length),
-        shouldStop: () => batchController.signal.aborted,
-        beforeEach: async (file) => {
-          if (batchController.signal.aborted) {
-            return;
-          }
-
-          // E2E-03：排队期间被删除的文件不得再写回 PREPARING_UPLOAD。
-          if (!(await engine.storage.getItem<UploadFile>(file.id))) {
-            return;
-          }
-
-          file.status = UploadStatus.PREPARING_UPLOAD;
-          file.progress = 0;
-          file.errorMessage = undefined;
-          await engine.storage.setItem(file.id, file);
-
-          setBatchInfo(applyBeforeEach);
-        },
-        task: (file) => processFileUpload(file, batchController.signal),
-        onSettled: ({ success }) => {
-          if (batchController.signal.aborted) {
-            return;
-          }
-
-          setBatchInfo((prev) => applySettled(prev, success));
-        },
-      });
-
-      if (batchController.signal.aborted) {
-        return {
-          success: false,
-          message: "批量重试已取消",
-          retriedCount: 0,
-        };
-      }
-
-      await finalizeBatch(summary, failedFiles.length);
-
+    if (aborted) {
       return {
-        success: summary.failedCount === 0,
-        message: `重试完成: ${summary.successCount}个成功, ${summary.failedCount}个失败`,
-        retriedCount: failedFiles.length,
+        success: false,
+        message: "批量重试已取消",
+        retriedCount: 0,
       };
-    } finally {
-      endBatchSession(batchController);
     }
-  }, [
-    isNetworkOffline,
-    engine,
-    fileConcurrency,
-    beginBatchSession,
-    endBatchSession,
-    setIsUploading,
-    setBatchInfo,
-    processFileUpload,
-    finalizeBatch,
-  ]);
+
+    await finalizeBatch(summary, failedFiles.length);
+
+    // T-14：跳过的记录在文案里单独说一句，避免用户把「已删除」误读成「又失败了」。
+    const skippedText =
+      summary.skippedCount > 0 ? `, ${summary.skippedCount}个已跳过` : "";
+
+    return {
+      success: summary.failedCount === 0,
+      message: `重试完成: ${summary.successCount}个成功, ${summary.failedCount}个失败${skippedText}`,
+      retriedCount: failedFiles.length,
+    };
+  }, [isNetworkOffline, engine, runBatch, finalizeBatch]);
 
   const forceCleanupUI = useCallback(async () => {
     await cleanupPolicy.forceCleanupUI();

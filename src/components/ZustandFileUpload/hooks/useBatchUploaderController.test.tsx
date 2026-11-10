@@ -58,10 +58,12 @@ const h = vi.hoisted(() => {
       resumeUploadTask: vi.fn(() => true),
     },
     storage: {
-      setItem: vi.fn(async () => undefined),
+      setItem: vi.fn(async (_id: string, _value: UploadFile) => undefined),
       // E2E-03：getItem 用于「记录是否仍存在」的守卫，默认视为存在。
-      getItem: vi.fn(async (): Promise<UploadFile | null> => ({} as UploadFile)),
-      removeItem: vi.fn(async () => undefined),
+      getItem: vi.fn(
+        async (_id: string): Promise<UploadFile | null> => ({} as UploadFile)
+      ),
+      removeItem: vi.fn(async (_id: string) => undefined),
       clear: vi.fn(async () => undefined),
     },
   };
@@ -91,12 +93,27 @@ const h = vi.hoisted(() => {
     getAuthHeaders: undefined,
     authScheme: undefined,
     withCredentials: false,
+    // T-04：终态回调探针——用于断言「暂停/取消/删除后绝不能走成功或失败回调」。
+    onUploadStart: vi.fn(),
+    onUploadComplete: vi.fn(),
+    onUploadError: vi.fn(),
+    onBatchComplete: vi.fn(),
   };
   const orchestrator = {
     loadAllUploadFiles: vi.fn(async () => [] as UploadFile[]),
     runConcurrentQueue: vi.fn(),
   };
-  return { storeState, message, patchFile, engine, uploadContext, orchestrator };
+  /**
+   * T-05：分片缓存探针。
+   * 默认「预热已完成 + 缓存已就绪」，竞态用例才不会在「无 fileRef 且缓存未就绪」
+   * 分支直接置 ERROR 返回；首字节延迟用例则把它改成永不 settle 来证明解耦。
+   */
+  const chunkCache = {
+    primeChunkCache: vi.fn(async (): Promise<string> => "ready"),
+    isFileCacheReady: vi.fn(async () => true),
+    clearFileChunkCache: vi.fn(async () => undefined),
+  };
+  return { storeState, message, patchFile, engine, uploadContext, orchestrator, chunkCache };
 });
 
 vi.mock("../store/upload", () => ({
@@ -105,13 +122,13 @@ vi.mock("../store/upload", () => ({
   ),
   useUploadStoreApi: vi.fn(),
   createUploadStore: vi.fn(),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   UploadStoreContext: {} as any,
 }));
 
 vi.mock("../context/UploadEngineContext", () => ({
   useUploadEngine: vi.fn(() => h.engine),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   UploadEngineContext: {} as any,
 }));
 
@@ -129,6 +146,14 @@ vi.mock("../services/uploadOrchestrator", () => ({
 vi.mock("../utils/auth", () => ({
   resolveAuthHeaders: vi.fn(async () => ({})),
 }));
+
+/**
+ * T-05：分片缓存默认视为就绪。
+ * 否则 processFileUpload 会在「无 fileRef 且缓存未就绪」分支直接置 ERROR 并返回，
+ * 竞态用例根本走不到状态机，断言会退化成「缓存缺失」而非「竞态收敛」。
+ * 具体行为由用例内 h.chunkCache.* 覆盖。
+ */
+vi.mock("../services/chunkCache", () => h.chunkCache);
 
 import { useBatchUploader } from "./useBatchUploader";
 
@@ -156,6 +181,74 @@ const setEngineFiles = (files: UploadFile[]) => {
   });
 };
 
+/* ==================== T-04 竞态用例的共用夹具 ==================== */
+
+/** 带进度表的 engine 状态（暂停/取消分支会从 progressMap 取最新进度写回）。 */
+const setEngineState = (
+  files: UploadFile[],
+  progressMap: Record<string, number> = {}
+) => {
+  h.engine.store.getState.mockReturnValue({
+    files,
+    patchFile: h.patchFile,
+    progressMap,
+    setProgressDetail: h.storeState.setProgressDetail,
+  });
+};
+
+/**
+ * 内存版 storage。
+ * 「任务结束后是否写回」这类语义只能用真实可变的存储来断言：
+ * 若用 mockResolvedValue 固定返回值，无论实现写不写回，断言都会通过。
+ */
+const useMemoryStorage = (initial: UploadFile[]) => {
+  const map = new Map<string, UploadFile>(initial.map((f) => [f.id, { ...f }]));
+  h.engine.storage.getItem.mockImplementation(
+    async (id: string) => map.get(id) ?? null
+  );
+  h.engine.storage.setItem.mockImplementation(
+    async (id: string, value: UploadFile) => {
+      map.set(id, value);
+    }
+  );
+  return map;
+};
+
+/**
+ * 串行队列替身：严格按真实编排器的顺序 beforeEach → task → onSettled。
+ * T-14：`beforeEach` 返回 "skip" 时跳过该件（不计成功/失败，只记 skippedCount）。
+ */
+const runQueueSerial = async (opts: {
+  items: UploadFile[];
+  beforeEach?: (f: UploadFile, i: number) => Promise<"skip" | void>;
+  task: (f: UploadFile, i: number) => Promise<boolean>;
+  onSettled?: (r: {
+    item: UploadFile;
+    index: number;
+    success: boolean;
+    skipped?: boolean;
+  }) => Promise<void> | void;
+}) => {
+  let successCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+  for (const [index, item] of opts.items.entries()) {
+    if ((await opts.beforeEach?.(item, index)) === "skip") {
+      skippedCount += 1;
+      await opts.onSettled?.({ item, index, success: false, skipped: true });
+      continue;
+    }
+    const success = await opts.task(item, index);
+    if (success) {
+      successCount += 1;
+    } else {
+      failedCount += 1;
+    }
+    await opts.onSettled?.({ item, index, success });
+  }
+  return { successCount, failedCount, skippedCount };
+};
+
 describe("useBatchUploader（核心状态转移与动作断言）", () => {
   beforeEach(() => {
     h.storeState.isNetworkOffline = false;
@@ -175,6 +268,14 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     h.engine.storage.getItem.mockResolvedValue({} as UploadFile);
     h.orchestrator.loadAllUploadFiles.mockResolvedValue([]);
     h.orchestrator.runConcurrentQueue.mockReset();
+    h.chunkCache.primeChunkCache.mockReset();
+    h.chunkCache.primeChunkCache.mockResolvedValue("ready");
+    h.chunkCache.isFileCacheReady.mockReset();
+    h.chunkCache.isFileCacheReady.mockResolvedValue(true);
+    h.uploadContext.onUploadStart.mockClear();
+    h.uploadContext.onUploadComplete.mockClear();
+    h.uploadContext.onUploadError.mockClear();
+    h.uploadContext.onBatchComplete.mockClear();
   });
 
   it("clearBatchInfo 直接把 batchInfo 置空", () => {
@@ -337,6 +438,38 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     });
     expect(h.engine.fileRegistry.getFileRef).not.toHaveBeenCalled();
     expect(h.engine.workerPool.runUploadTask).not.toHaveBeenCalled();
+  });
+
+  it("T-07：retryUploadFile 不原地改写传入的 store 对象，改写落在 draft 上", async () => {
+    // 入参就是 store.files 里的那个对象（行组件把 props.file 直接传进来）。
+    const storeFile = makeFile({
+      id: "r1",
+      status: UploadStatus.ERROR,
+      progress: 37,
+      errorMessage: "上传失败",
+    });
+    const before = { ...storeFile };
+    const persistedMap = useMemoryStorage([storeFile]);
+    setEngineState([storeFile]);
+    // Worker 直接报成功，让整条链路走完
+    h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.retryUploadFile(storeFile);
+    });
+
+    // 1) 原对象零改动 —— 旧实现直接改它（status/progress/errorMessage 三处），
+    //    数组引用不变 → Zustand 不通知 → 行组件拿不到新 props，不会重渲染。
+    expect(storeFile).toEqual(before);
+
+    // 2) 落盘与同步都用新引用：patchFile 收到的是副本，不是 store 里那个对象
+    const patchArg = h.patchFile.mock.calls.at(-1)![1] as UploadFile;
+    expect(patchArg).not.toBe(storeFile);
+    expect(patchArg.id).toBe("r1");
+
+    // 3) 持久化记录已推进到终态（draft 走完整条链）
+    expect(persistedMap.get("r1")!.status).toBe(UploadStatus.DONE);
   });
 
   it("retryAllFailedFiles：离线时直接返回失败且不读取文件", async () => {
@@ -503,5 +636,177 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(ret).toBe(false);
     expect(h.message.error).toHaveBeenCalledWith("网络已断开，无法上传文件");
     expect(h.orchestrator.loadAllUploadFiles).not.toHaveBeenCalled();
+  });
+
+  /* ================== T-04：三条竞态回归（TC-210 / 211 / 212） ================== */
+
+  it("TC-210 暂停在途分片收尾：落 PAUSED 且保留进度，不写错误文案、不触发失败回调", async () => {
+    const file = makeFile({ id: "p1", status: UploadStatus.QUEUED, progress: 40 });
+    const store = useMemoryStorage([file]);
+    setEngineState([file], { p1: 62 });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    // 用户点「暂停」后，Worker 在分片边界收尾：paused + 已完成的 2 个分片
+    h.engine.workerPool.runUploadTask.mockResolvedValue({
+      paused: true,
+      pausedChunks: 2,
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    const persisted = store.get("p1")!;
+    // 核心断言：暂停是「可继续的中断」，不是失败
+    expect(persisted.status).toBe(UploadStatus.PAUSED);
+    expect(persisted.errorMessage).toBeUndefined();
+    expect(persisted.awaitingReselect).toBe(false);
+    // 进度取 progressMap 的最新采样（不是 beforeEach 归零后的 0）
+    expect(persisted.progress).toBe(62);
+    expect(persisted.pausedChunks).toEqual([0, 1]);
+    expect(h.uploadContext.onUploadError).not.toHaveBeenCalled();
+    expect(h.uploadContext.onUploadComplete).not.toHaveBeenCalled();
+  });
+
+  it("TC-211 任务结束前记录被删除：Worker 报成功也不写回，列表不复活（E2E-03）", async () => {
+    const file = makeFile({ id: "gone", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([file]);
+    setEngineState([file], { gone: 30 });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    // 上传进行中用户点了「删除」：记录从持久化层消失，随后 Worker 才回报成功
+    h.engine.workerPool.runUploadTask.mockImplementation(async () => {
+      store.delete("gone");
+      return { success: true };
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    // 关键：旧实现会把内存里的 file 对象重新 setItem，刷新后这条记录「复活」并继续上传
+    expect(store.has("gone")).toBe(false);
+    expect(h.uploadContext.onUploadComplete).not.toHaveBeenCalled();
+  });
+
+  it("TC-212 用户取消与 Worker 错误同时抵达：按 cancelled 归类（落 PAUSED），且不计入批量失败", async () => {
+    const file = makeFile({ id: "race", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([file]);
+    setEngineState([file], { race: 55 });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+
+    let actions: ReturnType<typeof useBatchUploader> | null = null;
+    h.engine.workerPool.runUploadTask.mockImplementation(async (task) => {
+      // 用户恰在此刻点「取消」：写入 userCancelledIds / cancelledInBatchIds
+      await actions!.cancelUploadFile(task.file);
+      // 同一结果里还带着错误文案——两条信号竞态，cancelled 必须优先
+      return { cancelled: true, errorMessage: "分片上传失败" };
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+    actions = result.current;
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    const persisted = store.get("race")!;
+    expect(persisted.status).toBe(UploadStatus.PAUSED);
+    // 取消不该留下「分片上传失败」这类误导性文案
+    expect(persisted.errorMessage).toBeUndefined();
+    expect(h.uploadContext.onUploadError).not.toHaveBeenCalled();
+    // 取消既不算成功也不算失败：从 summary.failedCount 中剔除
+    expect(h.uploadContext.onBatchComplete).toHaveBeenCalledWith({
+      success: 0,
+      failed: 0,
+      total: 1,
+      skipped: 0,
+    });
+  });
+
+  it("T-14 排队中被删的文件记为「已跳过」，不计入失败（3 入队 / 删 2）", async () => {
+    const a = makeFile({ id: "a", status: UploadStatus.QUEUED });
+    const b = makeFile({ id: "b", status: UploadStatus.QUEUED });
+    const c = makeFile({ id: "c", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([a, b, c]);
+    setEngineState([a, b, c]);
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([a, b, c]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
+
+    // 队列刚跑起来，用户就把 b、c 删了：beforeEach 读不到记录 → 跳过
+    store.delete("b");
+    store.delete("c");
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    // 旧实现：跳过的两件走 task 的 false → failed 变 2，用户会看到「2 个失败」
+    expect(h.uploadContext.onBatchComplete).toHaveBeenCalledWith({
+      success: 1,
+      failed: 0,
+      total: 3,
+      skipped: 2,
+    });
+    // 跳过的文件不会有任何写回（旧实现也可能在 task 里误写 PREPARING）
+    expect(store.has("b")).toBe(false);
+    expect(store.has("c")).toBe(false);
+  });
+
+  /* ================== T-05：首字节延迟与文件大小解耦（预热并行化） ================== */
+
+  it("T-05 预热未完成也立即开始上传：首字节不再等待全量缓存落盘", async () => {
+    const file = makeFile({ id: "prewarm", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([file]);
+    setEngineState([file]);
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    // 会话内上传：字节来自 fileRef，缓存只决定「刷新后能否零点击续传」
+    h.engine.fileRegistry.getFileRef.mockReturnValue(
+      new File([new Uint8Array(4)], "prewarm.bin")
+    );
+    // 模拟大文件预热迟迟不落盘：Promise 永不 settle。
+    // 旧实现在置 UPLOADING 之前 await 它 → 本用例会卡到超时（红）；
+    // 新实现把它留在后台 → 上传照常跑完（绿）。
+    h.chunkCache.primeChunkCache.mockReturnValue(new Promise(() => undefined));
+    h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    expect(h.engine.workerPool.runUploadTask).toHaveBeenCalledTimes(1);
+    // 预热没有被取消，仍在后台推进（零点击续传能力最终仍会具备）
+    expect(h.chunkCache.primeChunkCache).toHaveBeenCalledTimes(1);
+    expect(store.get("prewarm")!.status).toBe(UploadStatus.DONE);
+  });
+
+  it("T-05 刷新后续传：无 fileRef 且缓存未就绪时明确降级重选，不发任何分片请求", async () => {
+    const file = makeFile({ id: "nocache", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([file]);
+    setEngineState([file]);
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    // 刷新后 fileRef 丢失：缓存成为唯一字节来源
+    h.engine.fileRegistry.getFileRef.mockReturnValue(undefined);
+    h.chunkCache.isFileCacheReady.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    expect(h.engine.workerPool.runUploadTask).not.toHaveBeenCalled();
+    // 这条分支不接受「缓存不完整就开始传」：缺片合并会产出静默损坏的文件
+    expect(h.chunkCache.primeChunkCache).not.toHaveBeenCalled();
+    const persisted = store.get("nocache")!;
+    expect(persisted.status).toBe(UploadStatus.ERROR);
+    expect(persisted.awaitingReselect).toBe(true);
+    expect(persisted.errorMessage).toContain("本地续传缓存缺失");
   });
 });

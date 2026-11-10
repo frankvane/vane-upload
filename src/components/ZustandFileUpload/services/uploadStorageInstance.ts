@@ -1,5 +1,6 @@
 import localforage from "localforage";
 
+import type { UploadStorage } from "../types/upload";
 import { stampUploadSchema } from "./uploadSchema";
 
 /**
@@ -21,18 +22,18 @@ export const DEFAULT_UPLOAD_STORE_NAME = "upload_files";
  * P2-4：写入统一盖章 `schemaVersion`。
  * 在存储实例层做一次包装，避免散落在各处的 `storage.setItem` 漏掉版本号。
  */
-const withSchemaVersion = (store: LocalForage): LocalForage => {
-  const wrapped = Object.create(store) as LocalForage;
+const withSchemaVersion = (store: UploadStorage): UploadStorage => {
+  const wrapped = Object.create(store) as UploadStorage;
   wrapped.setItem = ((key: string, value: unknown, callback?: unknown) =>
     store.setItem(
       key,
       stampUploadSchema(value) as never,
       callback as never
-    )) as LocalForage["setItem"];
+    )) as UploadStorage["setItem"];
   return wrapped;
 };
 
-export const createUploadStorage = (instanceId?: string): LocalForage =>
+export const createUploadStorage = (instanceId?: string): UploadStorage =>
   withSchemaVersion(
     localforage.createInstance({
       name: DEFAULT_UPLOAD_DB_NAME,

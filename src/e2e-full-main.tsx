@@ -13,7 +13,7 @@ import { API_BASE_URL, API_PATHS } from "./config/api";
  */
 const ALLOWED_FILE_TYPES: string[] = [];
 
-const E2EStandardApp: React.FC = () => (
+export const E2EStandardApp: React.FC = () => (
   <ZustandFileUpload
     baseURL={API_BASE_URL}
     uploadApi={API_PATHS.file.upload}

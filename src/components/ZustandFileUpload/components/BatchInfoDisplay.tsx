@@ -30,6 +30,8 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
   const completed = batchInfo?.completed ?? 0;
   const failed = batchInfo?.failed ?? 0;
   const retried = batchInfo?.retried ?? 0;
+  // T-14：排队期间被删除的记录不计失败，单独列「跳过」
+  const skipped = batchInfo?.skipped ?? 0;
   const queued = batchInfo?.queued ?? 0;
   const active = batchInfo?.active ?? 0;
   const countdown = batchInfo?.countdown;
@@ -44,8 +46,15 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
   const pendingCount = pendingCleanupCount();
   const hasCountdown = countdown !== undefined && countdown > 0;
 
+  // T-14：全部被跳过时 failed 为 0，若不加 skipped 这条，悬浮条会直接消失 ——
+  // 用户点完「上传」什么都没看到，会以为列表被清空了。
   const shouldShowDock = Boolean(batchInfo) && (
-    isUploading || failed > 0 || retried > 0 || pendingCount > 0 || hasCountdown
+    isUploading ||
+    failed > 0 ||
+    skipped > 0 ||
+    retried > 0 ||
+    pendingCount > 0 ||
+    hasCountdown
   );
 
   // VU-64：原「shouldShowDock 消失时同步关闭抽屉」的 effect 会触发
@@ -59,7 +68,12 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
       return `上传中 ${validatedCurrent}/${validatedTotal}`;
     }
     if (failed > 0) {
-      return `上传完成，失败 ${failed} 个`;
+      return skipped > 0
+        ? `上传完成，失败 ${failed} 个，跳过 ${skipped} 个`
+        : `上传完成，失败 ${failed} 个`;
+    }
+    if (skipped > 0) {
+      return `上传完成 ${completed}/${validatedTotal}，跳过 ${skipped} 个`;
     }
     if (hasCountdown) {
       return `上传完成，${countdown}秒后清理`;
@@ -128,6 +142,11 @@ const BatchInfoDisplay: React.FC<BatchInfoDisplayProps> = ({ batchUploader }) =>
             {retried > 0 && (
               <span>
                 重试: <Tag color="warning">{retried}</Tag>
+              </span>
+            )}
+            {skipped > 0 && (
+              <span>
+                跳过: <Tag color="default">{skipped}</Tag>
               </span>
             )}
             {hasCountdown && (

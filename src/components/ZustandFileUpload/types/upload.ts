@@ -1,3 +1,5 @@
+import type localforage from "localforage";
+
 import type { UploadAuthConfig } from "../utils/auth";
 
 export type { UploadAuthConfig };
@@ -109,6 +111,18 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
 
   // UI behavior
   autoUpload?: boolean;
+  /**
+   * 自动上传的「合并窗口」（毫秒）：文件预处理完成后等这么久再开跑，
+   * 让连续几次选择合并成一批上传（T-30）。
+   *
+   * 默认 **120ms**（原为写死的 500ms）：实测这 500ms 是「选完到首个请求」
+   * 的 89% 固定开销（1KB 文件也要 571ms），而下调几乎不影响「一次选多个文件」
+   * （它们本来就在同一批）。代价是「间隔 > delay 的两次选择」会变成两批，
+   * 服务端多一轮 `/merge` —— 需要旧行为时可显式传大（如 500）。
+   *
+   * 传 0 表示立即上传；负数/非数字回落默认值。
+   */
+  autoUploadDelay?: number;
   autoCleanup?: boolean;
   cleanupDelay?: number;
   networkDisplayMode?: "tooltip" | "direct";
@@ -144,6 +158,11 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
     success: number;
     failed: number;
     total: number;
+    /**
+     * T-14：排队期间被跳过的数量（记录已被用户删除，未执行也不计失败）。
+     * 可选以保持向后兼容 —— 旧宿主不读这个字段也不受影响。
+     */
+    skipped?: number;
   }) => void;
 
   // Custom handlers
@@ -197,6 +216,8 @@ export interface UploadConfig {
   withCredentials?: boolean;
   /** 调试日志开关（Worker 内分片级日志，200ms 节流）。默认 false。 */
   debug?: boolean;
+  /** 自动上传合并窗口（毫秒）。默认 120，见 `ZustandFileUploadProps.autoUploadDelay`。 */
+  autoUploadDelay?: number;
   /**
    * 分片缓存上限（字节，可选）：尚未确认上传成功的分片会写入 IndexedDB，
    * 使刷新后可零点击续传。默认不限制，按浏览器可用空间判断；显式配置后
@@ -232,6 +253,16 @@ export interface UploadProgressDetail {
 
 export type AlignItem = "left" | "center" | "right";
 
+/**
+ * 自动上传合并窗口默认值（毫秒）。
+ *
+ * T-30：原实现写死 500ms。T-29 实测这 500ms 占「选完 → 首个网络请求」的 89%
+ * （1KB 文件也只有 571ms 总量），而它换来的只是「连续几次选择合并成一批」。
+ * 下调到 120ms 后，首字节固定开销降为约 1/5，而「一次选多个文件」完全不受影响
+ * （同一批本来就只有一个 `change` 事件）。需要旧行为的宿主可显式传 500。
+ */
+export const DEFAULT_AUTO_UPLOAD_DELAY_MS = 120;
+
 export interface BatchInfo {
   current: number; // Processed count
   total: number; // Total count
@@ -241,6 +272,8 @@ export interface BatchInfo {
   failed: number; // Failed count
   retried: number; // Retried count
   countdown?: number; // Cleanup countdown in seconds
+  /** T-14：本批跳过数（排队期间被删除的记录，既不算成功也不算失败） */
+  skipped?: number;
 }
 
 export interface ProcessProgress {
@@ -250,3 +283,14 @@ export interface ProcessProgress {
   failed: number;
   oversized: number;
 }
+
+/**
+ * 上传引擎使用的键值存储类型（T-10）。
+ *
+ * `localforage` 的类型包里，`interface LocalForage` 是**全局声明**且没有 export
+ * （`export = localforage` 只导出实例值）。此前各文件直接写 `LocalForage` 用的是
+ * 隐式全局类型 —— 换存储实现、给 `compilerOptions.types` 加白名单，或包某天改成
+ * 具名导出时，这些位置都会静默失效。用 `typeof` 从默认导出反推实例类型并具名导出，
+ * 让「存储是什么类型」只有一处定义。
+ */
+export type UploadStorage = typeof localforage;

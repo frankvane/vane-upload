@@ -4,6 +4,7 @@ import {
   UploadConfig,
   UploadFile,
   UploadSettingsSource,
+  UploadStorage,
 } from "../types/upload";
 import { createContext, useContext } from "react";
 import { useStore } from "zustand";
@@ -15,6 +16,32 @@ import { safeStorage } from "../../../shared/safeStorage";
 type ProgressMapUpdater =
   | Record<string, number>
   | ((prev: Record<string, number>) => Record<string, number>);
+
+/**
+ * T-07 兜底：开发环境下冻结进入 store 的文件对象。
+ *
+ * 原地改写 store 对象时数组引用不变，Zustand 不会通知订阅者，React 也不会重渲染，
+ * 但 `store.getState()` 里已经是新值 —— 这类「悄悄改」在 DevTools 与渲染帧之间对不上，
+ * 排查成本极高。生产构建不做这件事（冻结有性能成本），开发/测试期一旦有人原地改写
+ * 会立刻抛 TypeError 并指向具体字段。
+ *
+ * 只冻结第一层：`files` 数组元素都是扁平结构，深层没有需要保护的引用。
+ */
+const SEAL_FILES = import.meta.env.DEV;
+
+const sealFile = <T extends UploadFile>(file: T): T => {
+  if (SEAL_FILES) {
+    Object.freeze(file);
+  }
+  return file;
+};
+
+const sealFiles = (files: UploadFile[]): UploadFile[] => {
+  if (SEAL_FILES) {
+    files.forEach((file) => Object.freeze(file));
+  }
+  return files;
+};
 
 type BatchInfoUpdater =
   | BatchInfo
@@ -123,7 +150,7 @@ export type UploadStore = StoreApi<UploadState>;
  * @param storage 该实例对应的 IndexedDB 存储（由 createUploadStorage 创建），
  *                供 refreshFiles 读取持久化元数据。
  */
-export const createUploadStore = (storage: LocalForage): UploadStore =>
+export const createUploadStore = (storage: UploadStorage): UploadStore =>
   create<UploadState>((set) => ({
     files: [],
     progressMap: {},
@@ -150,20 +177,20 @@ export const createUploadStore = (storage: LocalForage): UploadStore =>
     storageStatsVisible: false,
     config: null,
 
-    setFiles: (files) => set({ files }),
+    setFiles: (files) => set({ files: sealFiles(files) }),
     patchFile: (id, patch) =>
       set((state) => ({
         files: state.files.map((f) =>
-          f.id === id ? { ...f, ...patch } : f
+          f.id === id ? sealFile({ ...f, ...patch }) : f
         ),
       })),
     refreshFiles: async (knownFiles) => {
       if (knownFiles) {
-        set({ files: knownFiles });
+        set({ files: sealFiles(knownFiles) });
         return;
       }
       const files = await listUploadFiles(storage);
-      set({ files });
+      set({ files: sealFiles(files) });
     },
     setProgressMap: (progressMap) =>
       set((state) => ({

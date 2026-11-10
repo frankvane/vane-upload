@@ -30,7 +30,7 @@ vi.mock("../store/upload", () => ({
   useUploadStore: vi.fn(),
   useUploadStoreApi: vi.fn(() => h.storeApi),
   createUploadStore: vi.fn(),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   UploadStoreContext: {} as any,
 }));
 

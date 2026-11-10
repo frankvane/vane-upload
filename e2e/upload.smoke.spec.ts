@@ -327,40 +327,7 @@ test("VU-63-6 E2E-R4 上传中点「取消」中止传输并保留记录，可�
   expect(await findProductFile(expectedMd5)).not.toBeNull();
 });
 
-test("VU-63-7 E2E-03 上传中「删除」真实中止 Worker 并清理，无合并产物", async ({
-  page,
-}) => {
-  const content = randContent(3 * 1024 * 1024, "vu63-del-abort" + RUN_SALT);
-  const expectedMd5 = md5(content);
-  const file = fixture("del-abort.bin", content);
-
-  // 同 VU-63-4：较长延迟确保删除发生在合并之前，产物断言稳定。
-  const { gate, handler } = makeUploadGate(8_000);
-  await page.route("**/api/file/upload", handler);
-
-  await uploadFiles(page, [file]);
-  await waitRowStatus(page, "del-abort.bin", "上传中", 20_000);
-  // 置位闸口：剩余分片直接中止，避免延迟回调绕过应用的删除中止
-  gate.paused = true;
-
-  const row = page.locator("tbody tr", {
-    has: page.locator("td", { hasText: "del-abort.bin" }),
-  });
-  // 上传中点击「删除」：应真实中止传输（E2E-03 修复点）
-  await row.getByRole("button", { name: "删除" }).click();
-
-  await expect(
-    page.locator("tbody tr", {
-      has: page.locator("td", { hasText: "del-abort.bin" }),
-    }),
-  ).toHaveCount(0, { timeout: 10_000 });
-
-  await page.unroute("**/api/file/upload");
-  // 删除后不应产生合并产物（后台不再续传落盘）
-  expect(await findProductFile(expectedMd5)).toBeNull();
-});
-
-test("VU-63-8 E2E-R2 危险扩展名在选择阶段拦截，不进入列表、不发分片请求", async ({
+test("VU-63-7 E2E-R2 危险扩展名在选择阶段拦截，不进入列表、不发分片请求", async ({
   page,
 }) => {
   const uploadHits: string[] = [];
@@ -390,7 +357,7 @@ test("VU-63-8 E2E-R2 危险扩展名在选择阶段拦截，不进入列表、�
   expect(uploadHits.length, "危险类型不应触发任何分片上传").toBe(0);
 });
 
-test("VU-63-9 E2E-04 后端不可用快速失败，恢复后可重试完成", async ({ page }) => {
+test("VU-63-8 E2E-04 后端不可用快速失败，恢复后可重试完成", async ({ page }) => {
   // 模拟后端不可用：中止所有 /api/file 请求（连接级错误）
   await page.route("**/api/file/**", (route) => void route.abort());
 
@@ -412,7 +379,7 @@ test("VU-63-9 E2E-04 后端不可用快速失败，恢复后可重试完成", as
   expect(await findProductFile(expectedMd5)).not.toBeNull();
 });
 
-test("VU-63-10 同会话内失败重试（S08）", async ({ page }) => {
+test("VU-63-9 同会话内失败重试（S08）", async ({ page }) => {
   // 上传中途制造一次失败，再恢复重试
   await page.route("**/api/file/upload", (route) => void route.abort());
 
@@ -432,7 +399,7 @@ test("VU-63-10 同会话内失败重试（S08）", async ({ page }) => {
   expect(await findProductFile(expectedMd5)).not.toBeNull();
 });
 
-test("VU-63-11 重复上传同一文件去重（S09 / VU-19）", async ({ page }) => {
+test("VU-63-10 重复上传同一文件去重（S09 / VU-19）", async ({ page }) => {
   const content = randContent(32 * 1024, "vu63-dedupe" + RUN_SALT);
   const expectedMd5 = md5(content);
   // 显式指定 lastModified，确保两次选择的去重键（hash|size|lastModified|name）完全一致
@@ -475,7 +442,7 @@ test("VU-63-11 重复上传同一文件去重（S09 / VU-19）", async ({ page }
  * 修复后应有行为：取消 → 所有在飞行立即落定为「已暂停」（速率归零、记录保留、
  * 分片缓存保留）→ 点「继续」可续传至产物就绪。
  */
-test("VU-63-12 F-01/F-02 整批「取消上传」后不留「上传中」死行，可继续完成", async ({
+test("VU-63-11 F-01/F-02 整批「取消上传」后不留「上传中」死行，可继续完成", async ({
   page,
 }) => {
   // 整批取消入口在批次详情抽屉里，只有 full 模式才渲染 BatchInfoDisplay

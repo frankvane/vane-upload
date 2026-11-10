@@ -2,8 +2,8 @@ import { createContext, useContext } from "react";
 import type { StoreApi } from "zustand";
 import type { UploadState } from "../store/upload";
 import type { FileRegistry } from "../services/fileRegistry";
+import type { UploadStorage } from "../types/upload";
 import type { UploadWorkerPool } from "../services/uploadWorkerBridge";
-
 /**
  * 每实例上传引擎（T3.2 单例治理的聚合载体）。
  *
@@ -18,7 +18,7 @@ export interface UploadEngine {
   /** 实例标识，用于隔离 IndexedDB storeName（不传则回落默认） */
   instanceId: string;
   /** 该实例的 IndexedDB 存储（createUploadStorage 产物） */
-  storage: LocalForage;
+  storage: UploadStorage;
   /** 该实例的 File 引用注册表（createFileRegistry 产物） */
   fileRegistry: FileRegistry;
   /** 该实例的上传 Worker 池（createUploadWorkerPool 产物） */

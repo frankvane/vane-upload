@@ -1,6 +1,5 @@
 import { useUploadContext } from "../context/useUploadContext";
 import { useUploadStore } from "../store/upload";
-import type { UploadColumnKey } from "../types/upload";
 import { useMemo } from "react";
 
 /**
@@ -32,20 +31,12 @@ export const useEffectiveUploadConfig = () => {
     maxRetries,
   }), [autoUpload, autoCleanup, cleanupDelay, networkDisplayMode, chunkSize, fileConcurrency, chunkConcurrency, maxRetries]);
 
-  // VU-45：非原始 props 用 join 签名派生稳定数组，最终配置的依赖里不再
-  // 出现数组对象引用。宿主传入内容相同的新数组时，配置身份保持不变。
-  const allowedTypesKey = contextConfig.allowedFileTypes.join("|");
-  const visibleColumnsKey = contextConfig.visibleColumns?.join("|");
-  const stableAllowedFileTypes = useMemo(
-    () => (allowedTypesKey ? allowedTypesKey.split("|") : []),
-    [allowedTypesKey]
-  );
-  const stableVisibleColumns = useMemo<UploadColumnKey[] | undefined>(() => {
-    if (visibleColumnsKey === undefined) return undefined;
-    return visibleColumnsKey
-      ? (visibleColumnsKey.split("|") as UploadColumnKey[])
-      : [];
-  }, [visibleColumnsKey]);
+  // T-09：这里**不再做**数组稳定化。
+  // 上游 `UploadProvider` 已经用 `join("|")` 按内容签名把 `allowedFileTypes` /
+  // `visibleColumns` 规范成稳定引用（VU-45），再拼一次纯属重复劳动；
+  // 且 `|` 作为分隔符在元素本身含 `|` 时会失真（如自定义 MIME 参数、
+  // 类型别名里带竖线），把 `a|b` 一个元素拆成两个。
+  // 直接透传即可：数组身份由 Provider 保证，本 hook 的 useMemo 依赖也就稳了。
 
   // 使用 useMemo 缓存合并后的最终配置对象
   return useMemo(() => ({
@@ -57,7 +48,7 @@ export const useEffectiveUploadConfig = () => {
 
     // 文件限制配置（通常不允许运行时修改）
     maxFileSize: contextConfig.maxFileSize,
-    allowedFileTypes: stableAllowedFileTypes,
+    allowedFileTypes: contextConfig.allowedFileTypes,
     maxFiles: contextConfig.maxFiles,
     chunkCacheMaxFileSize: contextConfig.chunkCacheMaxFileSize,
 
@@ -70,13 +61,14 @@ export const useEffectiveUploadConfig = () => {
 
     // UI 配置（允许运行时修改）
     autoUpload: storeConfig.autoUpload,
+    autoUploadDelay: contextConfig.autoUploadDelay,
     autoCleanup: storeConfig.autoCleanup,
     cleanupDelay: storeConfig.cleanupDelay,
     networkDisplayMode: storeConfig.networkDisplayMode,
     uiMode: contextConfig.uiMode,
     settingsSource: contextConfig.settingsSource,
     debug: contextConfig.debug,
-    visibleColumns: stableVisibleColumns,
+    visibleColumns: contextConfig.visibleColumns,
 
     // 回调函数（来自 Context）
     onUploadStart: contextConfig.onUploadStart,
@@ -102,9 +94,10 @@ export const useEffectiveUploadConfig = () => {
     contextConfig.checkApi,
     contextConfig.mergeApi,
     contextConfig.maxFileSize,
-    stableAllowedFileTypes,
+    contextConfig.allowedFileTypes,
     contextConfig.maxFiles,
     contextConfig.chunkCacheMaxFileSize,
+    contextConfig.visibleColumns,
     contextConfig.onUploadStart,
     contextConfig.onUploadProgress,
     contextConfig.onUploadProgressDetail,
@@ -116,7 +109,6 @@ export const useEffectiveUploadConfig = () => {
     contextConfig.uiMode,
     contextConfig.settingsSource,
     contextConfig.debug,
-    stableVisibleColumns,
     contextConfig.authToken,
     contextConfig.getAuthToken,
     contextConfig.getAuthHeaders,
@@ -128,6 +120,7 @@ export const useEffectiveUploadConfig = () => {
     storeConfig.maxRetries,
     contextConfig.hashMode,
     storeConfig.autoUpload,
+    contextConfig.autoUploadDelay,
     storeConfig.autoCleanup,
     storeConfig.cleanupDelay,
     storeConfig.networkDisplayMode,

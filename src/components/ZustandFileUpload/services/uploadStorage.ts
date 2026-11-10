@@ -1,4 +1,4 @@
-import { UploadStatus, type UploadFile } from "../types/upload";
+import { UploadStatus, type UploadFile, type UploadStorage } from "../types/upload";
 import type { FileRegistry } from "./fileRegistry";
 import { migrateUploadFile } from "./uploadSchema";
 
@@ -9,7 +9,7 @@ import { migrateUploadFile } from "./uploadSchema";
  * 避免"读操作产生写放大"。
  */
 export const listUploadFiles = async (
-  storage: LocalForage
+  storage: UploadStorage
 ): Promise<UploadFile[]> => {
   const files: UploadFile[] = [];
 
@@ -26,7 +26,7 @@ export const listUploadFiles = async (
 
 /** 单条读取（同样过迁移层），供清理策略等按 id 读取的场景使用。 */
 export const readUploadFile = async (
-  storage: LocalForage,
+  storage: UploadStorage,
   id: string
 ): Promise<UploadFile | null> => {
   const raw = await storage.getItem<unknown>(id);
@@ -36,7 +36,7 @@ export const readUploadFile = async (
 
 export const removeUploadFilesByIds = async (
   ids: string[],
-  storage: LocalForage,
+  storage: UploadStorage,
   fileRegistry: FileRegistry
 ): Promise<void> => {
   if (ids.length === 0) {
@@ -99,7 +99,7 @@ const canResumeWithoutReselect = (
 ): boolean => Boolean(file.fileRef) || readyCachedFileIds.has(file.id);
 
 export const recoverInterruptedUploadFiles = async (
-  storage: LocalForage,
+  storage: UploadStorage,
   chunkCache?: UploadRecoveryChunkCache
 ): Promise<UploadRecoverySummary> => {
   const files = await listUploadFiles(storage);
@@ -176,7 +176,7 @@ export interface UploadRecoverySnapshot {
  * 最后只把「确实变化」的记录并发写一次，并返回最终快照供 store 直接采用。
  */
 export const recoverUploadQueueOnMount = async (
-  storage: LocalForage,
+  storage: UploadStorage,
   chunkCache?: UploadRecoveryChunkCache
 ): Promise<UploadRecoverySnapshot> => {
   // 唯一一次 iterate；listUploadFiles 已按 createdAt 排序。

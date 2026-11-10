@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import os from "node:os";
 import { fileURLToPath } from "url";
 import path from "path";
 import {
@@ -8,6 +9,16 @@ import {
 } from "./e2e/e2e-paths";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * T-29：`PERF_PROD=1` 时前端改用 `vite preview` 起 `dist/demo`（生产构建），
+ * 其余配置不变 —— dev 的模块拆分会把 Worker 启动开销放大数倍，
+ * 只看 dev 数字会把「模块加载」误判成产品问题。
+ */
+const PERF_PROD = process.env.PERF_PROD === "1";
+const WEB_BASE_URL = PERF_PROD
+  ? "http://127.0.0.1:4173"
+  : "http://127.0.0.1:5173";
 
 // 沙箱环境预设了 HTTP_PROXY，且当前 Node 版本会自动将其应用于 localhost 请求，
 // 导致 Playwright 的 webServer 就绪探针（以及浏览器）把 127.0.0.1 也走代理 → 502。
@@ -28,6 +39,14 @@ process.env.no_proxy = "127.0.0.1,localhost";
  */
 export default defineConfig({
   testDir: "./e2e",
+  /**
+   * 产物目录移出仓库：Playwright 每轮开头会递归清空 outputDir（trace/video 数量
+   * 很容易超过平台批量删除守卫的 50 文件阈值，实测 241 个），导致整轮 e2e 直接
+   * 起不来。指向系统临时目录后既不触发守卫，也不在仓库里留垃圾。
+   */
+  outputDir: process.env.PW_OUTPUT_DIR || path.join(os.tmpdir(), "vane-upload-pw"),
+  // T-29 的测量脚本只在 PERF_TRACE=1 时纳入，常规回归仍是 11 条 e2e。
+  testIgnore: process.env.PERF_TRACE === "1" ? [] : ["**/perf.*.spec.ts"],
   timeout: 90_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,
@@ -35,7 +54,7 @@ export default defineConfig({
   reporter: "list",
   globalSetup: "./e2e/global-setup.ts",
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: WEB_BASE_URL,
     headless: true,
     trace: "retain-on-failure",
     launchOptions: {
@@ -52,12 +71,14 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: "npx vite --port 5173 --strictPort --host 127.0.0.1",
+      command: PERF_PROD
+        ? "npx vite preview --port 4173 --strictPort"
+        : "npx vite --port 5173 --strictPort --host 127.0.0.1",
       cwd: __dirname,
       // Vite 的 SPA fallback 仅对 Accept: text/html 的请求返回 index.html，
       // Playwright 的就绪探针（Accept: */*）会被 404。改用经 Vite 代理到后端的
       // /api/health（JSON，任意 Accept 均返回 200）作为就绪判定。
-      url: "http://127.0.0.1:5173/api/health",
+      url: `${WEB_BASE_URL}/api/health`,
       timeout: 60_000,
       reuseExistingServer: false,
     },

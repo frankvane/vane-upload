@@ -70,10 +70,25 @@ export function applySettledCancelled(prev: BatchInfo | null): BatchInfo | null 
   };
 }
 
+/**
+ * 批次内单个文件被跳过（排队期间记录已被删除）：推进进度，但既不计成功也不计失败。
+ * T-14：与「取消」的计数口径相同，但语义不同 —— 它根本没发过车。
+ */
+export function applySettledSkipped(prev: BatchInfo | null): BatchInfo | null {
+  if (!prev) {
+    return null;
+  }
+  return {
+    ...prev,
+    current: prev.current + 1,
+    active: Math.max(0, prev.active - 1),
+  };
+}
+
 /** 批次收尾：清零队列/活动，落定 completed/failed 与倒计时。 */
 export function applyFinalized(
   prev: BatchInfo | null,
-  summary: { successCount: number; failedCount: number },
+  summary: { successCount: number; failedCount: number; skippedCount?: number },
   total: number,
   opts: { autoCleanup: boolean; cleanupDelay: number }
 ): BatchInfo | null {
@@ -86,6 +101,7 @@ export function applyFinalized(
       completed: summary.successCount,
       failed: summary.failedCount,
       retried: 0,
+      skipped: summary.skippedCount,
       countdown: opts.cleanupDelay,
     };
   }
@@ -98,6 +114,7 @@ export function applyFinalized(
     active: 0,
     completed: summary.successCount,
     failed: summary.failedCount,
+    skipped: summary.skippedCount,
     countdown: opts.autoCleanup ? opts.cleanupDelay : undefined,
   };
 }

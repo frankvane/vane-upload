@@ -31,6 +31,7 @@ describe("runConcurrentQueue", () => {
     expect(summary).toEqual({
       successCount: 2,
       failedCount: 2,
+      skippedCount: 0,
     });
     expect(maxRunning).toBeLessThanOrEqual(2);
   });
@@ -52,6 +53,7 @@ describe("runConcurrentQueue", () => {
     expect(summary).toEqual({
       successCount: 1,
       failedCount: 0,
+      skippedCount: 0,
     });
   });
 
@@ -73,5 +75,38 @@ describe("runConcurrentQueue", () => {
 
     expect(beforeIndexes).toEqual([0, 1, 2]);
     expect(settledIndexes).toEqual([0, 1, 2]);
+  });
+
+  it("T-14：beforeEach 返回 \"skip\" 时不执行任务，也不计失败", async () => {
+    const items = ["keep", "gone", "gone-2"];
+    const executed: string[] = [];
+    const settled: Array<{ item: string; skipped?: boolean }> = [];
+
+    const summary = await runConcurrentQueue({
+      items,
+      concurrency: 1,
+      beforeEach: async (item) => (item.startsWith("gone") ? "skip" : undefined),
+      task: async (item) => {
+        executed.push(item);
+        return true;
+      },
+      onSettled: ({ item, skipped }) => {
+        settled.push({ item, skipped });
+      },
+    });
+
+    // 跳过的两件根本没跑
+    expect(executed).toEqual(["keep"]);
+    expect(summary).toEqual({
+      successCount: 1,
+      failedCount: 0,
+      skippedCount: 2,
+    });
+    // 仍然回调 onSettled，让上层把批次计数推进到位
+    expect(settled).toEqual([
+      { item: "keep", skipped: undefined },
+      { item: "gone", skipped: true },
+      { item: "gone-2", skipped: true },
+    ]);
   });
 });

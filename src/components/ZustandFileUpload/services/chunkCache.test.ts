@@ -212,6 +212,37 @@ describe("chunkCache（方案 A）", () => {
     expect(await isFileCacheReady("inst", file.id)).toBe(false);
   });
 
+  /**
+   * T-05 把「就绪标记最后写入」抬成了唯一的安全依据：上传不再等预热完成，
+   * 因此必须锁死「预热中途失败 → 不留就绪标记 → 半成品被回收」。
+   */
+  it("预热中途读文件失败：不写就绪标记，且已写入的分片被回收（不会读到半套缓存）", async () => {
+    const { file, fileRef } = createFixture("cache-midfail", 80, 4);
+    const originalSlice = fileRef.slice.bind(fileRef);
+    let reads = 0;
+    Object.defineProperty(fileRef, "slice", {
+      value: (start = 0, end?: number) => {
+        reads += 1;
+        // 第一批 16 片（偏移 0..63）正常写入，第 17 片开始读失败
+        if (start >= 64) {
+          throw new Error("read failed");
+        }
+        return originalSlice(start, end);
+      },
+    });
+
+    const status = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+
+    expect(status).toBe("unavailable");
+    expect(reads).toBeGreaterThan(16);
+    // 关键：没有就绪标记 → 续传判定降级重选，不会拿着半套分片去合并
+    expect(await isFileCacheReady("inst", file.id)).toBe(false);
+    expect(await listReadyFileIds("inst")).toEqual(new Set());
+    expect(
+      await readCachedChunk({ instanceId: "inst", fileId: file.id }, 0)
+    ).toBeUndefined();
+  });
+
   it("实例隔离：不同 instanceId 的缓存互不可见、互不误删", async () => {
     const { file, fileRef } = createFixture("cache-iso", 10, 4);
 
