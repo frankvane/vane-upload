@@ -165,15 +165,13 @@ export interface UploadRecoverySnapshot {
 }
 
 /**
- * VU-39：把「挂载恢复」压成一次 IDB 全量读。
+ * 挂载恢复：一次 IDB 全量读，在内存里完成两阶段治理，最后只写回确实变化的记录。
  *
- * 旧链路为 `recoverInterruptedUploadFiles`（iterate + 逐条写）→ `loadAllUploadFiles`
- * （第二次 iterate）→ 逐条写 → `refreshFiles`（第三次 iterate），共 3 次全表遍历。
- * 这里保留完全相同的两阶段语义，但都在内存里完成：
  *  阶段 1：中断任务按「fileRef 或分片缓存是否可用」→ QUEUED / ERROR；
- *  阶段 2：治理历史 QUEUED / QUEUED_FOR_UPLOAD 行——缓存就绪的保留 QUEUED
+ *  阶段 2：历史 QUEUED / QUEUED_FOR_UPLOAD 行——缓存就绪的保留 QUEUED
  *          参与自动续传，缺失的降级为 awaitingReselect 的 ERROR。
- * 最后只把「确实变化」的记录并发写一次，并返回最终快照供 store 直接采用。
+ *
+ * 返回最终快照供 store 直接采用，避免多次全表 iterate。
  */
 export const recoverUploadQueueOnMount = async (
   storage: UploadStorage,

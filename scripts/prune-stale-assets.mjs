@@ -1,19 +1,15 @@
-// 定点清理上一代构建产物（T-11 的落地方式）。
+// 定点清理上一代构建产物。
 //
-// 为什么不用 vite 的 `emptyOutDir: true`：
-// 本仓库在 WorkBuddy 沙箱内构建，vite 的 emptyDir 会递归 rmSync 整个输出目录，
-// 一旦目录里文件数超过平台批量删除守卫阈值（50）就整条构建失败。
-// `dist/lib` 下由 `tsc` 产出的 .d.ts 目录树（components/ shared/ ui/ …）恰好会越过阈值，
-// 于是「开启 emptyOutDir」在这里是不可用的——实测 `npm run ci` 直接中断在 prepare-out-dir。
+// 不用 vite `emptyOutDir: true`：本仓库在 WorkBuddy 沙箱内构建，emptyDir 会递归
+// 删除整个输出目录；`dist/lib` 下 tsc 产出的 .d.ts 目录树会越过平台批量删除
+// 守卫阈值（50 个文件），使构建直接失败。
 //
-// 因此改为：构建前记录时间戳，构建后只删除「mtime 早于本次构建」的**文件**，
-// 且不递归进入 .d.ts 目录树（那部分由 tsc 覆盖写，无需清理）。
-// 每次通常只删几个到十几个上一代 hashed chunk，既清干净又不会撞守卫。
+// 改为：构建前记录时间戳，构建后只删除「mtime 早于本次构建」的文件，
+// 且不递归进入 .d.ts 目录树（由 tsc 覆盖写）。每次只删几个上一代 hashed chunk。
 //
 // 用法：
-//   node scripts/prune-stale-assets.mjs stamp demo   # 构建前
-//   node scripts/prune-stale-assets.mjs prune demo   # 构建后
-//   （lib 同理）。目标名只影响戳文件名与清理范围。
+//   node scripts/prune-stale-assets.mjs stamp demo|lib   # 构建前
+//   node scripts/prune-stale-assets.mjs prune demo|lib   # 构建后
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

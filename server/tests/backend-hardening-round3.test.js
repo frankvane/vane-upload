@@ -1,6 +1,13 @@
 // 批次 8 回归：VU-09（请求体解析顺序 / chunk_md5s）、VU-33（文件类型策略）、
 // VU-34（符号链接防护）、VU-38（日志分级脱敏）、VU-55（集中配置）、
 // VU-56 / VU-14（死代码与未声明依赖）、VU-08（合并锁）、VU-53（复合索引）。
+//
+// T-23 skip 归档：本文件 3 处 t.skip 都是**环境能力缺失**，不是断言失败，
+// 也不代表对应防护被移除：
+//  1) 创建符号链接被系统拒绝（2 处）→ Linux / macOS 原生可跑；Windows 需
+//     开启「开发者模式」或以管理员身份运行，CI 用 ubuntu-latest 即可覆盖。
+//  2) fs.lutimesSync 不存在（1 处）→ Node ≥ 20.10 / ≥ 18.20 已提供，
+//     升级 Node 后本用例自动恢复执行（当前 CI 为 Node 22）。
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -124,6 +131,7 @@ test("VU-34：预置符号链接分片 → 403，目录外目标文件字节不�
     fs.symlinkSync(outside, linkPath, "file");
   } catch (error) {
     if (error.code === "EPERM" || error.code === "EACCES") {
+      // T-23：见文件头 skip 归档第 1 条；开发者模式/管理员或 POSIX 下可跑。
       t.skip("当前系统不允许创建符号链接（Windows 需开发者模式/管理员）");
       return;
     }
@@ -148,11 +156,13 @@ test("VU-34：janitor 用 lstat 清理过期符号链接，且不触碰链接目
     if (typeof fs.lutimesSync === "function") {
       fs.lutimesSync(link, oldSeconds, oldSeconds);
     } else {
+      // T-23：见文件头 skip 归档第 2 条；Node ≥20.10 / ≥18.20 可跑。
       t.skip("当前 Node 不支持 lutimesSync，无法只改链接自身 mtime");
       return;
     }
   } catch (error) {
     if (error.code === "EPERM" || error.code === "EACCES") {
+      // T-23：见文件头 skip 归档第 1 条；开发者模式/管理员或 POSIX 下可跑。
       t.skip("当前系统不允许创建符号链接");
       return;
     }

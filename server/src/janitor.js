@@ -18,15 +18,15 @@ const PROTECTED_FILES = new Set([".gitkeep"]);
 
 /**
  * 扫描 tmp/upload，删除修改时间超过 TTL 的孤儿分片文件。
- * 覆盖：上传中断残留、chunkSize 变更后旧键分片（instantCheck reset）、
- * 合并失败后的半成品分片等 DB 已无有效引用的场景（P1-13b）。
+ * 覆盖：上传中断残留、chunkSize 变更后不再被引用的旧键分片（instantCheck reset）、
+ * 合并失败后的半成品分片等 DB 已无有效引用的场景。
  *
  * @param {object} [options]
  * @param {string} [options.dir]
  * @param {number} [options.ttlMs]
  * @param {number} [options.now]
  * @param {() => Set<string>|null} [options.getProtectedFileIds]
- *   VU-15：返回「当前受保护、不得被清理」的 storageId 集合（如正在合并的文件）。
+ *   返回「当前受保护、不得被清理」的 storageId 集合（如正在合并的文件）。
  *   分片文件名固定为 `<storageId>_<index>`，提取 storageId 后若命中该集合则跳过，
  *   避免合并进行中误删源分片导致合并失败。返回 null/undefined 表示不保护。
  * @returns {Promise<string[]>} 被删除的文件名列表

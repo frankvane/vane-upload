@@ -3,16 +3,15 @@ import { test } from "@playwright/test";
 import { MB, measureOnce, type RunResult } from "./perf-harness";
 
 /**
- * T-29：首字节固定开销归因（**测量脚本，默认不参与 e2e 回归**）。
+ * 首字节固定开销归因（**测量脚本，默认不参与 e2e 回归**）。
  *
  * 用法：
  *   PERF_TRACE=1 npx playwright test e2e/perf.first-byte.spec.ts                    # dev 模式
  *   npm run build:demo && \
  *     PERF_PROD=1 PERF_TRACE=1 npx playwright test e2e/perf.first-byte.spec.ts       # 生产构建
  *
- * 为什么要它：T-05 摘掉预热后 1KB 文件首字节仍有 ~750ms，与体积无关。
- * 这里把「change → 首个网络请求」拆成 8 段，用实测数字决定该改哪里，
- * 而不是凭直觉去优化 Worker 哈希。回归护栏见 `first-byte.budget.spec.ts`。
+ * 把「change → 首个网络请求」拆成 8 段，用实测数字定位与体积无关的固定开销，
+ * 避免凭直觉优化 Worker 哈希。回归护栏见 `first-byte.budget.spec.ts`。
  */
 
 const SIZES = [

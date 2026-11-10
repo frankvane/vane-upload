@@ -1,5 +1,5 @@
 /**
- * VU-63：分片键协议的「服务端一侧」唯一实现。
+ * 分片键协议的「服务端一侧」唯一实现。
  *
  * 前端 `src/shared/chunkKey.ts` 有等价的 TS 实现；
  * `src/shared/chunkKey.contract.test.ts` 会逐组输入比对两者，
@@ -7,7 +7,7 @@
  *
  * 协议形如 `${md5}_${size}_${chunkSize}`：
  * - md5 标识内容；size 防同内容不同大小冲突；chunkSize 让网络自适应后
- *   新旧分片天然隔离（P1-6）；
+ *   新旧分片天然隔离；
  * - 字符全部落在服务端 sanitizeFileId 白名单 `[a-zA-Z0-9_-]` 内；
  * - 缺 size/chunkSize 时退化为纯 md5（兼容旧键）。
  */

@@ -1,22 +1,17 @@
 /**
- * 分片字节缓存存储层（方案 A：刷新零点击续传）。
- *
- * 背景：元数据（hash / chunkSize / chunkCount / 进度）一直持久化在 localforage
- * 的 `react-upload-indexeddb`；但文件字节此前只存在于当前会话内存（fileRef），
- * 刷新即丢失，续传必须让用户重新选择文件。本模块把「尚未确认上传成功的分片」
- * 字节真正落进 IndexedDB，刷新后可直接重建文件数据继续上传。
+ * 分片字节缓存存储层：把未确认成功的分片字节落进 IndexedDB，供刷新后零点击续传。
  *
  * 独立性：
- * - 使用独立数据库 `react-upload-chunks`，与元数据库分离，避免影响既有 schema；
+ * - 独立数据库 `react-upload-chunks`，与元数据库 `react-upload-indexeddb` 分离；
  * - 只依赖 `indexedDB` 全局，不依赖 localforage / DOM，主线程与上传 Worker 共用。
  *
  * 键设计（数组主键，便于按实例 / 文件做前缀范围删除）：
- * - `chunks`：`[instanceId, fileId, chunkIndex]` → ArrayBuffer（分片字节）
+ * - `chunks`：`[instanceId, fileId, chunkIndex]` → ArrayBuffer
  * - `files` ：`[instanceId, fileId]` → {@link ChunkCacheMeta}
  *
- * 提交语义：分片逐个写入，**元数据最后写入**；只有存在 `state:"ready"` 的
- * 元数据才视为“缓存完整、刷新后可续传”。写到一半刷新会留下无元数据的分片，
- * 按缓存缺失处理（降级为重新选择文件），并由清理逻辑回收。
+ * 提交语义：分片逐个写入，元数据最后写入；只有 `state:"ready"` 的元数据代表
+ * 缓存完整。写到一半刷新会留下无元数据的分片，按缓存缺失降级为重新选择文件，
+ * 并由清理逻辑回收。
  */
 
 export const CHUNK_CACHE_DB_NAME = "react-upload-chunks";

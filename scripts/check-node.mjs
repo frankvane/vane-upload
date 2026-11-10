@@ -1,19 +1,13 @@
-// Node 版本前哨：把「静默退出码 9」变成一句能读懂的话。
+// Node 版本前哨：把「未知启动参数导致的静默退出码 9」变成一句能读懂的话。
 //
-// 为什么需要：后端覆盖率门禁用的是 `node --test --test-coverage-lines=90
-// --test-coverage-branches=75 …`，其中 `--test-coverage-include/exclude`
-// 自 v22.5.0、`--test-coverage-lines/branches/functions` 自 v22.8.0 才有。
-// 在更早的 Node（例如 CI 原先钉的 20）上，这些 flag 被当作**未知启动参数**，
-// Node 直接以退出码 9 退出且**不打印任何错误**——CI run #1 的失败现场就是
-// 一行 "Process completed with exit code 9"，无从判断断在哪个阶段、为什么。
+// 后端覆盖率门禁用 `node --test --test-coverage-include/exclude`（≥22.5.0）与
+// `--test-coverage-lines/branches/functions`（≥22.8.0）。更早的 Node 会把这些
+// flag 当成非法启动参数，不打印错误、直接以 9 退出，CI 上无法定位。
+// 因此 ci 与 server 的 test:coverage 都先跑本脚本，低于要求时明确报出
+// 「最低版本 / 当前版本 / 缺哪个 flag」。
 //
-// 因此门禁前置本脚本：低于要求时明确报出「最低版本 / 当前版本 / 缺哪个 flag」。
-//
-// 用法：node scripts/check-node.mjs   （package.json 的 ci 与 server 的
-// test:coverage 都会先跑它）
-//
-// 可覆盖阈值以便验证「低于版本时」的输出（本机很难装旧 Node）：
-//   VANE_MIN_NODE=99 node scripts/check-node.mjs   → 应打印说明并以 1 退出
+// 用法：node scripts/check-node.mjs
+// 验证低版本分支：VANE_MIN_NODE=99 node scripts/check-node.mjs → 打印说明并以 1 退出
 
 const MIN = process.env.VANE_MIN_NODE || "22.8.0";
 

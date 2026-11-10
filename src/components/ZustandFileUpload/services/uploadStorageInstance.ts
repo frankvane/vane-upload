@@ -4,16 +4,12 @@ import type { UploadStorage } from "../types/upload";
 import { stampUploadSchema } from "./uploadSchema";
 
 /**
- * 每实例上传存储（T3.2 单例治理）。
+ * 每实例上传存储：每个 <FileUpload> 实例持有一个具名 localforage createInstance。
  *
- * 此前上传侧直接使用 localforage 的【默认实例】（在 index.tsx 顶层调用
- * `localforage.config(...)` 改变全局默认实例），这会污染消费方的默认
- * localforage 数据，且 `localforage.clear()` 会误删消费方数据。
- *
- * 现改为每个 <FileUpload> 实例持有一个具名 createInstance：
- * - 库数据落在独立的 IndexedDB（name: "react-upload-indexeddb"），不触碰消费方默认实例；
- * - instanceId 用于多实例隔离：传不同 id 的两个实例使用不同 storeName，互不串数据；
- *   不传时回落到固定 storeName（"upload_files"），保持单实例场景下的刷新续传行为。
+ * 库数据落在独立的 IndexedDB（name: "react-upload-indexeddb"），不触碰消费方
+ * 的默认 localforage 实例，因此 `localforage.clear()` 不会误删消费方数据。
+ * instanceId 用于多实例隔离：不同 id 使用不同 storeName；不传时回落到固定
+ * storeName（"upload_files"），保持单实例场景的刷新续传行为。
  */
 export const DEFAULT_UPLOAD_DB_NAME = "react-upload-indexeddb";
 export const DEFAULT_UPLOAD_STORE_NAME = "upload_files";

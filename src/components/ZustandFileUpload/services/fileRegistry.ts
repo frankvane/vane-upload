@@ -1,25 +1,15 @@
 /**
- * 主线程 File 引用注册表（T3.1 流式分片 / T3.2 单例治理）。
+ * 主线程 File 引用注册表：保存同一会话内可复用的 File 句柄。
  *
- * 背景：T3.1 起 IndexedDB 的「元数据」库不再整文件驻留文件内容
- * （原 UploadFile.buffer 已移除）。上传时由 uploadWorker 按分片
- * `fileRef.slice(start, end)` 惰性读取，内存占用与文件大小解耦。
+ * 上传由 Worker 按分片 `fileRef.slice(start, end)` 惰性读取，内存占用与文件大小解耦；
+ * 元数据存 localforage，未确认成功的分片字节存 chunkCacheStore 的独立 IDB 库。
+ * 注册表只管「本次会话」；刷新后必然清空，续传改由分片缓存提供字节。
  *
- * 与分片缓存（方案 A）的分工：
- * - 元数据库只存上传元数据；
- * - 未确认成功的分片字节由 chunkCacheStore 写入独立的
- *   `react-upload-chunks` 库，用于刷新后零点击续传；
- * - 本注册表只解决「同一次会话内」的 File 句柄复用，刷新后必然清空。
+ * 生命周期：预处理完成后 register；上传终态、删除、清理时 release，
+ * 避免 File 句柄长期驻留导致底层数据无法 GC。缓存缺失或超过上限时，
+ * 文件标记 awaitingReselect，由用户重新选择同一文件绑定。
  *
- * 生命周期：
- * - register：文件预处理完成（useFileProcessor）时登记；
- * - release ：上传成功/失败终态、删除、清理时释放（避免 File 句柄长期
- *             驻留导致底层数据无法 GC）；
- * - 页面刷新后注册表清空，字节来源切换到分片缓存：缓存就绪则自动续传，
- *   缓存缺失/超上限时才标记 awaitingReselect，由用户重新选择同一文件绑定。
- *
- * T3.2 治理：不再是模块级单例，改为由 `createFileRegistry()` 工厂创建，
- * 每个 <FileUpload> 实例持有各自独立的注册表，互不串数据。
+ * 由 `createFileRegistry()` 工厂按实例创建，多个 <FileUpload> 互不串数据。
  */
 export interface FileRegistry {
   /** 登记文件引用（同 id 重复登记以最新为准） */

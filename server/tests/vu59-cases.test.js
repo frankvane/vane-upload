@@ -6,6 +6,11 @@
  * 降级 / TC-19 网络自适应）在浏览器侧才有对应执行路径，后端无等价接口，
  * 一律在本文件顶部以 frontend-covered-elsewhere 标注并 skip，不强行伪造。
  *
+ * T-23 skip 归档（5 条）：**跳过原因**是执行路径只存在于浏览器（fetch abort /
+ * 前端状态机 / IndexedDB / 网络探测），后端没有等价接口，伪造出来测的就不是
+ * 这条场景了；**可跑环境**是前端 Vitest 与 Playwright，具体验证位置写在每条
+ * 用例上方。这些场景不是「未覆盖」，只是换了执行层。
+ *
  * 隔离约定（VU-61）：本文件在模块加载期用 mkdtempSync 在仓库外开辟一个私有
  * 临时根目录，把 DB_STORAGE / SERVER_TMP_UPLOAD_DIR / SERVER_UPLOADS_DIR 全部
  * 重定向到该目录，after() 整体删除，绝不触碰仓库内真实 data/tmp/uploads。
@@ -158,6 +163,7 @@ test.after(async () => {
 // 前端专属用例：backend 无对应路径，skip 并标注 frontend-covered-elsewhere。
 // =========================================================================
 test(
+  // T-23 验证位置：worker/uploadWorker.cancel.test.ts、e2e VU-63-11。
   "TC-15 取消（abort 在途 fetch，不发 error/done、不再发起请求）",
   { skip: true },
   () => {
@@ -167,6 +173,7 @@ test(
 );
 
 test(
+  // T-23 验证位置：worker/uploadWorker.pause.test.ts、e2e VU-63-3。
   "TC-16 暂停/恢复（断点续传不重传已完成分片）",
   { skip: true },
   () => {
@@ -176,6 +183,7 @@ test(
 );
 
 test(
+  // T-23 验证位置：index.recovery.test.tsx、e2e VU-63-5。
   "TC-17 刷新恢复（IDB UPLOADING + fileRef 丢失 → awaitingReselect）",
   { skip: true },
   () => {
@@ -185,6 +193,7 @@ test(
 );
 
 test(
+  // T-23 验证位置：services/chunkCache.test.ts、services/uploadStorage.test.ts。
   "TC-18 IndexedDB 降级（mock 不可用 → 不白屏、主流程可继续）",
   { skip: true },
   () => {
@@ -194,6 +203,7 @@ test(
 );
 
 test(
+  // T-23 验证位置：hooks/useFileProcessor.test.tsx、hooks/useNetworkDetection.test.tsx。
   "TC-19 网络自适应（rtt 触发 chunkSize 8MB→256KB、reset:true、旧分片清理）",
   { skip: true },
   () => {
