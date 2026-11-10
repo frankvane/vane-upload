@@ -25,8 +25,8 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && npm run build:demo && npm run build:lib",
-    "build:demo": "vite build",
-    "build:lib": "vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
+    "build:demo": "node scripts/prune-stale-assets.mjs stamp demo && vite build && node scripts/prune-stale-assets.mjs prune demo",
+    "build:lib": "node scripts/prune-stale-assets.mjs stamp lib && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json && node scripts/prune-stale-assets.mjs prune lib",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint .",

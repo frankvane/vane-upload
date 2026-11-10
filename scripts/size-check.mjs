@@ -10,7 +10,7 @@
 // Override limit:   SIZE_LIMIT_KB=120 node scripts/size-check.mjs
 
 import { gzipSync } from "node:zlib";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -25,6 +25,56 @@ const ENTRIES = [
   { label: "ESM entry  (dist/lib/index.js)",  file: "dist/lib/index.js" },
   { label: "CJS entry  (dist/lib/index.cjs)", file: "dist/lib/index.cjs" },
 ];
+
+/**
+ * 陈旧产物守卫（T-11 的配套项）。
+ *
+ * 背景：曾出现过「门禁读数来自 11-08 的旧产物、当时代码还没加新功能」，
+ * 于是体积基线比真实值小 2KB，且无人察觉——数字看着合理，其实测的不是当前源码。
+ * emptyOutDir 只能保证不堆积，保证不了「你测的是刚构建出来的」。
+ * 这里直接比对入口 mtime 与 src/ 下最新源文件：产物更旧就直接失败。
+ */
+const newestSourceMtime = (() => {
+  let newest = 0;
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+        continue;
+      }
+      if (!/\.(ts|tsx|css)$/.test(entry.name)) continue;
+      if (entry.name.includes(".test.")) continue;
+      newest = Math.max(newest, statSync(abs).mtimeMs);
+    }
+  };
+  walk(path.join(ROOT, "src"));
+  return newest;
+})();
+
+const staleEntries = [];
+for (const { label, file } of ENTRIES) {
+  const abs = path.join(ROOT, file);
+  if (!existsSync(abs)) continue;
+  if (statSync(abs).mtimeMs < newestSourceMtime) {
+    staleEntries.push({ label, abs });
+  }
+}
+if (staleEntries.length > 0) {
+  console.error(
+    "\n[FAIL] 产物比源码旧，拒绝按陈旧产物判定体积（先跑 npm run build:lib）："
+  );
+  for (const { label, abs } of staleEntries) {
+    console.error(
+      `  - ${label}  ${new Date(statSync(abs).mtimeMs).toISOString()}`
+    );
+  }
+  console.error(
+    `  最新源文件：${new Date(newestSourceMtime).toISOString()}\n`
+  );
+  process.exit(1);
+}
 
 console.log(
   `\nLibrary size gate — limit ${LIMIT_KB} KB gzip per entry ` +

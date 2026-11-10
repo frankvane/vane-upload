@@ -24,9 +24,26 @@ export default defineConfig({
       },
     },
   },
+  // T-29：生产构建的性能取数（`vite preview` 起 dist/demo）同样需要 /api 代理，
+  // 否则首字节测量只能退回 dev —— 而 dev 的模块拆分本身就会放大 Worker 启动开销。
+  preview: {
+    port: 4173,
+    host: "127.0.0.1",
+    proxy: {
+      "/api": {
+        target: process.env.VITE_DEV_API_PROXY_TARGET || "http://localhost:3000",
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
-    // VU-62/CI：不自动清空输出目录，避免触发 WorkBuddy 批量删除安全守卫；
-    // 依赖 clean checkout（CI）或本地 `rm -rf dist` 后重建以获得干净产物。
+    // T-11（VU-65）：演示站点独占 dist/demo，与库产物 dist/lib 平级，
+    // 两者不再共用 dist —— 原先 demo 写到 dist/assets、lib 写到 dist/lib，
+    // 任何一方想清自己的旧 hashed chunk 都会连带删掉另一方，只好双双关掉清理，
+    // 代价是 dist/assets 堆了 4 代 index-*.js（实测约 1.3MB 冗余）。
+    outDir: "dist/demo",
+    // 目录分离后本可开启，但 `dist/demo/assets` 同样可能越过平台批量删除守卫阈值；
+    // 改由 `scripts/prune-stale-assets.mjs` 在构建后按时间戳定点清理（见该脚本注释）。
     emptyOutDir: false,
   },
   test: {

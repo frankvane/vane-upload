@@ -34,9 +34,11 @@ export default defineConfig({
   plugins: [react(), inlineWorkersForLibrary()],
   build: {
     outDir: "dist/lib",
-    // VU-62/CI：不自动清空输出目录，避免触发 WorkBuddy 批量删除安全守卫
-    // （重复构建会 rmSync 整个 dist/lib 触发 SAFE_DELETE_BULK_CONFIRM_REQUIRED）。
-    // 依赖 clean checkout（CI）或本地 `rm -rf dist` 后重建以获得干净产物。
+    // T-11（VU-65）：仍关闭空目录，但不再是「放任堆积」——由
+    // `scripts/prune-stale-assets.mjs` 在构建后按时间戳定点清理上一代 hashed chunk。
+    // 不能开 emptyOutDir 的原因已实测：`dist/lib` 里有 tsc 产出的 .d.ts 目录树，
+    // 递归 rmSync 会超过平台批量删除守卫阈值（50 个文件），使 `npm run ci`
+    // 直接中断在 prepare-out-dir（实测报 SAFE_DELETE_BULK_CONFIRM_REQUIRED）。
     emptyOutDir: false,
     lib: {
       entry: resolve(projectRoot, "src/index.ts"),
