@@ -72,110 +72,143 @@ describe("Modal ESC 监听（VU-30）", () => {
   });
 });
 
-describe("Tooltip a11y（T-70）", () => {
-  it("合并子元素既有事件，不覆盖其 onClick", () => {
-    const onClick = vi.fn();
-    render(
-      <Tooltip title="提示">
-        <button onClick={onClick}>目标</button>
-      </Tooltip>,
-    );
-    fireEvent.click(screen.getByText("目标"));
-    expect(onClick).toHaveBeenCalledTimes(1);
-  });
+describe("T-70 Tooltip a11y", () => {
+  /** show 有 150ms 延迟，测试内统一用假定时器推进 */
+  const openTooltip = (trigger: HTMLElement) => {
+    fireEvent.mouseEnter(trigger);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+  };
 
-  it("可见时触发器带 aria-describedby 指向 tooltip id", () => {
+  it("浮层带 id、触发元素经 aria-describedby 关联，ESC 可关闭", () => {
     vi.useFakeTimers();
     try {
       render(
-        <Tooltip title="提示内容">
-          <button>目标</button>
+        <Tooltip title="提示文案">
+          <button type="button">触发</button>
         </Tooltip>,
       );
-      const btn = screen.getByText("目标");
-      fireEvent.mouseEnter(btn);
-      act(() => {
-        vi.advanceTimersByTime(150);
-      });
-      const describedby = btn.getAttribute("aria-describedby");
-      expect(describedby).toBeTruthy();
-      const tip = document.getElementById(describedby!);
+      const trigger = screen.getByRole("button", { name: "触发" });
+      expect(trigger.getAttribute("aria-describedby")).toBeNull();
+
+      openTooltip(trigger);
+      const tip = document.querySelector('[role="tooltip"]')!;
       expect(tip).not.toBeNull();
-      expect(tip!.getAttribute("role")).toBe("tooltip");
+      const id = tip.getAttribute("id");
+      expect(id).toBeTruthy();
+      expect(trigger.getAttribute("aria-describedby")).toBe(id);
+
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(document.querySelector('[role="tooltip"]')).toBeNull();
+      expect(trigger.getAttribute("aria-describedby")).toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("ESC 关闭可见 tooltip", () => {
+  it("cloneElement 不覆盖子元素自带的同名事件（且内部定位仍生效）", () => {
     vi.useFakeTimers();
     try {
+      const onFocus = vi.fn();
+      const onMouseEnter = vi.fn();
+      const onMouseLeave = vi.fn();
       render(
-        <Tooltip title="提示内容">
-          <button>目标</button>
+        <Tooltip title="提示">
+          <button
+            type="button"
+            onFocus={onFocus}
+            onMouseEnter={onMouseEnter}
+            onMouseLeave={onMouseLeave}
+          >
+            触发
+          </button>
         </Tooltip>,
       );
-      fireEvent.mouseEnter(screen.getByText("目标"));
+      const trigger = screen.getByRole("button", { name: "触发" });
+
+      fireEvent.focus(trigger);
+      expect(onFocus).toHaveBeenCalledTimes(1);
+      fireEvent.mouseEnter(trigger);
+      expect(onMouseEnter).toHaveBeenCalledTimes(1);
+
       act(() => {
         vi.advanceTimersByTime(150);
       });
-      expect(screen.getByRole("tooltip")).toBeInTheDocument();
-      act(() => {
-        fireEvent.keyDown(document, { key: "Escape" });
-      });
-      expect(screen.queryByRole("tooltip")).toBeNull();
+      // 浮层出现说明 Tooltip 内部 ref 定位依然有效
+      expect(document.querySelector('[role="tooltip"]')).not.toBeNull();
+
+      fireEvent.mouseLeave(trigger);
+      expect(onMouseLeave).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('[role="tooltip"]')).toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 });
 
-describe("Modal / Drawer 焦点管理（T-70）", () => {
-  it("Modal 打开后焦点移入对话框，关闭后归还来源焦点", () => {
+describe("T-70 Modal / Drawer 焦点管理", () => {
+  it("Modal 关闭（卸载）时把焦点归还打开前的元素", () => {
     const trigger = document.createElement("button");
-    trigger.textContent = "打开";
+    trigger.textContent = "打开弹窗";
     document.body.appendChild(trigger);
-    trigger.focus();
-    expect(document.activeElement).toBe(trigger);
+    try {
+      trigger.focus();
+      const { rerender } = render(<Modal open title="弹窗">内容</Modal>);
+      const dialog = document.querySelector(".rui-modal") as HTMLElement;
+      expect(document.activeElement).toBe(dialog);
 
-    const { unmount } = render(
-      <Modal open onCancel={vi.fn()}>
-        内容
-      </Modal>,
-    );
-    expect(document.querySelector(".rui-modal")).toHaveFocus();
-
-    unmount();
-    expect(trigger).toHaveFocus();
-    trigger.remove();
+      rerender(
+        <Modal open={false} title="弹窗">
+          内容
+        </Modal>,
+      );
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      trigger.remove();
+    }
   });
 
-  it("Modal 内 Tab 循环，焦点不逃出 panel", () => {
-    render(
-      <Modal open onCancel={vi.fn()}>
-        <button>第一个</button>
-        <button>第二个</button>
-      </Modal>,
-    );
-    const dialog = document.querySelector(".rui-modal") as HTMLElement;
-    const buttons = Array.from(dialog.querySelectorAll("button"));
-    // 聚焦最后一个可聚焦元素，Tab 应回到第一个（圈禁）
-    buttons[buttons.length - 1].focus();
-    fireEvent.keyDown(dialog, { key: "Tab" });
-    expect(buttons[0]).toHaveFocus();
+  it("Drawer 打开移入焦点、关闭归还来源焦点", () => {
+    const trigger = document.createElement("button");
+    trigger.textContent = "打开抽屉";
+    document.body.appendChild(trigger);
+    try {
+      trigger.focus();
+      const { rerender } = render(<Drawer open={false} title="抽屉" />);
+      rerender(
+        <Drawer open title="抽屉">
+          <button type="button">A</button>
+        </Drawer>,
+      );
+      const panel = document.querySelector(".rui-drawer") as HTMLElement;
+      expect(document.activeElement).toBe(panel);
+
+      rerender(<Drawer open={false} title="抽屉" />);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      trigger.remove();
+    }
   });
 
-  it("Drawer 内 Tab 循环，焦点不逃出 panel", () => {
+  it("Tab 不逃出面板：末尾→首位、首位 Shift+Tab→末尾", () => {
     render(
-      <Drawer open title="抽屉" onClose={vi.fn()}>
-        <button>甲</button>
-        <button>乙</button>
+      <Drawer open title="抽屉">
+        <button type="button">A</button>
+        <button type="button">B</button>
       </Drawer>,
     );
     const panel = document.querySelector(".rui-drawer") as HTMLElement;
     const buttons = Array.from(panel.querySelectorAll("button"));
-    buttons[buttons.length - 1].focus();
+    const first = buttons[0]!;
+    const last = buttons[buttons.length - 1]!;
+    expect(buttons.length).toBeGreaterThan(1);
+
+    last.focus();
     fireEvent.keyDown(panel, { key: "Tab" });
-    expect(buttons[0]).toHaveFocus();
+    expect(document.activeElement).toBe(first);
+
+    fireEvent.keyDown(panel, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
   });
 });

@@ -29,30 +29,45 @@ describe("ui/typography · Paragraph / Title", () => {
     expect(container.querySelector("p")).toBeInTheDocument();
   });
 
-  it("Title 按 level 映射字号与语义标签，自定义 style 不覆盖字号", () => {
+  it("Title 按 level 映射字号，自定义 style 不覆盖字号", () => {
     const { container } = render(
       <Typography.Title level={3} style={{ marginTop: 24 }}>
         T
       </Typography.Title>,
     );
-    // T-70：level=3 渲染为 <h3>，不再恒为 <h1>
     const h = container.querySelector("h3")!;
     expect(h.style.fontSize).toBe("20px");
     expect(h.style.marginTop).toBe("24px");
+    // T-70：level=3 不得再渲染成 h1
     expect(container.querySelector("h1")).toBeNull();
   });
 
   it.each([
-    [1, "h1"],
-    [2, "h2"],
-    [3, "h3"],
-    [4, "h4"],
-    [5, "h5"],
-  ] as const)("Title level=%i 渲染为 %s（T-70）", (level, tag) => {
+    [1, "h1", "28px"],
+    [2, "h2", "24px"],
+    [3, "h3", "20px"],
+    [4, "h4", "18px"],
+    [5, "h5", "16px"],
+  ] as const)("T-70 level=%i 渲染 %s 且字号 %s", (level, tag, size) => {
     const { container } = render(
-      <Typography.Title level={level}>T</Typography.Title>,
+      <Typography.Title level={level}>标题</Typography.Title>,
     );
-    expect(container.querySelector(tag)).not.toBeNull();
+    const heading = container.querySelector(tag) as HTMLElement;
+    expect(heading).toBeInTheDocument();
+    expect(heading.style.fontSize).toBe(size);
+    expect(container.querySelectorAll("h1, h2, h3, h4, h5")).toHaveLength(1);
+  });
+
+  it("T-70 同页多个子级标题不制造多个 h1", () => {
+    const { container } = render(
+      <>
+        <Typography.Title level={1}>主标题</Typography.Title>
+        <Typography.Title level={4}>总体统计</Typography.Title>
+        <Typography.Title level={4}>状态分布</Typography.Title>
+      </>,
+    );
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(container.querySelectorAll("h4")).toHaveLength(2);
   });
 });
 

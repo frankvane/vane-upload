@@ -51,8 +51,8 @@ const Title: React.FC<
   React.HTMLAttributes<HTMLHeadingElement> & { level?: 1 | 2 | 3 | 4 | 5 }
 > = ({ level = 1, className, children, style, ...rest }) => {
   const size = [28, 24, 20, 18, 16][level - 1];
-  // T-70：按 level 渲染对应语义标签，而不是无论 level 恒渲染 <h1>。
-  // 否则抽屉里的「总体统计」等次级标题也会成为第二个 h1，破坏页面唯一 h1 的层级。
+  // T-70：按 level 渲染语义化标题标签。此前无论 level 恒为 <h1>，
+  // 抽屉/弹层里的 level=4 标题会在页面上制造多个 h1，破坏标题层级与读屏体验。
   const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5";
   return (
     <Tag

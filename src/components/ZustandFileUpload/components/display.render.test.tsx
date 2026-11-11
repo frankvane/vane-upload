@@ -224,43 +224,47 @@ describe("T-15 StorageStatsDrawer 渲染", () => {
     expect(screen.queryByText("暂无文件，状态分布为空")).toBeNull();
   });
 
-  it("点遮罩关闭会写回 store（不再是本地 state）", () => {
+  it("点遮罩关闭会写回 store，且焦点归还打开前的元素（T-70）", () => {
     const { store, container } = mount(<StorageStatsDrawer />);
-    act(() => {
-      store.getState().setStorageStatsVisible(true);
-    });
-
-    const mask = document.querySelector(".rui-drawer-mask");
-    expect(mask).not.toBeNull();
-    fireEvent.click(mask!);
-
-    expect(store.getState().storageStatsVisible).toBe(false);
-    expect(container).toBeTruthy();
-  });
-
-  it("打开时焦点移入抽屉、关闭后归还来源焦点（T-70 焦点管理）", () => {
-    const { store } = mount(<StorageStatsDrawer />);
-    // 准备一个来源焦点元素（模拟「打开统计」触发按钮）并聚焦
+    // 模拟真实入口：打开抽屉前焦点落在触发按钮上
     const trigger = document.createElement("button");
     trigger.textContent = "打开统计";
-    document.body.appendChild(trigger);
+    container.appendChild(trigger);
     trigger.focus();
-    expect(document.activeElement).toBe(trigger);
 
     act(() => {
       store.getState().setStorageStatsVisible(true);
     });
     const panel = document.querySelector(".rui-drawer") as HTMLElement;
     expect(panel).not.toBeNull();
-    // 打开即把焦点移入面板（不落在 body，屏幕阅读器可获知浮层出现）
-    expect(panel).toHaveFocus();
+    expect(document.activeElement).toBe(panel);
 
+    const mask = document.querySelector(".rui-drawer-mask");
+    expect(mask).not.toBeNull();
+    fireEvent.click(mask!);
+
+    expect(store.getState().storageStatsVisible).toBe(false);
+    // 关闭后焦点必须归还，不能停留在已卸载的面板或 body
+    expect(document.activeElement).toBe(trigger);
+    expect(container).toBeTruthy();
+  });
+
+  it("T-70 抽屉打开时页面仅 1 个 h1（子级标题按 level 渲染）", () => {
+    const { store } = mount(
+      <>
+        <h1>上传中心</h1>
+        <StorageStatsDrawer />
+      </>,
+    );
     act(() => {
-      store.getState().setStorageStatsVisible(false);
+      store.getState().setStorageStatsVisible(true);
     });
-    // 关闭后焦点归还来源（不丢失到 body）
-    expect(trigger).toHaveFocus();
-    trigger.remove();
+
+    // Title level=4 此前恒渲染 h1，会把页面 h1 数量撑到多个
+    expect(document.querySelectorAll("h1")).toHaveLength(1);
+    expect(document.querySelector("h1")?.textContent).toBe("上传中心");
+    expect(document.querySelectorAll(".rui-drawer h1")).toHaveLength(0);
+    expect(document.querySelectorAll(".rui-drawer h4").length).toBeGreaterThan(0);
   });
 });
 
