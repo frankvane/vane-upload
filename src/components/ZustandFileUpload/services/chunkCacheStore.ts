@@ -302,6 +302,35 @@ export const getFileCacheMeta = async (
   });
 };
 
+/**
+ * T-55：代际原子的就绪标记写入。仅当文件当前代际仍等于 `expectedGeneration` 时才写入，
+ * 否则返回 false（不写）。与上传/清理的 {@link deleteFileCache}（它会 bump 代际）在
+ * 同一 IndexedDB 连接下事务串行互斥，从而消除「预热写完分片后、写标记前被清理」的竞态：
+ * 若清理先 bump 代际，本函数读到更大代际即跳过写标记，最终磁盘状态由清理决定（无分片、
+ * 无 ready meta），不会出现「ready meta + 零分片」的误导状态。
+ *
+ * @returns 是否真正写入了标记
+ */
+export const putFileCacheMetaIfGeneration = async (
+  key: ChunkCacheKey,
+  meta: ChunkCacheMeta,
+  expectedGeneration: number
+): Promise<boolean> => {
+  const db = await openDb();
+  const tx = db.transaction([FILES_STORE, GENERATIONS_STORE], "readwrite");
+  const genStore = tx.objectStore(GENERATIONS_STORE);
+  const currentGen =
+    (await idbGet<number>(genStore, [key.instanceId, key.fileId])) ?? 0;
+  if (currentGen !== expectedGeneration) {
+    // 代际已变（上传/清理已接管该文件）：不写标记，把磁盘状态交给清理决定。
+    await txDone(tx);
+    return false;
+  }
+  tx.objectStore(FILES_STORE).put(meta, [key.instanceId, key.fileId]);
+  await txDone(tx);
+  return true;
+};
+
 /** 一次游标遍历列出该实例下所有就绪文件 id（挂载恢复用）。 */
 export const listReadyFileIds = async (
   instanceId: string,

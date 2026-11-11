@@ -5,14 +5,17 @@ import {
   DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE,
   isFileCacheReady,
   primeChunkCache,
+  __test_primeEntryCount,
 } from "./chunkCache";
 import {
   CHUNK_CACHE_DB_NAME,
   closeChunkCacheDb,
   deleteCachedChunk,
+  deleteFileCache as deleteFileCacheStore,
   getFileCacheMeta,
   listReadyFileIds,
   putCachedChunks,
+  putFileCacheMetaIfGeneration,
   readCachedChunk,
 } from "./chunkCacheStore";
 
@@ -190,6 +193,41 @@ describe("chunkCache（方案 A）", () => {
     expect(
       await getFileCacheMeta({ instanceId: "inst", fileId: file.id })
     ).toBeUndefined();
+  });
+
+  it("T-55：预热结算后 primeEntries 释放，不残留陈旧 entry（ready 路径）", async () => {
+    const { file, fileRef } = createFixture("t55-leak", 10, 4);
+    await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(__test_primeEntryCount()).toBe(0);
+    // 再次预热（磁盘已有 ready meta，直接复用）仍不残留
+    await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(__test_primeEntryCount()).toBe(0);
+  });
+
+  it("T-55：预热失败后 entry 释放，允许后续重试（不永久失败）", async () => {
+    vi.stubGlobal("indexedDB", undefined); // 不可用 → unavailable
+    const { file, fileRef } = createFixture("t55-fail", 10, 4);
+    const status = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(status).toBe("unavailable");
+    expect(__test_primeEntryCount()).toBe(0);
+  });
+
+  it("T-55：配额不足降级后释放 entry，释放空间再预热可成功（旧实现会永久失败）", async () => {
+    const { file, fileRef } = createFixture("t55-retry", 10, 4);
+    vi.stubGlobal("navigator", {
+      storage: { estimate: async () => ({ quota: 100, usage: 99 }) },
+    });
+    const first = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(first).toBe("insufficient-space");
+    expect(__test_primeEntryCount()).toBe(0); // 失败态也释放，允许重试
+
+    // 释放空间后再次预热应成功；旧实现对同一 key 返回已结算的失败 promise → 永久 insufficient-space
+    vi.stubGlobal("navigator", {
+      storage: { estimate: async () => ({ quota: 1000, usage: 0 }) },
+    });
+    const second = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(second).toBe("ready");
+    expect(await isFileCacheReady("inst", file.id)).toBe(true);
   });
 
   it("按可用空间的 80% 预检：够则缓存，不足降级为 insufficient-space", async () => {
@@ -431,5 +469,45 @@ describe("chunkCache（方案 A）", () => {
       }
     }
     expect(orphan).toBe(0);
+  });
+
+  it("T-55（store）：代际原子的 meta 写入——被清理 bump 代际后，陈旧 meta 写回被拒绝", async () => {
+    const key = { instanceId: "inst", fileId: "gen-guarded" };
+    const meta: Parameters<typeof putFileCacheMetaIfGeneration>[1] = {
+      state: "ready",
+      fileName: "gen-guarded.bin",
+      fileSize: 10,
+      fileType: "application/octet-stream",
+      lastModified: 1700000000000,
+      chunkSize: 4,
+      chunkCount: 3,
+      createdAt: 1700000000000,
+    };
+    await putCachedChunks(key, [{ index: 0, data: new Uint8Array([1]).buffer }], 0);
+
+    // 模拟上传/清理：deleteFileCache 会 bump 代际（0 → 1）并删分片 + meta
+    await deleteFileCacheStore(key);
+
+    // 过期的预热仍想写 ready meta（携带旧 gen=0）：应被拒绝
+    const written = await putFileCacheMetaIfGeneration(key, meta, 0);
+    expect(written).toBe(false);
+    // 磁盘不得留下「ready meta + 零分片」的误导状态
+    expect(await getFileCacheMeta(key)).toBeUndefined();
+  });
+
+  it("T-55（store）：代际一致时 meta 正常写入", async () => {
+    const key = { instanceId: "inst", fileId: "gen-ok" };
+    const meta: Parameters<typeof putFileCacheMetaIfGeneration>[1] = {
+      state: "ready",
+      fileName: "gen-ok.bin",
+      fileSize: 10,
+      fileType: "application/octet-stream",
+      lastModified: 1700000000000,
+      chunkSize: 4,
+      chunkCount: 3,
+      createdAt: 1700000000000,
+    };
+    expect(await putFileCacheMetaIfGeneration(key, meta, 0)).toBe(true);
+    expect((await getFileCacheMeta(key))?.state).toBe("ready");
   });
 });

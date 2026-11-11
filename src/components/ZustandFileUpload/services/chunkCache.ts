@@ -18,7 +18,7 @@ import {
   getFileCacheMeta,
   isChunkCacheSupported,
   putCachedChunks,
-  putFileCacheMeta,
+  putFileCacheMetaIfGeneration,
   clearInstanceCache,
   readGeneration,
   type ChunkCacheKey,
@@ -235,19 +235,28 @@ const runPrime = async (
       return "unavailable";
     }
 
-    // 最后写入提交标记：此前任何中断都视为缓存不可用。
-    await putFileCacheMeta(keys, {
-      state: "ready",
-      fileName: file.fileName,
-      fileSize: file.fileSize,
-      fileType: file.fileType,
-      lastModified: file.lastModified,
-      hash: file.hash,
-      chunkSize,
-      chunkCount,
-      createdAt: file.createdAt,
-      cachedFromIndex: startIndex,
-    });
+    // 最后写入提交标记：此前任何中断都视为缓存不可用。T-55 用代际原子写入——
+    // 仅当文件代际仍为本次预热开始时捕获的 `generation` 时才写；若上传/清理在写入期间
+    // 接管了文件（bump 代际），跳过写标记，磁盘状态由清理决定，杜绝「ready meta + 零分片」。
+    const metaWritten = await putFileCacheMetaIfGeneration(
+      keys,
+      {
+        state: "ready",
+        fileName: file.fileName,
+        fileSize: file.fileSize,
+        fileType: file.fileType,
+        lastModified: file.lastModified,
+        hash: file.hash,
+        chunkSize,
+        chunkCount,
+        createdAt: file.createdAt,
+        cachedFromIndex: startIndex,
+      },
+      generation
+    );
+    if (!metaWritten) {
+      return "unavailable";
+    }
     return "ready";
   } catch {
     // 配额不足 / 隐私模式 / 写入被拒：回收半成品，明确降级。
@@ -280,10 +289,21 @@ export const primeChunkCache = (
     cancelled: false,
     promise: Promise.resolve("unavailable"),
   };
-  entry.promise = runPrime(file, fileRef, options, entry);
+  entry.promise = runPrime(file, fileRef, options, entry).finally(() => {
+    // T-55：预热结算（成功/失败/取消）后释放 entry，避免 primeEntries 随文件数无限
+    // 增长，也防止后续命中陈旧 entry 返回过时结论。仅当 map 中仍是本 entry 时才删——
+    // 若同 key 的新预热已替换（clear 后会重排），不误删新的。删除后 isFileCacheReady /
+    // primeChunkCache 回退到磁盘复核（getFileCacheMeta），结论始终以磁盘为准。
+    if (primeEntries.get(key) === entry) {
+      primeEntries.delete(key);
+    }
+  });
   primeEntries.set(key, entry);
   return entry.promise;
 };
+
+/** 仅测试用：返回当前 primeEntries 的条目数（验证预热结算后是否被释放，T-55）。 */
+export const __test_primeEntryCount = (): number => primeEntries.size;
 
 /** 判定该文件当前是否具备“刷新后可续传”的缓存。 */
 export const isFileCacheReady = async (
@@ -292,7 +312,11 @@ export const isFileCacheReady = async (
 ): Promise<boolean> => {
   const entry = primeEntries.get(entryKey(instanceId, fileId));
   if (entry) {
-    return (await entry.promise) === "ready";
+    // 命中在途 / 刚结算的 entry：先取其最终状态；即便为 ready，也仍以磁盘复核为准
+    // （T-55：防止命中被外部清理过的陈旧 ready 结论）。
+    if ((await entry.promise) !== "ready") {
+      return false;
+    }
   }
   if (!isChunkCacheSupported()) {
     return false;
