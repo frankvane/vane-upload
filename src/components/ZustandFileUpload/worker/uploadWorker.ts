@@ -409,14 +409,6 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
           message: errorMessage,
         });
       }
-    } finally {
-      // 任务结束（成功/失败/取消）后释放 AbortController 与暂停状态，避免 Map 残留
-      if (fileId) {
-        taskAbortControllers.delete(fileId);
-        taskPauseState.delete(fileId);
-        taskStats.delete(fileId);
-        taskAllowedHosts.delete(fileId);
-      }
     }
   } catch (error) {
     // Worker 执行过程中的全局错误处理（同样要区分取消）
@@ -430,8 +422,35 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       type: "error",
       message: errorMessage,
     });
+  } finally {
+    // T-56：4 个模块级任务 Map 的清理必须挂在外层 try/finally，覆盖「秒传短路 /
+    // 后端不可用 / 预检阶段抛错」等提前 return 或走外层 catch 的路径——原清理只挂在内层
+    // runChunkPipeline 的 try/finally，这些提前路径会绕过它，导致 Map 跨任务残留。
+    if (fileId) {
+      taskAbortControllers.delete(fileId);
+      taskPauseState.delete(fileId);
+      taskStats.delete(fileId);
+      taskAllowedHosts.delete(fileId);
+    }
   }
 };
 
 // VU-49：并发控制已迁至 shared/concurrency.ts 的 runCursorPool（游标式，
 // 不预物化任务数组）；主线程与预处理 Worker 共用同一实现，避免两套语义漂移。
+
+/**
+ * 测试钩子（仅测试使用，不进入业务路径）：暴露 4 个模块级任务 Map 的当前尺寸，
+ * 用于验证「任务结束（成功 / 取消 / 任一提前 return）后无残留」（T-56）。
+ * 生产代码不调用本函数；未引用时不影响产物体积。
+ */
+export const __test_getTaskMapSizes = (): {
+  abort: number;
+  hosts: number;
+  pause: number;
+  stats: number;
+} => ({
+  abort: taskAbortControllers.size,
+  hosts: taskAllowedHosts.size,
+  pause: taskPauseState.size,
+  stats: taskStats.size,
+});
