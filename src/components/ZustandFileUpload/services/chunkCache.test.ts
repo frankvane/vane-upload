@@ -10,6 +10,7 @@ import {
   CHUNK_CACHE_DB_NAME,
   closeChunkCacheDb,
   deleteCachedChunk,
+  getFileCacheMeta,
   listReadyFileIds,
   putCachedChunks,
   readCachedChunk,
@@ -137,9 +138,9 @@ describe("chunkCache（方案 A）", () => {
     expect(await isFileCacheReady("inst", file.id)).toBe(true);
   });
 
-  it("固定上限按「待缓存分片字节」判断，而非整个文件大小", async () => {
+  it("T-54：固定上限按「待缓存分片字节」判断；已确认分片不落盘", async () => {
     const { file, fileRef } = createFixture("cache-pending", 10, 4);
-    // 3 片里已确认 2 片 → 待缓存 2 字节；文件总大小 10 字节
+    // 3 片里已确认 2 片 → 待缓存 1 片（2 字节）；文件总大小 10 字节
     file.uploadedChunks = 2;
 
     const status = await primeChunkCache(file, fileRef, {
@@ -149,6 +150,46 @@ describe("chunkCache（方案 A）", () => {
 
     expect(status).toBe("ready");
     expect(await isFileCacheReady("inst", file.id)).toBe(true);
+
+    const keys = { instanceId: "inst", fileId: file.id };
+    // 已确认的 2 片不应再占缓存空间（旧实现从 index=0 写满整文件，此断言必红）
+    expect(await readCachedChunk(keys, 0)).toBeUndefined();
+    expect(await readCachedChunk(keys, 1)).toBeUndefined();
+    // 仅未确认的第 3 片被缓存，且 meta 记录基准偏移
+    expect(await readCachedChunk(keys, 2)).toBeDefined();
+    expect((await getFileCacheMeta(keys))?.cachedFromIndex).toBe(2);
+  });
+
+  it("T-54：已传大部分时预检字节 ≡ 实际写入字节（紧配额不误放行越界）", async () => {
+    const { file, fileRef } = createFixture("cache-quota-bound", 10, 4);
+    file.uploadedChunks = 2; // 待缓存 2 字节
+    // cacheable = (quota - usage) * 0.8 = (100 - 96) * 0.8 = 3.2；
+    // pendingBytes=2 通过预检，整文件 10 不通过——旧实现会写满整文件越界。
+    vi.stubGlobal("navigator", {
+      storage: { estimate: async () => ({ quota: 100, usage: 96 }) },
+    });
+
+    const status = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+
+    expect(status).toBe("ready");
+    const keys = { instanceId: "inst", fileId: file.id };
+    // 实际只落盘待缓存的 1 片；已确认的 2 片不被写回
+    expect(await readCachedChunk(keys, 0)).toBeUndefined();
+    expect(await readCachedChunk(keys, 1)).toBeUndefined();
+    expect(await readCachedChunk(keys, 2)).toBeDefined();
+  });
+
+  it("T-54：已确认分片覆盖全文件时跳过缓存（无可缓存内容，不写就绪标记）", async () => {
+    const { file, fileRef } = createFixture("cache-done", 10, 4);
+    file.uploadedChunks = 3; // 全部 3 片已确认
+
+    const status = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+
+    expect(status).toBe("skipped");
+    expect(await isFileCacheReady("inst", file.id)).toBe(false);
+    expect(
+      await getFileCacheMeta({ instanceId: "inst", fileId: file.id })
+    ).toBeUndefined();
   });
 
   it("按可用空间的 80% 预检：够则缓存，不足降级为 insufficient-space", async () => {

@@ -43,6 +43,12 @@ export interface ChunkCacheMeta {
   chunkSize: number;
   chunkCount: number;
   createdAt: number;
+  /**
+   * T-54：缓存起始分片下标。已确认上传的分片（`index < cachedFromIndex`）不再落盘，
+   * 缓存只为「尚未确认、需续传」的分片服务；读取端只应消费 `[cachedFromIndex, chunkCount)`
+   * 范围。缺省 0 表示全量缓存（首次选择 / 刷新后重新预热场景）。
+   */
+  cachedFromIndex?: number;
 }
 
 export interface ChunkCacheKey {

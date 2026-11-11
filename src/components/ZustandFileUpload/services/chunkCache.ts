@@ -157,6 +157,15 @@ const runPrime = async (
   const chunkSize = resolveChunkSize(file);
   const chunkCount = resolveChunkCount(file, chunkSize);
   const pendingBytes = resolvePendingBytes(file, chunkSize, chunkCount);
+  // T-54：已确认上传的分片无需再占缓存空间，预热只从「已确认分片之后」写起。
+  // 实际写入字节因此正好等于上面的 `pendingBytes`，与预检/上限口径统一——
+  // 旧实现从 index=0 写满全部分片，导致预检按 pendingBytes 放行、实际却写满整文件，
+  // 配额或 maxFileSize 落在 (pendingBytes, fullFileSize) 之间时会通过预检却在写入时
+  // 触发 QuotaExceededError，且 maxFileSize 上限形同虚设。
+  const startIndex = Math.min(
+    Math.max(file.uploadedChunks ?? 0, 0),
+    chunkCount
+  );
 
   // 可选的固定上限：按「待缓存分片字节」判断，默认不限制。
   if (
@@ -173,6 +182,12 @@ const runPrime = async (
       return "ready";
     }
 
+    // 已确认分片已覆盖全部文件：无可缓存内容，跳过（不写就绪标记，
+    // 否则会留下「ready 但分片为空」的误导状态导致续传时缺片降级）。
+    if (startIndex >= chunkCount) {
+      return "skipped";
+    }
+
     // 按真实可用空间判断：待缓存字节不得超过 (quota - usage) 的 80%。
     const quota = await readQuota();
     if (quota && quota.quota > 0) {
@@ -187,7 +202,7 @@ const runPrime = async (
     // 若上传 Worker 在预热期间确认/清理了分片（代际被 bump），过期写回会被忽略。
     const generation = await readGeneration(keys);
 
-    let index = 0;
+    let index = startIndex;
     while (index < chunkCount) {
       if (entry.cancelled) {
         await deleteFileCache(keys).catch(() => undefined);
@@ -231,6 +246,7 @@ const runPrime = async (
       chunkSize,
       chunkCount,
       createdAt: file.createdAt,
+      cachedFromIndex: startIndex,
     });
     return "ready";
   } catch {
