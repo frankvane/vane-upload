@@ -170,6 +170,32 @@ const runExclusive = async (operation) => {
   }
 };
 
+// 按 key 串行化的互斥：不同 key 互不阻塞，同 key 严格按到达顺序执行。
+// 用于把「读 usage → 校验 → 写盘 → 落库」这类 check-then-act 序列纳入临界区，
+// 否则并发请求各自读到同一份过期状态会全部通过校验（T-37）。
+const keyedQueues = new Map();
+
+const runExclusiveByKey = async (key, operation) => {
+  const normalizedKey = String(key);
+  const previous = keyedQueues.get(normalizedKey) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  // 先占位再等待前序：后续请求会链接到本请求的 gate，排在本请求之后。
+  keyedQueues.set(normalizedKey, gate);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    // 只有仍排在本请求之后没有后来者占位时才删除，避免误删后来者的 gate。
+    if (keyedQueues.get(normalizedKey) === gate) {
+      keyedQueues.delete(normalizedKey);
+    }
+  }
+};
+
 const enqueueChunkState = (chunkState) => {
   const normalized = normalizeChunkState(chunkState);
   if (Number.isNaN(normalized.chunk_index)) {
@@ -272,6 +298,7 @@ module.exports = {
   enqueueChunkState,
   flushPendingChunkStates,
   flushFileChunkStates,
+  runExclusiveByKey,
   getPendingChunkStates,
   dropPendingChunkIndexes,
   getQueueHealth,

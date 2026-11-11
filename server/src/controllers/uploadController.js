@@ -23,6 +23,7 @@ const { parseStrictInt } = require("../utils/validate");
 const {
   enqueueChunkState,
   flushFileChunkStates,
+  runExclusiveByKey,
 } = require("../services/chunkStateQueue");
 const {
   isSqliteBusyError,
@@ -241,6 +242,14 @@ exports.abortUpload = async (req, res) => {
     const userId = getUserId(req);
     const storageId = getStorageId(req, safeFileId);
 
+    // T-38：merge 从 acquire 合并锁到 finally 释放的整个「读片 → 落盘 → 清理 →
+    // 落库」周期都登记在 getMergingStorageIds() 中。此时继续清理源分片会与
+    // merge 的读片/落盘交叉，造成 ENOENT 或「产物已落盘 + FileChunk 归零」分裂；
+    // 命中即明确拒绝，让调用方稍后重试，而不是删到一半。
+    if (exports.getMergingStorageIds().has(storageId)) {
+      return jsonError(res, 409, "文件正在合并中，请稍后重试");
+    }
+
     const cleared = await resetChunkResults(storageId, userId);
     return jsonOk(res, { cleared });
   } catch (error) {
@@ -289,75 +298,104 @@ exports.uploadChunk = async (req, res) => {
       });
     }
 
-    // VU-03/04/11：写入前做累计配额校验（单文件累计字节 + 分片数）。
-    // 配额直接来自 DB 聚合（FileChunk.size / count），是重启/并发安全的 source of truth，
-    // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
-    // 覆盖重传同一 index 按差额计费，避免覆盖写被重复计费。
-    const usage = await getChunkUsage(storageId);
-    const replacedBytes = existingChunk ? existingChunk.size : 0;
-    const nextBytes = usage.bytes - replacedBytes + req.file.buffer.length;
-    const nextCount = usage.count + (existingChunk ? 0 : 1);
-    if (nextBytes > getMaxUploadSizeBytes()) {
-      return jsonError(res, 413, "文件大小超过允许的最大值", {
-        maxMb: Math.round(getMaxUploadSizeBytes() / 1024 / 1024),
-      });
-    }
-    if (nextCount > getMaxChunks()) {
-      return jsonError(res, 400, "total 超过允许的最大分片数", {
-        max: getMaxChunks(),
-      });
-    }
+    // T-37：配额的「读 usage → 三级校验 → 写盘 → enqueue → flush」是一次
+    // check-then-act。并发请求若各自读到同一份 usage 会全部通过校验，突破
+    // file / global / user 三级上限。用全局 key 串行化整个临界区：global 维度
+    // 天然全局互斥，user / file 维度也被同一把锁覆盖，且单 key 不会死锁。
+    // 校验失败以返回值传回外层统一响应，避免在锁内直接写 res 造成二次响应。
+    const rejection = await runExclusiveByKey("upload-quota", async () => {
+      // VU-03/04/11：写入前做累计配额校验（单文件累计字节 + 分片数）。
+      // 配额直接来自 DB 聚合（FileChunk.size / count），是重启/并发安全的 source of truth，
+      // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
+      // 覆盖重传同一 index 按差额计费，避免覆盖写被重复计费。
+      const usage = await getChunkUsage(storageId);
+      const replacedBytes = existingChunk ? existingChunk.size : 0;
+      const nextBytes = usage.bytes - replacedBytes + req.file.buffer.length;
+      const nextCount = usage.count + (existingChunk ? 0 : 1);
+      if (nextBytes > getMaxUploadSizeBytes()) {
+        return {
+          statusCode: 413,
+          message: "文件大小超过允许的最大值",
+          data: { maxMb: Math.round(getMaxUploadSizeBytes() / 1024 / 1024) },
+        };
+      }
+      if (nextCount > getMaxChunks()) {
+        return {
+          statusCode: 400,
+          message: "total 超过允许的最大分片数",
+          data: { max: getMaxChunks() },
+        };
+      }
 
-    // VU-03（全局维度）：换 file_id 也不能突破进程级总容量。
-    const globalUsage = await getGlobalChunkUsage();
-    const nextGlobalBytes = globalUsage.bytes - replacedBytes + req.file.buffer.length;
-    const nextGlobalCount = globalUsage.count + (existingChunk ? 0 : 1);
-    if (nextGlobalBytes > getMaxTotalUploadSizeBytes()) {
-      return jsonError(res, 413, "存储配额已用尽", {
-        maxMb: Math.round(getMaxTotalUploadSizeBytes() / 1024 / 1024),
-      });
-    }
-    if (nextGlobalCount > getMaxTotalChunks()) {
-      return jsonError(res, 400, "分片存储配额已用尽", {
-        max: getMaxTotalChunks(),
-      });
-    }
+      // VU-03（全局维度）：换 file_id 也不能突破进程级总容量。
+      const globalUsage = await getGlobalChunkUsage();
+      const nextGlobalBytes =
+        globalUsage.bytes - replacedBytes + req.file.buffer.length;
+      const nextGlobalCount = globalUsage.count + (existingChunk ? 0 : 1);
+      if (nextGlobalBytes > getMaxTotalUploadSizeBytes()) {
+        return {
+          statusCode: 413,
+          message: "存储配额已用尽",
+          data: { maxMb: Math.round(getMaxTotalUploadSizeBytes() / 1024 / 1024) },
+        };
+      }
+      if (nextGlobalCount > getMaxTotalChunks()) {
+        return {
+          statusCode: 400,
+          message: "分片存储配额已用尽",
+          data: { max: getMaxTotalChunks() },
+        };
+      }
 
-    // VU-03（user 维度）：同一凭据不断更换 file_id 也不能无限占用存储。
-    // 覆盖写只按差额计费；若该分片此前不计入本用户，则按新增计。
-    const userUsage = await getUserChunkUsage(userId);
-    const replacedCounted =
-      Boolean(existingChunk) && userUsage.bytes >= replacedBytes;
-    const nextUserBytes =
-      userUsage.bytes -
-      (replacedCounted ? replacedBytes : 0) +
-      req.file.buffer.length;
-    const nextUserCount = userUsage.count + (replacedCounted ? 0 : 1);
-    if (nextUserBytes > getMaxUserUploadSizeBytes()) {
-      return jsonError(res, 413, "用户存储配额已用尽", {
-        maxMb: Math.round(getMaxUserUploadSizeBytes() / 1024 / 1024),
-      });
-    }
-    if (nextUserCount > getMaxUserChunks()) {
-      return jsonError(res, 400, "用户分片配额已用尽", {
-        max: getMaxUserChunks(),
-      });
-    }
+      // VU-03（user 维度）：同一凭据不断更换 file_id 也不能无限占用存储。
+      // 覆盖写只按差额计费；若该分片此前不计入本用户，则按新增计。
+      const userUsage = await getUserChunkUsage(userId);
+      const replacedCounted =
+        Boolean(existingChunk) && userUsage.bytes >= replacedBytes;
+      const nextUserBytes =
+        userUsage.bytes -
+        (replacedCounted ? replacedBytes : 0) +
+        req.file.buffer.length;
+      const nextUserCount = userUsage.count + (replacedCounted ? 0 : 1);
+      if (nextUserBytes > getMaxUserUploadSizeBytes()) {
+        return {
+          statusCode: 413,
+          message: "用户存储配额已用尽",
+          data: { maxMb: Math.round(getMaxUserUploadSizeBytes() / 1024 / 1024) },
+        };
+      }
+      if (nextUserCount > getMaxUserChunks()) {
+        return {
+          statusCode: 400,
+          message: "用户分片配额已用尽",
+          data: { max: getMaxUserChunks() },
+        };
+      }
 
-    // 写盘 + 落库同步化（VU-04）：先写磁盘，再 enqueue 含 size 的状态，
-    // 然后强制 flush 本 file 的 pending，确保响应 200 前该分片已持久化到 DB。
-    // 这消除了「磁盘已写、DB 未落」的崩溃窗口，使后续配额查询基于准确的 DB 聚合。
-    await writeRegularFile(chunkPath, req.file.buffer);
-    enqueueChunkState({
-      file_id: storageId,
-      chunk_index: index,
-      status: 1,
-      size: req.file.buffer.length,
-      user_id: userId,
-      upload_time: new Date(),
-      chunk_md5: chunk_md5 || chunkMd5,
+      // 写盘 + 落库同步化（VU-04）：先写磁盘，再 enqueue 含 size 的状态，
+      // 然后强制 flush 本 file 的 pending，确保响应 200 前该分片已持久化到 DB。
+      // 这消除了「磁盘已写、DB 未落」的崩溃窗口，使后续配额查询基于准确的 DB 聚合。
+      await writeRegularFile(chunkPath, req.file.buffer);
+      enqueueChunkState({
+        file_id: storageId,
+        chunk_index: index,
+        status: 1,
+        size: req.file.buffer.length,
+        user_id: userId,
+        upload_time: new Date(),
+        chunk_md5: chunk_md5 || chunkMd5,
+      });
+      await flushFileChunkStates(storageId);
+      return null;
     });
-    await flushFileChunkStates(storageId);
+    if (rejection) {
+      return jsonError(
+        res,
+        rejection.statusCode,
+        rejection.message,
+        rejection.data
+      );
+    }
 
     return jsonOk(res);
   } catch (error) {

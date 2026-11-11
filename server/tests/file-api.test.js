@@ -327,3 +327,92 @@ test("E2E-03：POST /api/file/abort 幂等，缺少 file_id 时返回 400", asyn
   const missingRes = await request(app).post("/api/file/abort").send({});
   assert.equal(missingRes.status, 400);
 });
+
+// T-38：abort 与 merge 并发。让 merge 稳定停在「读第 0 个分片」处（此时它已持有
+// 合并锁、整个读片→落盘→清理周期尚未结束），再发起 abort，构造「合并进行中删源分片」。
+// 期望：要么 merge 完整成功、要么 abort 明确 409；不得出现 ENOENT 崩溃，也不得出现
+// 「产物已落盘 + FileChunk 归零」的状态分裂。
+test("T-38：abort × merge 并发，合并成功或明确 409，无 ENOENT / 状态分裂", async () => {
+  const chunkBuffer = Buffer.from("t38-abort-merge-payload", "utf8");
+  const chunkMd5 = md5Buffer(chunkBuffer);
+  const fileId = "t38_abort_merge_file";
+  const fileName = "t38-abort-merge.bin";
+  const chunkPath = buildChunkPath(scoped(fileId), 0);
+
+  const uploadRes = await request(app)
+    .post("/api/file/upload")
+    .field("file_id", fileId)
+    .field("index", "0")
+    .field("chunk_md5", chunkMd5)
+    .attach("chunk", chunkBuffer, { filename: "chunk-0.bin" });
+  assert.equal(uploadRes.status, 200);
+
+  const originalReadFile = fs.promises.readFile;
+  let signalRead;
+  const readReached = new Promise((resolve) => {
+    signalRead = resolve;
+  });
+  let releaseRead;
+  const readGate = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  fs.promises.readFile = async (...args) => {
+    if (String(args[0]) === chunkPath) {
+      signalRead();
+      await readGate;
+    }
+    return originalReadFile.apply(fs.promises, args);
+  };
+
+  let mergeRes;
+  let abortRes;
+  try {
+    // supertest 的 Test 是惰性的，只有 .then/.end 才会真正发请求；
+    // 这里立即触发，让 merge 与后续 abort 构成真实并发。
+    const mergePromise = request(app)
+      .post("/api/file/merge")
+      .send({
+        file_id: fileId,
+        md5: chunkMd5,
+        name: fileName,
+        size: chunkBuffer.length,
+        total: 1,
+      })
+      .then((res) => res);
+    await readReached; // merge 已进入读片临界区，正在合并中
+    abortRes = await request(app)
+      .post("/api/file/abort")
+      .send({ file_id: fileId });
+    releaseRead();
+    mergeRes = await mergePromise;
+  } finally {
+    fs.promises.readFile = originalReadFile;
+  }
+
+  const mergeOk = mergeRes.status === 200;
+  const abortRejected = abortRes.status === 409;
+  assert.ok(
+    mergeOk || abortRejected,
+    `并发结果不干净：merge=${mergeRes.status} (${mergeRes.body?.message}), abort=${abortRes.status}`
+  );
+  // 源分片被 abort 删掉后 merge 读片会抛 ENOENT → 500，绝不允许。
+  assert.ok(
+    mergeRes.status < 500,
+    `merge 不得因源分片消失而 ENOENT 崩溃：${mergeRes.body?.message}`
+  );
+
+  // 状态不变量：产物一旦落盘，该 storageId 下不得残留被 abort 归零（status=0）的分片。
+  const produced = await File.findOne({
+    where: { md5: chunkMd5, size: chunkBuffer.length, status: 1 },
+  });
+  if (produced) {
+    const zeroed = await FileChunk.count({
+      where: { file_id: scoped(fileId), status: 0 },
+    });
+    assert.equal(
+      zeroed,
+      0,
+      "产物已落盘时不得同时残留被 abort 归零的分片状态"
+    );
+  }
+});

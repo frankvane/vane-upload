@@ -8,7 +8,7 @@ const request = require("supertest");
 
 process.env.NODE_ENV = "test";
 process.env.AUTH_MODE = "secure";
-process.env.FILE_AUTH_TOKEN = "quota-a,quota-b";
+process.env.FILE_AUTH_TOKEN = "quota-a,quota-b,quota-c";
 process.env.RATE_LIMIT_ENABLED = "false";
 process.env.CHUNK_STATE_FLUSH_INTERVAL_MS = "60000";
 process.env.CHUNK_STATE_MAX_PENDING = "99999";
@@ -69,4 +69,30 @@ test("P1-4：同一用户更换 file_id 仍受分片数配额限制", async () =
   const second = await uploadChunk("quota-b", "q-b-2", 0, Buffer.alloc(10, 4));
   assert.equal(second.status, 400);
   assert.equal(second.body.message, "用户分片配额已用尽");
+});
+
+// T-37：配额 check-then-act 的并发突破。10 个 upload 同时到达时，若
+// 「读 usage → 三级校验 → 写盘 → enqueue → flush」没有互斥，每个请求都会
+// 读到空的 user usage 并通过校验，MAX_USER_CHUNKS=1 形同虚设。
+test("T-37：Promise.all 并发 10 个 upload 不得突破 user 维度配额", async () => {
+  const token = "quota-c"; // 全新凭据，DB 中不含该用户的历史分片
+  const results = await Promise.all(
+    Array.from({ length: 10 }, (_, i) =>
+      uploadChunk(token, `q-c-${i}`, 0, Buffer.alloc(16, 0x40 + i))
+    )
+  );
+  const okCount = results.filter((r) => r.status === 200).length;
+  const rejected = results.filter(
+    (r) => r.status === 413 || r.status === 400
+  ).length;
+  assert.ok(
+    rejected >= 9,
+    `并发突破配额：期望至少 9 个 413/400，实际 rejected=${rejected}, ok=${okCount}, statuses=[${results
+      .map((r) => r.status)
+      .join(",")}]`
+  );
+  assert.ok(
+    okCount <= 1,
+    `成功落盘的请求不得超过 MAX_USER_CHUNKS=1，实际 ${okCount}`
+  );
 });

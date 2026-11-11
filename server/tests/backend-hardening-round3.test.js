@@ -94,6 +94,35 @@ test("VU-33：危险扩展名 evil.html / evil.svg / evil.exe 合并返回 415�
   assert.deepEqual(staging, [], "415 时 staging 必须清理");
 });
 
+// ---------------------------------------------------------------- T-39
+test("T-39：双扩展名 payload.html.png 承载 HTML 内容，合并返回 415，uploads 零残留", async () => {
+  const content = Buffer.from(
+    "<html><body><script>alert(1)</script></body></html>"
+  );
+  const fileId = "t39-double-ext";
+  assert.equal((await uploadChunk(fileId, 0, content)).status, 200);
+  const res = await mergeOne({
+    fileId,
+    name: "payload.html.png",
+    buffer: content,
+  });
+  assert.equal(res.status, 415, "双扩展名不得绕过危险类型校验");
+  assert.match(res.body.message, /不允许上传/);
+  const leaked = fs
+    .readdirSync(UPLOADS_DIR)
+    .filter((name) => name.startsWith(scoped(fileId)));
+  assert.deepEqual(leaked, [], "415 时不得以 .png 落盘");
+});
+
+test("T-39：文件名无害但内容为 HTML 标记，未配白名单时也要 415", async () => {
+  const content = Buffer.from("<script>window.location='//evil'</script>");
+  const fileId = "t39-markup";
+  assert.equal((await uploadChunk(fileId, 0, content)).status, 200);
+  const res = await mergeOne({ fileId, name: "payload.png", buffer: content });
+  assert.equal(res.status, 415, "mime=null 的 HTML 载体不得放行");
+  assert.equal(res.body.data.reason, "dangerous-markup");
+});
+
 test("VU-33：配置 ALLOWED_MIME_TYPES 后，探测不出类型的文件也被拒绝；合法 .bin 仍可合并", async () => {
   const content = Buffer.from("plain text that file-type cannot classify");
   const okId = "f-type-allowed-default";
