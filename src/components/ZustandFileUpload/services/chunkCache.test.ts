@@ -295,4 +295,100 @@ describe("chunkCache（方案 A）", () => {
       new Uint8Array([3, 4])
     );
   });
+
+  /**
+   * T-53：预热全量 put 与 Worker 逐片 delete 乱序的数据一致性缺陷。
+   * 主线程预热写全部分片（fire-and-forget），上传 Worker 每确认一片即
+   * `deleteCachedChunk`（chunkPipeline.ts:165）—— 若预热在上传清理之后写回分片，
+   * 已确认分片会成为孤儿分片（index < uploadedChunks 仍残留）。
+   * 修复：文件级 epoch，过期写回被 store 忽略。这里用 store 原语确定性复现该竞态，
+   * 不依赖真实 Worker 时序——先写第 1 批，再模拟上传逐片确认（bump 代际），
+   * 最后让预热写第 2 批，断言第 2 批被忽略、无孤儿分片。
+   */
+  it("T-53：预热与上传并行时，已确认分片不会被写回（文件级 epoch 拦截过期写）", async () => {
+    const key = { instanceId: "inst", fileId: "race" };
+    const chunkCount = 25; // >16 片，触发多批预热
+    const makeBatch = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => ({
+        index: from + i,
+        data: new Uint8Array([(from + i) % 256]).buffer,
+      }));
+
+    // 模拟预热：先写第 1 批（generation=0，与文件当前 epoch 一致 → 落盘）
+    expect(await putCachedChunks(key, makeBatch(0, 16), 0)).toBe(16);
+
+    // 模拟上传：服务端逐片确认并释放本地缓存（chunkPipeline.ts:165 的真实路径），
+    // 每确认一片即 bump 文件代际
+    for (let index = 0; index < chunkCount; index += 1) {
+      await deleteCachedChunk(key, index);
+    }
+
+    // 此时代际已被 bump 到 chunkCount；预热仍在后台写第 2 批（大文件未写完）。
+    // 修复前：generation=0 不被拦截 → 16..24 写回成为孤儿分片；
+    // 修复后：第 2 批被整体忽略（返回 0）。
+    expect(await putCachedChunks(key, makeBatch(16, chunkCount), 0)).toBe(0);
+
+    // 枚举 chunks store：所有分片（index < uploadedChunks=25）均不应残留
+    let orphan = 0;
+    for (let index = 0; index < chunkCount; index += 1) {
+      if (await readCachedChunk(key, index)) orphan += 1;
+    }
+    expect(orphan).toBe(0);
+  });
+
+  /**
+   * T-53（集成）：预热进行中被上传清理，过期批次被忽略且不写就绪标记。
+   * 用可暂停的文件切片把预热卡在第 2 批之前，注入上传清理（bump 代际）后再放行，
+   * 断言 runPrime 因过期写回被忽略而提前结束（不写 ready 标记）、无孤儿分片。
+   */
+  it("T-53（集成）：预热进行中被上传清理，过期批次被忽略且不写就绪标记", async () => {
+    const { file, fileRef } = createFixture("cache-preempt", 100, 4); // 25 片
+    const originalSlice = fileRef.slice.bind(fileRef);
+    let stallResolve: (() => void) | null = null;
+    let stalled = false;
+    Object.defineProperty(fileRef, "slice", {
+      value: (start = 0, end?: number) => {
+        if (start >= 64 && !stalled) {
+          // 第 2 批（索引 16+，start≥64）卡住，便于注入上传清理后再放行
+          stalled = true;
+          return {
+            arrayBuffer: () =>
+              new Promise<ArrayBuffer>((resolve) => {
+                stallResolve = () => resolve(new Uint8Array([9]).buffer);
+              }),
+          } as unknown as Blob;
+        }
+        return originalSlice(start, end);
+      },
+    });
+
+    const statusPromise = primeChunkCache(file, fileRef, { instanceId: "inst" });
+    // 等首批 16 片落盘（chunk 0 已存在）再注入上传清理
+    await vi.waitFor(async () => {
+      expect(
+        await readCachedChunk({ instanceId: "inst", fileId: file.id }, 0)
+      ).toBeDefined();
+    });
+
+    // 模拟上传：逐片确认并释放本地缓存（bump 代际）
+    for (let index = 0; index < 25; index += 1) {
+      await deleteCachedChunk({ instanceId: "inst", fileId: file.id }, index);
+    }
+
+    // 放行第 2 批：此时代际已被 bump，过期写回应被忽略
+    stallResolve?.();
+
+    const status = await statusPromise;
+    expect(status).toBe("unavailable");
+
+    // 关键：不写就绪标记，且第 2 批未写回任何分片（无孤儿分片）
+    expect(await isFileCacheReady("inst", file.id)).toBe(false);
+    let orphan = 0;
+    for (let index = 0; index < 25; index += 1) {
+      if (await readCachedChunk({ instanceId: "inst", fileId: file.id }, index)) {
+        orphan += 1;
+      }
+    }
+    expect(orphan).toBe(0);
+  });
 });

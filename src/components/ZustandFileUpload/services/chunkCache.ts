@@ -20,6 +20,7 @@ import {
   putCachedChunks,
   putFileCacheMeta,
   clearInstanceCache,
+  readGeneration,
   type ChunkCacheKey,
 } from "./chunkCacheStore";
 
@@ -182,6 +183,10 @@ const runPrime = async (
       }
     }
 
+    // T-53：捕获开始预热时的文件代际；后续每批写入都携带它，store 内比对当前代际。
+    // 若上传 Worker 在预热期间确认/清理了分片（代际被 bump），过期写回会被忽略。
+    const generation = await readGeneration(keys);
+
     let index = 0;
     while (index < chunkCount) {
       if (entry.cancelled) {
@@ -201,7 +206,12 @@ const runPrime = async (
           data: await fileRef.slice(start, end).arrayBuffer(),
         });
       }
-      await putCachedChunks(keys, batch);
+      const written = await putCachedChunks(keys, batch, generation);
+      if (written === 0) {
+        // 本批因代际过期被整体忽略：上传已接管该文件，缓存不再完整。提前结束，
+        // 不写就绪标记（否则会留下「ready 但分片不全」的误导状态）。
+        return "unavailable";
+      }
       index = batchEnd;
     }
 
