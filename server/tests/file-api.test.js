@@ -154,6 +154,62 @@ test("queued chunk state flush retries SQLITE_BUSY and succeeds", async () => {
   }
 });
 
+test("T-60：flush 失败后无孤儿分片、重传同 index 不双重计费", async () => {
+  const chunkBuffer = Buffer.from("t60-flush-fail", "utf8");
+  const chunkMd5 = md5Buffer(chunkBuffer);
+  const fileId = "t60_flush_file";
+  const chunkPath = buildChunkPath(scoped(fileId), 0);
+
+  const originalBulkCreate = FileChunk.bulkCreate;
+  let calls = 0;
+  FileChunk.bulkCreate = async (...args) => {
+    calls += 1;
+    if (calls === 1) {
+      throw new Error("forced flush failure");
+    }
+    return originalBulkCreate.apply(FileChunk, args);
+  };
+
+  try {
+    // 首次：flush 失败 → 应返回 500，且磁盘分片被清理（无孤儿），DB 不落行。
+    const failRes = await request(app)
+      .post("/api/file/upload")
+      .field("file_id", fileId)
+      .field("index", "0")
+      .field("chunk_md5", chunkMd5)
+      .attach("chunk", chunkBuffer, { filename: "chunk-0.bin" });
+    assert.equal(failRes.status, 500);
+
+    assert.ok(
+      !fs.existsSync(chunkPath),
+      "flush 失败后磁盘分片必须被清理，不得留孤儿",
+    );
+    const failedRowCount = await FileChunk.count({
+      where: { file_id: scoped(fileId), chunk_index: 0, status: 1 },
+    });
+    assert.equal(failedRowCount, 0, "flush 失败不应留下 DB 行");
+
+    // 恢复 bulkCreate，重传同 index：replacedBytes 仅计 DB 既有行（此处为 0），
+    // nextBytes 不得为负，且只产生 1 行（不双重计费）。
+    const retryRes = await request(app)
+      .post("/api/file/upload")
+      .field("file_id", fileId)
+      .field("index", "0")
+      .field("chunk_md5", chunkMd5)
+      .attach("chunk", chunkBuffer, { filename: "chunk-0.bin" });
+    assert.equal(retryRes.status, 200);
+    assert.equal(retryRes.body.code, 200);
+
+    const retryRowCount = await FileChunk.count({
+      where: { file_id: scoped(fileId), chunk_index: 0, status: 1 },
+    });
+    assert.equal(retryRowCount, 1, "重传同 index 只应计 1 行（不双重计费）");
+    assert.ok(fs.existsSync(chunkPath), "重传成功后磁盘分片应落盘");
+  } finally {
+    FileChunk.bulkCreate = originalBulkCreate;
+  }
+});
+
 test("merge flushes queued chunk states before merge validation", async () => {
   const chunkBuffer = Buffer.from("merge-queued-state", "utf8");
   const chunkMd5 = md5Buffer(chunkBuffer);

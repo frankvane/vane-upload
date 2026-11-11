@@ -23,6 +23,7 @@ const { parseStrictInt } = require("../utils/validate");
 const {
   enqueueChunkState,
   flushFileChunkStates,
+  dropPendingChunkIndexes,
   runExclusiveByKey,
 } = require("../services/chunkStateQueue");
 const {
@@ -286,9 +287,17 @@ exports.uploadChunk = async (req, res) => {
 
     ensureDir(TMP_UPLOAD_DIR);
     const chunkPath = buildChunkPath(storageId, index);
-    // VU-34：写前用 lstat 拒绝预置的符号链接 / 非普通文件，
-    // 并在真正写入时用 O_NOFOLLOW 堵住 TOCTOU 窗口。
-    const existingChunk = await inspectWriteTarget(chunkPath);
+    // VU-34：写前用 lstat 拒绝预置的符号链接 / 非普通文件，并在真正写入时用 O_NOFOLLOW 堵住 TOCTOU 窗口。
+    await inspectWriteTarget(chunkPath);
+    // T-60：配额以 DB 为唯一 source of truth，replacedBytes 不再依赖磁盘 lstat。
+    // 磁盘孤儿分片（如 flush 失败残留）与 DB 行不一致会让 nextBytes 算错（含负值），
+    // 故改为查 DB 既有行（status:1）的大小作为被覆盖字节。
+    const existingDbChunk = await FileChunk.findOne({
+      where: { file_id: storageId, chunk_index: index, user_id: userId, status: 1 },
+      attributes: ["size"],
+    });
+    const hasExistingChunk = Boolean(existingDbChunk);
+    const replacedBytes = existingDbChunk ? existingDbChunk.size : 0;
     const chunkMd5 = md5Buffer(req.file.buffer);
     if (chunk_md5 && chunk_md5 !== chunkMd5) {
       return jsonError(res, 400, "分片 MD5 校验不匹配", {
@@ -309,9 +318,8 @@ exports.uploadChunk = async (req, res) => {
       // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
       // 覆盖重传同一 index 按差额计费，避免覆盖写被重复计费。
       const usage = await getChunkUsage(storageId);
-      const replacedBytes = existingChunk ? existingChunk.size : 0;
       const nextBytes = usage.bytes - replacedBytes + req.file.buffer.length;
-      const nextCount = usage.count + (existingChunk ? 0 : 1);
+      const nextCount = usage.count + (hasExistingChunk ? 0 : 1);
       if (nextBytes > getMaxUploadSizeBytes()) {
         return {
           statusCode: 413,
@@ -331,7 +339,7 @@ exports.uploadChunk = async (req, res) => {
       const globalUsage = await getGlobalChunkUsage();
       const nextGlobalBytes =
         globalUsage.bytes - replacedBytes + req.file.buffer.length;
-      const nextGlobalCount = globalUsage.count + (existingChunk ? 0 : 1);
+      const nextGlobalCount = globalUsage.count + (hasExistingChunk ? 0 : 1);
       if (nextGlobalBytes > getMaxTotalUploadSizeBytes()) {
         return {
           statusCode: 413,
@@ -351,7 +359,7 @@ exports.uploadChunk = async (req, res) => {
       // 覆盖写只按差额计费；若该分片此前不计入本用户，则按新增计。
       const userUsage = await getUserChunkUsage(userId);
       const replacedCounted =
-        Boolean(existingChunk) && userUsage.bytes >= replacedBytes;
+        Boolean(hasExistingChunk) && userUsage.bytes >= replacedBytes;
       const nextUserBytes =
         userUsage.bytes -
         (replacedCounted ? replacedBytes : 0) +
@@ -385,7 +393,18 @@ exports.uploadChunk = async (req, res) => {
         upload_time: new Date(),
         chunk_md5: chunk_md5 || chunkMd5,
       });
-      await flushFileChunkStates(storageId);
+      try {
+        await flushFileChunkStates(storageId);
+      } catch (flushError) {
+        // T-60：落库失败（如 SQLITE_BUSY）→ 磁盘分片成了无 DB 状态的孤儿。
+        // flushFileChunkStates 失败时会把 pending 放回队列等待重试，故先撤销本分片的
+        // pending（dropPendingChunkIndexes），再清理磁盘分片，保持「磁盘 / DB / pending」
+        // 三者一致——否则会留下「DB 有行、磁盘无文件」的反向脏数据，或重传同 index 时
+        // nextBytes 因口径不一致算错（含负值）。
+        dropPendingChunkIndexes(storageId, [index]);
+        await fs.promises.unlink(chunkPath).catch(() => undefined);
+        throw flushError;
+      }
       return null;
     });
     if (rejection) {

@@ -80,3 +80,32 @@ test("VU-15：janitor 定时器每次扫描都会刷新受保护集合", async (
   assert.ok(!fs.existsSync(path.join(TMP_DIR, "scheduled_0")), "未保护时应被清理");
   stop();
 });
+
+test("T-60：合并 staging（.part）属于受保护 storageId 时不被 TTL 清理", async () => {
+  // staging 命名 `${storedFileName}.${storageId}.part`，storageId 不含点，
+  // 由 `.part` 前最后一段还原。受保护的 storageId 即使在长合并 + 极短 TTL 下也不被截断。
+  writeStaleChunk("stored_name.abc.protected_file.part");
+  const protectedIds = new Set(["protected_file"]);
+  const removed = await sweepOrphanChunks({
+    dir: TMP_DIR,
+    ttlMs: 1000,
+    getProtectedFileIds: () => protectedIds,
+  });
+  assert.ok(
+    !removed.includes("stored_name.abc.protected_file.part"),
+    "受保护的 .part staging 必须保留",
+  );
+});
+
+test("T-60：孤儿合并 staging（.part）且不在受保护集合时照常清理", async () => {
+  writeStaleChunk("stored_name.abc.orphan_file.part");
+  const removed = await sweepOrphanChunks({
+    dir: TMP_DIR,
+    ttlMs: 1000,
+    getProtectedFileIds: () => new Set(["other"]),
+  });
+  assert.ok(
+    removed.includes("stored_name.abc.orphan_file.part"),
+    "孤儿 .part staging 应被清理",
+  );
+});

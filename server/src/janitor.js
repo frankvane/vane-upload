@@ -55,7 +55,16 @@ const sweepOrphanChunks = async ({
 
     // VU-15：分片名 `<storageId>_<index>`，提取 storageId 与受保护集合比对。
     // 只剥离末尾的 `_<digits>`，保留 storageId 内部的下划线（chunkKey 含多个 _）。
-    const fileId = entry.name.replace(/_\d+$/, "");
+    // T-60：合并 staging 名 `<...>.<storageId>.part`（uploadController.js 525-528）也需纳入
+    // 同一套保护——否则长合并 + 极短 TTL 时，正在写入的 staging 会被 TTL 截断。
+    // 两类命名都从文件名还原出 storageId 后再与受保护集合比对。
+    let fileId;
+    const partMatch = entry.name.match(/\.([^.]+)\.part$/);
+    if (partMatch) {
+      fileId = partMatch[1];
+    } else {
+      fileId = entry.name.replace(/_\d+$/, "");
+    }
     if (protectedIds && protectedIds.has(fileId)) {
       continue;
     }
