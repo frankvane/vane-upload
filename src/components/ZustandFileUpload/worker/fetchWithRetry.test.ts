@@ -9,6 +9,9 @@ const URL_SAFE = "https://allowed.example.com/api";
 const ok = () => new Response("ok");
 const badGateway = () =>
   new Response("Bad Gateway", { status: 502, statusText: "Bad Gateway" });
+// Response 的 redirected/url 是只读 getter，无法直接赋值；用普通对象模拟重定向响应。
+const redirectedResponse = (url: string): Response =>
+  ({ status: 200, ok: true, redirected: true, url }) as unknown as Response;
 
 let deps: FetchRetryDeps;
 let debug: ReturnType<typeof vi.fn>;
@@ -119,7 +122,7 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  it("5xx 耗尽重试后拒绝，且不会多打一次请求", async () => {
+  it("5xx 耗尽重试后拒绝，且不会多打一次请求，并上报 retry 消息", async () => {
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(badGateway());
 
     await expect(
@@ -131,6 +134,14 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
       ),
     ).rejects.toThrow("HTTP 错误 502");
     expect(spy).toHaveBeenCalledTimes(2);
+    // T-65：服务端错误重试耗尽时上报「retry」消息（旧实现该分支对 maxRetries>=1 不可达）
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "retry",
+        attemptNumber: 2,
+        retriesLeft: 0,
+      }),
+    );
   });
 
   it("maxRetries=0 时不上报模糊错误，而是发出 retry 消息后拒绝", async () => {
@@ -187,5 +198,44 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
     const res = await fetchWithRetry(URL_SAFE, { method: "GET" }, {}, deps);
     expect(res.ok).toBe(true);
     expect(debug).toHaveBeenCalled();
+  });
+
+  it("T-65：302 重定向到白名单内域名仍放行", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      redirectedResponse("https://allowed.example.com/other"),
+    );
+
+    const res = await fetchWithRetry(
+      URL_SAFE,
+      { method: "GET" },
+      {
+        authHeaders: { Authorization: "Bearer auto" },
+        allowedHosts: ["allowed.example.com"],
+      },
+      deps,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("T-65：302 跨域重定向到非白名单域名则拒绝（二次 host 校验）", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      redirectedResponse("https://evil.example.com/x"),
+    );
+
+    await expect(
+      fetchWithRetry(
+        URL_SAFE,
+        { method: "GET" },
+        {
+          authHeaders: { Authorization: "Bearer auto" },
+          allowedHosts: ["allowed.example.com"],
+        },
+        deps,
+      ),
+    ).rejects.toThrow(/非白名单域名/);
+    // 拒绝而非把响应体交给非预期 host
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "retry" }),
+    );
   });
 });

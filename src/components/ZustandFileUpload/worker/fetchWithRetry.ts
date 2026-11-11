@@ -85,8 +85,11 @@ export async function fetchWithRetry(
         return;
       }
 
-      // 如果超过最大重试次数，则拒绝
-      if (attempts >= maxRetries) {
+      // T-65：maxRetries<=0 视为「不允许任何尝试」，立即以「重试耗尽」上报并拒绝，
+      // 不发起任何请求（保留 F3 / maxRetries:0 的既有语义：零尝试直接失败）。
+      // 注：原 `if (attempts >= maxRetries)` 分支对 maxRetries>=1 实际不可达
+      // （重试调度在最终 reject 之前就终止了 attempts 增长），属死代码，已删除。
+      if (maxRetries <= 0) {
         const error = new Error(`已达到最大重试次数: ${maxRetries}`);
         debug(
           `请求最终失败: ${url}`,
@@ -96,7 +99,7 @@ export async function fetchWithRetry(
         postMessage({
           type: "retry",
           error: error.message,
-          attemptNumber: maxRetries,
+          attemptNumber: 0,
           retriesLeft: 0,
           message: `已达到最大重试次数(${maxRetries}次)，上传失败`,
         });
@@ -145,6 +148,30 @@ export async function fetchWithRetry(
         });
 
         clearTimeout(timeoutId);
+
+        // T-65：重定向二次 host 校验。fetch 跟随 3xx 后 response.url 为最终地址；
+        // 若跨域重定向到非白名单域名，浏览器虽会剥离 Authorization，仍显式拒绝
+        // 该响应，避免把响应体交给非预期 host（及潜在头/凭证泄漏）。
+        if (
+          response.redirected &&
+          !isUrlAllowed(response.url, allowedHosts ?? [], baseOrigin)
+        ) {
+          debug(
+            `请求被重定向到非白名单域名: ${url}`,
+            { finalUrl: response.url },
+            true,
+          );
+          postMessage({
+            type: "retry",
+            error: `重定向到非白名单域名: ${response.url}`,
+            attemptNumber: currentAttempt,
+            retriesLeft: 0,
+            message: "请求被重定向到非白名单域名，上传失败",
+          });
+          reject(new Error(`重定向到非白名单域名，已拒绝: ${response.url}`));
+          return;
+        }
+
         debug(`请求完成: ${url} (尝试 ${currentAttempt}/${maxRetries})`, {
           status: response.status,
           statusText: response.statusText,
@@ -194,6 +221,18 @@ export async function fetchWithRetry(
             return;
           }
 
+          // T-65：服务端错误（5xx）重试耗尽时上报「retry」消息——旧实现该上报分支
+          // 对 maxRetries>=1 不可达（属死代码），只在 maxRetries<=0 才触发；
+          // 现在在真实拒绝点补上报，让桥接层能感知「已放弃重试」。
+          if (isServerError) {
+            postMessage({
+              type: "retry",
+              error: error.message,
+              attemptNumber: currentAttempt,
+              retriesLeft: Math.max(0, maxRetries - currentAttempt),
+              message: `已达到最大重试次数(${maxRetries}次)，上传失败`,
+            });
+          }
           reject(error);
           return;
         }
