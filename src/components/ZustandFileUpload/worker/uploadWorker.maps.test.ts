@@ -118,6 +118,7 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       abort: 0,
       hosts: 0,
       stats: 0,
+      cancelled: 0,
     });
   });
 
@@ -133,6 +134,7 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       abort: 0,
       hosts: 0,
       stats: 0,
+      cancelled: 0,
     });
 
     // 第二个：普通上传（/instant 不命中，但此测试只关心 Map 清理，不阻塞于分片上传）
@@ -154,6 +156,7 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       abort: 0,
       hosts: 0,
       stats: 0,
+      cancelled: 0,
     });
   });
 
@@ -178,6 +181,7 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       abort: 0,
       hosts: 0,
       stats: 0,
+      cancelled: 0,
     });
   });
 
@@ -197,6 +201,7 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       abort: 0,
       hosts: 0,
       stats: 0,
+      cancelled: 0,
     });
   });
 });

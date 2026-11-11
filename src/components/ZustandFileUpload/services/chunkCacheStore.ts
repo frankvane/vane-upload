@@ -130,16 +130,57 @@ const txDone = (tx: IDBTransaction): Promise<void> =>
     tx.onabort = () => reject(tx.error ?? new Error("分片缓存事务已中止"));
   });
 
+/**
+ * T-73：只读事务也可能被浏览器中止（配额回收 / 其它标签页升级 schema /
+ * onversionchange 关闭连接）。IDB 规范里事务 abort 时未完成的 request **不会**
+ * 触发 error 事件，因此只监听 request.onsuccess/onerror 的读 Promise 会永久挂起
+ * （或拿到不完整的结果）。这里用 addEventListener 追加事务级失败通道，不覆盖
+ * `txDone` 通过 onabort/onerror 属性注册的处理器，写事务的语义保持不变。
+ */
+const bindTxFailure = (
+  tx: IDBTransaction,
+  reject: (reason: unknown) => void,
+  message: string,
+): void => {
+  // 事务级 error 事件通常先于 abort 到达，且此刻 tx.error 可能尚未赋值。若立即
+  // reject，会用一个泛化 Error 盖掉随后真正的 AbortError（也盖掉 request.onerror
+  // 能给出的精确 request.error）。因此 error 通道只在已有明确 tx.error 时结算，
+  // 其余等 abort 事件携带真正的 AbortError，或交给 request.onerror。
+  tx.addEventListener("error", () => {
+    if (tx.error) {
+      reject(tx.error);
+    }
+  });
+  tx.addEventListener("abort", () =>
+    reject(tx.error ?? new Error(`${message}（事务已中止）`)),
+  );
+};
+
+/** 统一的只读请求：request 级成功/失败 + 事务级中止/失败，任一失败都 reject。 */
+const readRequest = <T>(
+  request: IDBRequest<T>,
+  message: string,
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    // TS DOM 定义里 request.transaction 在请求结束后可能为 null；此时请求已
+    // 结算，无需（也无法）再挂事务级监听。
+    const tx = request.transaction;
+    if (tx) {
+      bindTxFailure(tx, reject, message);
+    }
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error(message));
+  });
+
 /** 在事务内同步读取一个值（供 epoch 比对等原子操作使用）。 */
 const idbGet = <T>(
   store: IDBObjectStore,
   key: IDBValidKey,
 ): Promise<T | undefined> =>
-  new Promise<T | undefined>((resolve, reject) => {
-    const request = store.get(key);
-    request.onsuccess = () => resolve(request.result as T | undefined);
-    request.onerror = () => reject(request.error ?? new Error("读取失败"));
-  });
+  readRequest<T | undefined>(
+    store.get(key) as IDBRequest<T | undefined>,
+    "读取失败",
+  );
 
 /** 单个文件的键范围：`[instanceId, fileId, 0] ~ [instanceId, fileId, MAX]` */
 const fileRange = (key: ChunkCacheKey): IDBKeyRange =>
@@ -167,6 +208,15 @@ const deleteRange = (
     }
     store.delete(cursor.key);
     cursor.continue();
+  };
+  // T-73：游标删除失败时中止整个事务，让外层 txDone 能 reject，
+  // 而不是「静默少删几片」却报告清理成功。
+  request.onerror = () => {
+    try {
+      request.transaction?.abort();
+    } catch {
+      // 事务已结束：txDone 会按最终状态结算
+    }
   };
 };
 
@@ -217,30 +267,28 @@ export const readCachedChunk = async (
   index: number,
 ): Promise<ArrayBuffer | undefined> => {
   const db = await openDb();
-  return new Promise<ArrayBuffer | undefined>((resolve, reject) => {
-    const tx = db.transaction(CHUNKS_STORE, "readonly");
-    const request = tx
+  const tx = db.transaction(CHUNKS_STORE, "readonly");
+  return readRequest<ArrayBuffer | undefined>(
+    tx
       .objectStore(CHUNKS_STORE)
-      .get([key.instanceId, key.fileId, index]);
-    request.onsuccess = () =>
-      resolve(request.result as ArrayBuffer | undefined);
-    request.onerror = () =>
-      reject(request.error ?? new Error("读取分片缓存失败"));
-  });
+      .get([key.instanceId, key.fileId, index]) as IDBRequest<
+      ArrayBuffer | undefined
+    >,
+    "读取分片缓存失败",
+  );
 };
 
 /** 读取文件当前代际（缺省 0）。 */
 export const readGeneration = async (key: ChunkCacheKey): Promise<number> => {
   const db = await openDb();
-  return new Promise<number>((resolve, reject) => {
-    const tx = db.transaction(GENERATIONS_STORE, "readonly");
-    const request = tx
+  const tx = db.transaction(GENERATIONS_STORE, "readonly");
+  const result = await readRequest<number | undefined>(
+    tx
       .objectStore(GENERATIONS_STORE)
-      .get([key.instanceId, key.fileId]);
-    request.onsuccess = () =>
-      resolve((request.result as number | undefined) ?? 0);
-    request.onerror = () => reject(request.error ?? new Error("读取代际失败"));
-  });
+      .get([key.instanceId, key.fileId]) as IDBRequest<number | undefined>,
+    "读取代际失败",
+  );
+  return result ?? 0;
 };
 
 /**
@@ -288,18 +336,16 @@ export const getFileCacheMeta = async (
   key: ChunkCacheKey,
 ): Promise<ChunkCacheMeta | undefined> => {
   const db = await openDb();
-  return new Promise<ChunkCacheMeta | undefined>((resolve, reject) => {
-    const tx = db.transaction(FILES_STORE, "readonly");
-    const request = tx
+  const tx = db.transaction(FILES_STORE, "readonly");
+  const meta = await readRequest<ChunkCacheMeta | undefined>(
+    tx
       .objectStore(FILES_STORE)
-      .get([key.instanceId, key.fileId]);
-    request.onsuccess = () => {
-      const meta = request.result as ChunkCacheMeta | undefined;
-      resolve(meta?.state === "ready" ? meta : undefined);
-    };
-    request.onerror = () =>
-      reject(request.error ?? new Error("读取分片缓存元数据失败"));
-  });
+      .get([key.instanceId, key.fileId]) as IDBRequest<
+      ChunkCacheMeta | undefined
+    >,
+    "读取分片缓存元数据失败",
+  );
+  return meta?.state === "ready" ? meta : undefined;
 };
 
 /**
@@ -340,6 +386,8 @@ export const listReadyFileIds = async (
 
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(FILES_STORE, "readonly");
+    // T-73：游标遍历同样要感知事务级中止，否则遍历中途 abort 会永久挂起。
+    bindTxFailure(tx, reject, "列举分片缓存失败");
     const request = tx
       .objectStore(FILES_STORE)
       .openCursor(instanceRange(instanceId));

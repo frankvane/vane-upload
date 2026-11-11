@@ -78,6 +78,13 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       taskAllowedHosts.delete(fid);
       taskStats.delete(fid);
       postCancelled(fid);
+      // T-73：CANCEL 消息本身没有赋值 fileId，外层 finally 覆盖不到这次调用。
+      // 任务仍在跑时，去重标记留给该任务收敛时的 finally 清理（否则 pipeline
+      // 会再回一条 cancelled）；任务已结束（没有 controller）时无人清理，
+      // 必须自己删，避免同一 id 后续再收到 CANCEL 被静默吞掉。
+      if (!controller) {
+        cancelledNotified.delete(fid);
+      }
       return;
     }
 
@@ -97,6 +104,13 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         uploadedChunks: stats?.uploadedChunks ?? 0,
         totalChunks: stats?.totalChunks ?? 0,
       });
+      // T-73：pause 分支在 fileId 赋值前 return，外层 finally 覆盖不到它。
+      // 这里手动清掉本任务的全部状态，否则任务 Map / 取消去重集会跨任务残留
+      // （该 Worker 后续可能被 bridge 复用处理新任务）。
+      taskAbortControllers.delete(fid);
+      taskAllowedHosts.delete(fid);
+      taskStats.delete(fid);
+      cancelledNotified.delete(fid);
       return;
     }
 
@@ -256,12 +270,15 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         },
         probeExtra,
       ).catch((error: unknown) => {
+        // T-73：取消落在预检在途时不再吞掉 AbortError 继续往下走，改为重新抛出，
+        // 由本 try 的 catch 统一短路并回 cancelled（避免继续发 /status 与 /upload）。
+        if (isCancellation(error, taskSignal)) {
+          throw error;
+        }
         // 预检失败不改变主流程：后续状态查询会退化为全量重传，
         // 真正的鉴权 / 网络错误会在分片上传阶段照常抛出。
         debug("秒传预检请求失败，继续常规流程", { error: String(error) }, true);
-        if (!isCancellation(error, taskSignal)) {
-          precheckFailure = error;
-        }
+        precheckFailure = error;
         return null;
       });
 
@@ -311,6 +328,12 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       }
       debug("已存在分片", { count: existingChunks.size });
     } catch (error) {
+      // T-73：取消落在 /status 在途时同样短路——原先只跳过报错、继续往下进
+      // pipeline，虽然 chunkPipeline 的 signal.aborted 最终会收敛，但会先白跑
+      // 一轮分片准备。重新抛出交给外层 catch 统一回 cancelled。
+      if (isCancellation(error, taskSignal)) {
+        throw error;
+      }
       // 只有「预检 + 状态查询都失败」才退化为全量重传。
       debug("状态查询失败，按全量重传处理", { error: String(error) }, true);
       // E2E-04：两次探测都是连接级失败/5xx → 后端不可用，立即明确报错，
@@ -425,16 +448,19 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
 // 不预物化任务数组）；主线程与预处理 Worker 共用同一实现，避免两套语义漂移。
 
 /**
- * 测试钩子（仅测试使用，不进入业务路径）：暴露模块级任务 Map 的当前尺寸，
- * 用于验证「任务结束（成功 / 取消 / 任一提前 return）后无残留」（T-56 / T-57）。
- * T-57 删除 taskPauseState 后仅剩 3 个；生产代码不调用本函数。
+ * 测试钩子（仅测试使用，不进入业务路径）：暴露模块级任务状态的当前尺寸，
+ * 用于验证「任务结束（成功 / 取消 / 任一提前 return）后无残留」（T-56 / T-57 / T-73）。
+ * T-74 新增的 `cancelledNotified` 去重集合同样必须纳入：它若残留，同一 fileId
+ * 再次上传时的取消确认会被静默吞掉。生产代码不调用本函数。
  */
 export const __test_getTaskMapSizes = (): {
   abort: number;
   hosts: number;
   stats: number;
+  cancelled: number;
 } => ({
   abort: taskAbortControllers.size,
   hosts: taskAllowedHosts.size,
   stats: taskStats.size,
+  cancelled: cancelledNotified.size,
 });
