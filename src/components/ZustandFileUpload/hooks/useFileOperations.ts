@@ -142,6 +142,17 @@ export function useFileOperations(
 
   const handleClearList = useCallback(async (): Promise<boolean> => {
     try {
+      const { files } = engine.store.getState();
+      // T-35 / E2E-03：清空列表 = 放弃所有续传。先中止在途 Worker 并释放 File 引用，
+      // 否则任务收尾会把已删记录写回（刷新后「复活」），分片请求也会继续发。
+      // 服务端已落但不再有合并机会的分片逐文件通知清理，best-effort 不阻塞清空。
+      for (const file of files) {
+        engine.workerPool.cancelUploadTask(file.id);
+        engine.fileRegistry.releaseFileRef(file.id);
+        if (file.hash) {
+          void abortServerChunks(file, uploadConfig).catch(() => undefined);
+        }
+      }
       await engine.storage.clear();
       // 清空列表 = 放弃所有续传：同步清空该实例的全部分片缓存。
       await clearInstanceChunkCache(engine.instanceId);
@@ -152,7 +163,7 @@ export function useFileOperations(
       getMessageApi().error("清空文件列表失败");
       return false;
     }
-  }, [engine, refreshFiles, getMessageApi]);
+  }, [engine, refreshFiles, getMessageApi, uploadConfig]);
 
   const handleRetryAllUpload = useCallback(async (): Promise<{
     success: boolean;

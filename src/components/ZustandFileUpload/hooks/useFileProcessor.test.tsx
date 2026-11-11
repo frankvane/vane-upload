@@ -649,3 +649,120 @@ describe("T-30 自动上传合并窗口（autoUploadDelay）", () => {
     }
   });
 });
+
+describe("T-34 预处理生命周期（重入 / 卸载 / StrictMode）", () => {
+  const completeData = {
+    type: "complete",
+    uploadFiles: [],
+    stats: { processed: 1, total: 1, success: 1, failed: 0, oversized: 0 },
+  };
+
+  const queueOne = (id: string) => {
+    vi.mocked(reconcileIncomingFiles).mockReturnValueOnce({
+      newItems: [
+        {
+          id,
+          fileName: `${id}.png`,
+          fileSize: 100,
+          fileType: "image/png",
+          lastModified: 0,
+          hash: `h-${id}`,
+          hashMode: "full",
+          chunkSize: 1024,
+          chunkCount: 1,
+          status: UploadStatus.QUEUED,
+          progress: 0,
+          createdAt: 1,
+          order: 0,
+        } as UploadFile,
+      ],
+      rebindItems: [],
+      skipped: 0,
+    });
+  };
+
+  const select = (result: {
+    current: { handleFileChange: (e: ChangeEvent<HTMLInputElement>) => void };
+  }) => {
+    act(() => {
+      result.current.handleFileChange(
+        makeEvent([makeFile("x.png", "image/png", 100)])
+      );
+    });
+  };
+
+  it("重入：第二次选择 abort 第一次的预处理 Promise 并解绑旧 Worker", async () => {
+    const { result } = renderHook(() =>
+      useFileProcessor({ uploadAll: vi.fn(async () => true) })
+    );
+
+    await act(async () => {
+      select(result);
+      const first = h.instances[0]!;
+      select(result);
+      // 让旧 Promise 的 reject → catch → finally 走完
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(first.onmessage).toBeNull();
+    });
+    expect(h.instances).toHaveLength(2);
+    expect(h.messageApi.error).not.toHaveBeenCalled();
+  });
+
+  it("卸载后从 await 恢复的预处理结果不得写回、提示或调度自动上传", async () => {
+    vi.useFakeTimers();
+    try {
+      h.config.autoUpload = true;
+      h.config.autoUploadDelay = 120;
+      queueOne("unmount-a");
+      const uploadAll = vi.fn(async () => true);
+      let releaseWrite: () => void = () => undefined;
+      h.engine.storage.setItem.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          })
+      );
+
+      const { result, unmount } = renderHook(() =>
+        useFileProcessor({ uploadAll })
+      );
+      select(result);
+      const worker = h.instances[0]!;
+      await act(async () => {
+        worker.onmessage!({ data: completeData } as MessageEvent);
+      });
+      unmount();
+
+      await act(async () => {
+        releaseWrite();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+
+      expect(uploadAll).not.toHaveBeenCalled();
+      expect(h.storeState.refreshFiles).not.toHaveBeenCalled();
+      expect(h.messageApi.success).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("StrictMode 双挂载后 disposed 标记复位，错误提示不被吞", async () => {
+    const { result } = renderHook(
+      () => useFileProcessor({ uploadAll: vi.fn(async () => true) }),
+      { wrapper: React.StrictMode }
+    );
+
+    select(result);
+    const worker = h.instances[h.instances.length - 1]!;
+    await act(async () => {
+      worker.onerror?.({ message: "预处理失败" } as unknown as ErrorEvent);
+    });
+
+    expect(h.messageApi.error).toHaveBeenCalled();
+  });
+});

@@ -237,7 +237,9 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     expect(h.message.error).toHaveBeenCalledWith("bad");
   });
 
-  it("handleClearList 成功：清空存储 + 刷新 + 成功提示并返回 true", async () => {
+  it("handleClearList 成功：先中止在途 Worker 再清空存储 + 刷新 + 成功提示", async () => {
+    const file = makeFile({ id: "f1", hash: "h1" } as Partial<UploadFile>);
+    h.engine.store.getState.mockReturnValue({ files: [file] });
     const { result } = renderHook(() => useFileOperations(makeBatch()));
 
     let returned = false;
@@ -245,6 +247,10 @@ describe("useFileOperations（动作与错误分支断言）", () => {
       returned = await result.current.handleClearList();
     });
 
+    // T-35：清空列表 = 放弃所有续传，必须先中止在途分片，否则任务收尾会写回记录
+    expect(h.engine.workerPool.cancelUploadTask).toHaveBeenCalledWith("f1");
+    expect(h.engine.fileRegistry.releaseFileRef).toHaveBeenCalledWith("f1");
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalledTimes(1));
     expect(h.engine.storage.clear).toHaveBeenCalledTimes(1);
     expect(h.storeState.refreshFiles).toHaveBeenCalledTimes(1);
     expect(h.message.success).toHaveBeenCalledWith("文件列表已清空");

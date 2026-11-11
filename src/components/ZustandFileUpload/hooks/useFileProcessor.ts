@@ -122,6 +122,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
   } | null>(null);
 
   useEffect(() => {
+    // T-34：StrictMode 会 mount → cleanup → mount 并复用同一份 ref；
+    // 若不在 setup 复位，cleanup 留下的 true 会让第二次挂载永久「已卸载」。
+    disposedRef.current = false;
     return () => {
       disposedRef.current = true;
       if (autoUploadTimerRef.current !== null) {
@@ -242,9 +245,26 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
     setLoading(true);
     const startTime = Date.now();
+    // T-34：本次选择的 settle 句柄，用于 finally 只清自己的 ref，
+    // 避免旧 handler 收尾时把重入后的新句柄误清空。
+    let currentSettle: {
+      resolve: () => void;
+      reject: (reason?: unknown) => void;
+    } | null = null;
 
     const existingWorker = prepareWorkerRef.current;
     if (existingWorker) {
+      // T-34：重入时先 reject 旧 Promise，否则 worker 被 terminate 后
+      // await 永不 settle（loading 卡死），旧结果还可能被写回列表。
+      const pending = pendingPromiseRef.current;
+      if (pending) {
+        pending.reject(
+          new DOMException("新的文件选择已开始，旧预处理中断", "AbortError")
+        );
+        pendingPromiseRef.current = null;
+        existingWorker.onmessage = null;
+        existingWorker.onerror = null;
+      }
       existingWorker.terminate();
       prepareWorkerRef.current = null;
     }
@@ -256,13 +276,22 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
     try {
       await new Promise<void>((resolve, reject) => {
-        pendingPromiseRef.current = { resolve, reject };
+        currentSettle = { resolve, reject };
+        pendingPromiseRef.current = currentSettle;
+        // T-34：卸载后 IIFE 仍可能从 await 处继续执行（Promise 被 reject
+        // 不会中止已启动的 async 函数），每个恢复点都要判活。
+        const abortIfDisposed = (): boolean => {
+          if (!disposedRef.current) return false;
+          reject(new DOMException("组件已卸载，文件预处理中断", "AbortError"));
+          return true;
+        };
         worker.onerror = (event) => {
           reject(new Error(event.message || "文件预处理失败"));
         };
 
         worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
           void (async () => {
+            if (abortIfDisposed()) return;
             const data = event.data;
 
             if (data.type === "progress") {
@@ -418,7 +447,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               }),
             ]);
 
+            if (abortIfDisposed()) return;
             await refreshFiles();
+            if (abortIfDisposed()) return;
             markPerf("queue:persisted");
 
             const resultMessage = `处理完成: ${data.stats.success}个成功, ${
@@ -436,6 +467,7 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               messageApi.info(`已跳过 ${skipped} 个已在队列中的文件`);
             }
 
+            if (abortIfDisposed()) return;
             if (
               uploadConfig.autoUpload &&
               newFiles.length + rebindItems.length > 0 &&
@@ -447,6 +479,8 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               }
               autoUploadTimerRef.current = setTimeout(() => {
                 autoUploadTimerRef.current = null;
+                // 卸载可能发生在 timer 排队之后：不判活就会发起离心上传
+                if (disposedRef.current) return;
                 markPerf("autoupload:timer-fired");
                 void uploadAll();
               }, resolveAutoUploadDelay(uploadConfig.autoUploadDelay));
@@ -472,7 +506,11 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
         messageApi.error(error instanceof Error ? error.message : "文件预处理失败");
       }
     } finally {
-      pendingPromiseRef.current = null;
+      // T-34：只清自己的句柄。旧 handler 因重入被 abort 后收尾时，
+      // 新的选择可能已经写入了新的 settle 句柄。
+      if (pendingPromiseRef.current === currentSettle) {
+        pendingPromiseRef.current = null;
+      }
       if (prepareWorkerRef.current === worker) {
         prepareWorkerRef.current = null;
       }
