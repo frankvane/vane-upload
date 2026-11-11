@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildContentKey,
-  dedupeByContentKey,
   reconcileIncomingFiles,
   type ContentKeyed,
   type RebindableRecord,
@@ -20,8 +19,8 @@ const makeItem = (
   ...over,
 });
 
-describe("uploadDedupe（VU-19 重复文件去重）", () => {
-  it("buildContentKey 以内容指纹（非 id）为基准，同内容不同 id 仍视为重复", () => {
+describe("buildContentKey（T-59 指纹无歧义）", () => {
+  it("同内容不同 id 仍视为重复", () => {
     const a = makeItem("id-1");
     const b = makeItem("id-2");
     expect(buildContentKey(a)).toBe(buildContentKey(b));
@@ -33,41 +32,19 @@ describe("uploadDedupe（VU-19 重复文件去重）", () => {
     expect(buildContentKey(a)).not.toBe(buildContentKey(b));
   });
 
-  it("队列中已有不同文件时，新的不同文件正常入队", () => {
-    const existing = [makeItem("prev", { fileName: "existing.bin" })];
-    const incoming = [makeItem("new", { fileName: "incoming.bin" })];
-    const { newItems, skipped } = dedupeByContentKey(existing, incoming);
-    expect(newItems).toHaveLength(1);
-    expect(newItems[0]?.id).toBe("new");
-    expect(skipped).toBe(0);
-  });
-
-  it("已在队列中的同内容文件再次选择被跳过，只保留一条", () => {
-    const existing = [makeItem("prev")];
-    const incoming = [makeItem("dup")];
-    const { newItems, skipped } = dedupeByContentKey(existing, incoming);
-    expect(newItems).toHaveLength(0);
-    expect(skipped).toBe(1);
-  });
-
-  it("本批内重复选择同一文件只保留一条", () => {
-    const existing: Array<ContentKeyed & { id: string }> = [];
-    const incoming = [makeItem("x"), makeItem("y")];
-    const { newItems, skipped } = dedupeByContentKey(existing, incoming);
-    expect(newItems).toHaveLength(1);
-    expect(skipped).toBe(1);
-  });
-
-  it("队列已有同名同内容记录、本次又选一次 → 全部跳过且 skipped 计数正确", () => {
-    const existing = [makeItem("already")];
-    const incoming = [makeItem("dup1"), makeItem("dup2")];
-    const { newItems, skipped } = dedupeByContentKey(existing, incoming);
-    expect(newItems).toHaveLength(0);
-    expect(skipped).toBe(2);
+  it("值含 | 时不会让两个不同元组拼成同一指纹（T-59 分隔符失真加固）", () => {
+    // 旧实现用 | 拼接，元素/字段含 | 会串扰；现用 NUL 分隔，字段值含 | 也无歧义。
+    const a = makeItem("id-a", { hash: "a|1", fileName: "2" });
+    const b = makeItem("id-b", { hash: "a", fileName: "1|2" });
+    expect(buildContentKey(a)).not.toBe(buildContentKey(b));
+    // 含 | 的文件名不被拆断：同一 fileName（带 |）两次计算指纹一致
+    const c = makeItem("id-c", { fileName: "image/png|alias" });
+    const d = makeItem("id-d", { fileName: "image/png|alias" });
+    expect(buildContentKey(c)).toBe(buildContentKey(d));
   });
 });
 
-describe("reconcileIncomingFiles（E2E-02 跨会话分片键稳定）", () => {
+describe("reconcileIncomingFiles（E2E-02 跨会话分片键稳定 + T-59）", () => {
   const makeRecord = (
     id: string,
     over: Partial<RebindableRecord> = {}
@@ -127,5 +104,37 @@ describe("reconcileIncomingFiles（E2E-02 跨会话分片键稳定）", () => {
     ]);
     expect(newItems.map((item) => item.id)).toEqual(["q-new"]);
     expect(rebindItems).toHaveLength(0);
+  });
+
+  it("队列中已有同内容文件再次选择被跳过，只保留一条", () => {
+    const existing = [makeItem("prev")];
+    const incoming = [makeItem("dup")];
+    const { newItems, skipped } = reconcileIncomingFiles(existing, incoming);
+    expect(newItems).toHaveLength(0);
+    expect(skipped).toBe(1);
+  });
+
+  it("本批内重复选择同一文件只保留一条", () => {
+    const existing: Array<ContentKeyed & { id: string }> = [];
+    const incoming = [makeItem("x"), makeItem("y")];
+    const { newItems, skipped } = reconcileIncomingFiles(existing, incoming);
+    expect(newItems).toHaveLength(1);
+    expect(skipped).toBe(1);
+  });
+
+  it("T-59：无 hash 的记录不参与内容去重（hash 空时不做内容去重）", () => {
+    // 既有记录无 hash：即便 size/name/lm 与入队项相同，也不应被 rebind / 跳过。
+    const existing = [
+      makeRecord("q-nohash", { hash: "" }),
+      makeRecord("q-nohash2", { hash: undefined }),
+    ];
+    const incoming = [makeItem("q-new")];
+    const { newItems, rebindItems, skipped } = reconcileIncomingFiles(
+      existing,
+      incoming
+    );
+    expect(newItems).toHaveLength(1);
+    expect(rebindItems).toHaveLength(0);
+    expect(skipped).toBe(0);
   });
 });

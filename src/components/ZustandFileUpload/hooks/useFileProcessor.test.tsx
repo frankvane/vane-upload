@@ -85,7 +85,6 @@ vi.mock("../context/UploadEngineContext", () => ({
 }));
 
 vi.mock("../services/uploadDedupe", () => ({
-  dedupeByContentKey: vi.fn(() => ({ newItems: [], skipped: 0 })),
   reconcileIncomingFiles: vi.fn(() => ({
     newItems: [],
     rebindItems: [],

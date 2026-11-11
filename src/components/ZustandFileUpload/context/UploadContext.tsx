@@ -135,17 +135,18 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
 
   // VU-45：非原始 props（数组）按内容签名规范化成稳定引用，再参与 value 的
   // useMemo 依赖。避免宿主传入内容相同的新数组时击穿整棵子树。
-  const allowedTypesKey = allowedFileTypes.join("|");
-  const visibleColumnsKey = visibleColumns?.join("|");
+  // T-59：用 JSON.stringify 作签名而非 join("|")——既能区分 [] 与 [""]（| 拼接二者都成
+  // 空串），又避免元素含 |（自定义 MIME / 别名 `a|b`）时被拆成多段，导致引用破裂。
+  const allowedFileTypesKey = JSON.stringify(allowedFileTypes ?? []);
   const stableAllowedFileTypes = useMemo(
-    () => (allowedTypesKey ? allowedTypesKey.split("|") : []),
-    [allowedTypesKey]
+    () => allowedFileTypes ?? [],
+    [allowedFileTypesKey]
   );
+  const visibleColumnsKey =
+    visibleColumns === undefined ? undefined : JSON.stringify(visibleColumns);
   const stableVisibleColumns = useMemo<UploadColumnKey[] | undefined>(() => {
-    if (visibleColumnsKey === undefined) return undefined;
-    return visibleColumnsKey
-      ? (visibleColumnsKey.split("|") as UploadColumnKey[])
-      : [];
+    if (visibleColumns === undefined) return undefined;
+    return visibleColumns;
   }, [visibleColumnsKey]);
 
   // VU-16 / VU-45：context value 只在这些原语 / 稳定引用变化时才换身份，

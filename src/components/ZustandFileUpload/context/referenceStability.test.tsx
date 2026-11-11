@@ -44,13 +44,14 @@ describe("VU-16 / VU-45：UploadProvider 引用稳定性", () => {
     captured.length = 0;
     const columns: UploadColumnKey[] = ["fileName", "progress"];
     const { rerender } = render(
-      <Host tick={0} allowed={[".png", "image/jpeg"]} columns={columns} instanceId="alpha" />
+      // T-59：数组里故意塞一个含 | 的元素，验证 JSON.stringify 签名不会被 | 拆断
+      <Host tick={0} allowed={[".png", "image/jpeg", "a|b"]} columns={columns} instanceId="alpha" />
     );
     const first = captured.at(-1)!;
 
     // tick 变化 + 两个数组都换成内容相同的新引用
     rerender(
-      <Host tick={1} allowed={[".png", "image/jpeg"]} columns={[...columns]} instanceId="alpha" />
+      <Host tick={1} allowed={[".png", "image/jpeg", "a|b"]} columns={[...columns]} instanceId="alpha" />
     );
     const second = captured.at(-1)!;
 
@@ -58,7 +59,25 @@ describe("VU-16 / VU-45：UploadProvider 引用稳定性", () => {
     expect(second.engine).toBe(first.engine);
     expect(second.value.allowedFileTypes).toBe(first.value.allowedFileTypes);
     expect(second.value.visibleColumns).toBe(first.value.visibleColumns);
-    expect(second.value.allowedFileTypes).toEqual([".png", "image/jpeg"]);
+    // 含 | 的元素原样保留，未被旧 join("|")/split("|") 拆成 ["a","b"]
+    expect(second.value.allowedFileTypes).toEqual([".png", "image/jpeg", "a|b"]);
+  });
+
+  it("T-59：[] 与 [''] 经 JSON.stringify 签名不同，不被旧 join/split 收敛成同一引用", () => {
+    captured.length = 0;
+    const { rerender } = render(<Host tick={0} allowed={[]} instanceId="alpha" />);
+    const empty = captured.at(-1)!;
+    // [] 经 JSON.stringify 得 "[]"，内容必须仍是空数组（旧 join 得 "" 再 split 变 [""]）
+    expect(empty.value.allowedFileTypes).toEqual([]);
+
+    rerender(<Host tick={1} allowed={[""]} instanceId="alpha" />);
+    const oneEmpty = captured.at(-1)!;
+    // [""] 经 JSON.stringify 得 [""]，内容必须是含一个空串的数组
+    expect(oneEmpty.value.allowedFileTypes).toEqual([""]);
+    // 关键回归点：两者签名不同 → 各自独立 memo 输出，不能收敛成同一引用
+    // （旧实现 join("|") 下 "" 与 [""] 都得到 "" 键，再 split("|") 都变 [""] 被混为一谈）
+    expect(oneEmpty.value.allowedFileTypes).not.toBe(empty.value.allowedFileTypes);
+    expect(oneEmpty.value.allowedFileTypes).not.toEqual(empty.value.allowedFileTypes);
   });
 
   it("instanceId 变更重建引擎，并释放旧引擎的 workerPool / fileRegistry", () => {

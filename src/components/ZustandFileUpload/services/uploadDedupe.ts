@@ -9,36 +9,17 @@ export interface ContentKeyed {
 }
 
 /**
- * VU-19：内容指纹 = hash|size|lastModified|fileName。
- * 同一物理文件重复选择会得到相同的指纹，据此去重，避免生成多条队列记录；
- * 同时保留 P1-7 的语义——仅「同内容不同名」仍可并存（fileName 不同即不同指纹）。
+ * VU-19：内容指纹 = hash\u0000size\u0000lastModified\u0000fileName。
+ * 用 \u0000（NUL）作分隔符而非 `|`：hash 是十六进制串、size/lastModified 是数字、
+ * fileName 不含 NUL，因此任一字段含 `|`（如自定义 MIME / 别名 `a|b`）也不会让两个
+ * 不同元组拼成同一字符串，消除指纹碰撞（T-59）。同一物理文件重复选择得到相同指纹
+ * → 去重；仅「同内容不同名」仍可并存（fileName 不同即不同指纹，保留 P1-7 语义）。
  */
 export const buildContentKey = (file: ContentKeyed): string =>
-  `${file.hash ?? ""}|${file.fileSize ?? 0}|${file.lastModified ?? 0}|${file.fileName}`;
+  [file.hash ?? "", file.fileSize ?? 0, file.lastModified ?? 0, file.fileName]
+    .map((value) => String(value))
+    .join("\u0000");
 
-export interface DedupeResult<T extends ContentKeyed> {
-  /** 真正需要入队的新项 */
-  newItems: T[];
-  /** 因重复被跳过的条数 */
-  skipped: number;
-}
-
-/**
- * 从待入队集合中剔除与「已在队列中的记录」或「本批内已出现」内容指纹相同的项。
- * 纯函数，便于单元测试锁定 VU-19 行为。
- */
-export const dedupeByContentKey = <T extends ContentKeyed & { id: string }>(
-  existing: ContentKeyed[],
-  incoming: T[]
-): DedupeResult<T> => {
-  const { newItems, rebindItems, skipped } = reconcileIncomingFiles(
-    existing as RebindableRecord[],
-    incoming
-  );
-  return { newItems, skipped: skipped + rebindItems.length };
-};
-
-/** 可被「重新选择文件」接管的既有记录（中断 / 失败 / 排队，且内存中已无 fileRef）。 */
 export interface RebindableRecord extends ContentKeyed {
   id: string;
   status?: UploadStatus | string;
@@ -75,6 +56,10 @@ const REBINDABLE_STATUSES = new Set<UploadStatus>([
  * E2E-02：区分「真正的新文件」与「刷新后重新选择的同一文件」。
  * 前者新建记录（chunkSize 按当前网络自适应）；后者复用既有记录与 chunkSize，
  * 保证服务端分片键 `${md5}_${size}_${chunkSize}` 跨会话稳定，从而只补传缺失分片。
+ *
+ * 内容指纹仅在「双方都有 hash」时参与匹配：无 hash（如 hashMode 未计算）无法可靠
+ * 标识内容，不纳入内容去重，避免两个无 hash 且 size/name/lastModified 相同的不同文件
+ * 被误判重复（T-59「hash 空时不做内容去重」）。
  */
 export const reconcileIncomingFiles = <
   T extends ContentKeyed & { id: string }
@@ -84,6 +69,8 @@ export const reconcileIncomingFiles = <
 ): ReconcileResult<T> => {
   const byKey = new Map<string, RebindableRecord>();
   for (const record of existing) {
+    // 无 hash 无法可靠标识内容，不纳入内容去重（见上方说明）。
+    if (!record.hash) continue;
     const key = buildContentKey(record);
     if (!byKey.has(key)) {
       byKey.set(key, record);
