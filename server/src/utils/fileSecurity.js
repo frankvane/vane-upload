@@ -8,12 +8,39 @@ const { TMP_UPLOAD_DIR } = require("../config/paths");
 const MAX_FILE_ID_LENGTH = 90;
 const MAX_FILENAME_LENGTH = 255;
 
+// T-75：双向控制符（RTL/LRE override、isolate、零宽标记）会让文件名在 UI 里
+// 反向或隐形显示，属文件名欺骗（不构成路径穿越，但会误导用户点击）。
+const BIDI_OR_INVISIBLE_PATTERN =
+  /[\u061C\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
+/**
+ * T-75：按 UTF-16 长度安全截断——逐 code point 累加，绝不从 surrogate pair
+ * 中间切开。旧实现 `slice(0, 255)` 按 code unit 截断，若边界恰落在 emoji 的
+ * high surrogate 上，落盘名末尾会留下孤立代理项（写盘/读回乱码甚至抛错）。
+ */
+const truncateUtf16 = (value, maxLength) => {
+  let result = "";
+  for (const char of value) {
+    if (result.length + char.length > maxLength) break;
+    result += char;
+  }
+  return result;
+};
+
 const sanitizeFilename = (inputName) => {
+  // 先用「原始串」剥路径：若先 NFKC，全角斜杠 U+FF0F 会被折叠成 `/`，
+  // path.basename 就会把一段文件名误判为目录层级、反而丢掉前缀。
   const baseName = path.basename(String(inputName || ""));
-  // 控制字符（\u0000-\u001f）需显式剔除，避免文件名注入/截断；该字符类是刻意的。
-  // eslint-disable-next-line no-control-regex
-  const sanitized = baseName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
-  return (sanitized || `file-${Date.now()}`).slice(0, MAX_FILENAME_LENGTH);
+  // NFKC 归一化：全角/兼容字符折叠为等价 ASCII 后，下面的危险字符过滤才能
+  // 真正覆盖它们，同时消除「看似目录分隔」的视觉混淆。
+  const normalized = baseName.normalize("NFKC");
+  const sanitized = normalized
+    .replace(BIDI_OR_INVISIBLE_PATTERN, "_")
+    // 控制字符（\u0000-\u001f）需显式剔除，避免文件名注入/截断；该字符类是刻意的。
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim();
+  return truncateUtf16(sanitized || `file-${Date.now()}`, MAX_FILENAME_LENGTH);
 };
 
 const sanitizeFileId = (fileId) =>

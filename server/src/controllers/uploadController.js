@@ -83,8 +83,12 @@ const mergeLocks = createMergeLockRegistry({
 // `${userId}:${storageId}`，取末段即为分片落盘所用的 storageId。
 // mergeKey 不含 md5：同一文件（同 storageId）必须串行合并，避免并发竞争同一 staging / 落盘路径；
 // janitor 据此跳过这些文件的孤儿分片，避免合并进行中把源分片清掉导致合并失败。
+// T-75：取末段（最后一个冒号之后），而不是 split(":")[1]——userId 含冒号时
+// split 的第二段只是 userId 的后半截，janitor 会据此保护错的分片集合。
 exports.getMergingStorageIds = () =>
-  new Set(mergeLocks.keys().map((key) => key.split(":")[1]));
+  new Set(
+    mergeLocks.keys().map((key) => key.slice(key.lastIndexOf(":") + 1))
+  );
 
 // VU-03/04/11 测试钩子：暴露配额聚合内部函数，便于断言「配额直接读 DB 而非磁盘」。
 // 仅用于单测，不影响生产行为。

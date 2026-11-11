@@ -14,7 +14,9 @@ const { config } = require("../config");
  */
 const redactErrorMessage = (error, fallback = "服务器内部错误，请稍后重试") => {
   // VU-55：环境判定统一走 config，不再各自读 NODE_ENV。
-  if (config.isDevOrTest()) {
+  // T-75：仅 test 保留原始 message；development 也属真实暴露面，与 app.js
+  // errorHandler 口径一致，5xx 不得泄漏 SQL 片段 / 绝对路径。
+  if (config.isTest()) {
     const message = error && error.message;
     return typeof message === "string" && message ? message : fallback;
   }

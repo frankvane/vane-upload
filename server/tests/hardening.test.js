@@ -139,11 +139,16 @@ test("VU-56：两套互相矛盾的采样哈希死代码已删除，hash 只保�
   assert.equal(fs.existsSync(path.join(__dirname, "../src/utils/thumbnail.js")), false);
 });
 
-test("P2-10：生产环境不回传原始 error.message，测试环境保留以便定位", () => {
+test("P2-10/T-75：仅 test 保留原始 message，production 与 development 均脱敏", () => {
   const error = new Error("SQLITE_ERROR: no such column: secret_column");
   const original = process.env.NODE_ENV;
 
   process.env.NODE_ENV = "production";
+  assert.equal(redactErrorMessage(error), "服务器内部错误，请稍后重试");
+
+  // T-75：development 之前被 isDevOrTest() 并入「安全环境」，5xx 会把
+  // SQL 片段 / 绝对路径回传给客户端；现在与 app.js errorHandler 口径一致。
+  process.env.NODE_ENV = "development";
   assert.equal(redactErrorMessage(error), "服务器内部错误，请稍后重试");
 
   process.env.NODE_ENV = "test";

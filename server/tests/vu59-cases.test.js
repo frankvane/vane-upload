@@ -418,6 +418,11 @@ test("TC-09 恶意文件名（遍历/非法字符/空格/null/超长）均不越
     "   ",
     "a\u0000b",
     "x".repeat(4096),
+    // T-75 Unicode 样本：前者 RTL override 会让文件名在 UI 里反向显示，
+    // 后者全角斜杠（U+FF0F）视觉上像目录分隔符；两者都不是路径穿越，
+    // 但会误导用户，NFKC 归一化 + 混淆字符过滤后不得残留。
+    "evil\u202Etxt.txt",
+    "ａ／ｂ\uFF0F.txt",
   ];
   for (let i = 0; i < malicious.length; i += 1) {
     const nm = malicious[i];
@@ -435,6 +440,13 @@ test("TC-09 恶意文件名（遍历/非法字符/空格/null/超长）均不越
 
     const row = await File.findOne({ where: { file_id: `test:${fid}` } });
     assert.ok(row, "应有合并记录");
+    // T-75：落库 file_name 不得残留双向控制符 / 全角斜杠等混淆字符。
+    assert.ok(
+      !/[\u061C\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\uFF0F]/.test(
+        row.file_name
+      ),
+      `落库 file_name 不得残留混淆字符，实际=${JSON.stringify(row.file_name)}`
+    );
     const abs = path.resolve(UPLOADS_DIR, path.basename(row.file_path));
     // 落盘文件必须仍解析在 UPLOADS_DIR 之内，绝不逃逸到父目录。
     assert.ok(

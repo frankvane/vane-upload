@@ -191,9 +191,12 @@ app.use(
 app.use("/api/file", fileRoutes);
 
 // S6 错误脱敏：导出以便单测。
-// 非 test/development 环境只返通用文案；真实堆栈/路径落服务端日志，不回传给客户端。
+// 仅 test 环境保留原始 message 便于断言；development / production 一律返通用文案，
+// 真实堆栈/路径落服务端日志（logger 统一脱敏），不回传给客户端。
 function errorHandler(error, _req, res, _next) {
-  const isSafeEnv = config.isDevOrTest();
+  // T-75：development 此前被并入 isDevOrTest()，5xx 会把 SQL 片段 / 绝对路径
+  // 直接回传客户端——本地起服务同样可能被外部访问。收紧到只认 test。
+  const isSafeEnv = config.isTest();
 
   // VU-10 / VU-32：multer 与 body-parser 的确定性客户端错误不该变成 500，
   // 否则客户端 fetchWithRetry 会对必然失败的请求反复重试。
@@ -221,7 +224,7 @@ function errorHandler(error, _req, res, _next) {
     logger.error("[server] unhandled error:", error);
     message = "服务器内部错误，请稍后重试";
   } else if (statusCode >= 500 && isSafeEnv) {
-    // test/development 保留原始 message 便于定位；已有单测依赖该行为。
+    // 仅 test 环境保留原始 message 便于定位；已有单测依赖该行为。
     message = (error && error.message) || "服务器内部错误，请稍后重试";
   }
 

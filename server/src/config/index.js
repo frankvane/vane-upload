@@ -156,6 +156,15 @@ const validateStartupConfig = ({ checkWritable = true } = {}) => {
   if (config.maxUploadSizeBytes() > config.maxTotalUploadSizeBytes()) {
     errors.push("MAX_UPLOAD_SIZE_MB 不应大于 MAX_TOTAL_UPLOAD_SIZE_MB");
   }
+  // T-75：file_id / mergeKey 都按 `<userId>:<key>` 拼接，userId 里的冒号会
+  // 破坏解析（对外 file_id 截错段、janitor 保护集合取错段）。启动期直接拒绝
+  // 含冒号的 DEMO_USER_ID，从源头消除歧义；无论当前 authMode 都校验，避免
+  // 后续切到 demo 模式时配置瞬间变得不可用。
+  if (String(config.demoUserId()).includes(":")) {
+    errors.push(
+      "DEMO_USER_ID 不允许包含冒号（file_id / mergeKey 以 ':' 拼接 userId，冒号会破坏解析）"
+    );
+  }
 
   if (checkWritable) {
     const { DATA_DIR, TMP_UPLOAD_DIR, UPLOADS_DIR } = require("./paths");

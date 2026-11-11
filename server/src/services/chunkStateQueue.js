@@ -1,7 +1,7 @@
 const { FileChunk } = require("../models");
 const { withSqliteBusyRetry } = require("../utils/sqliteRetry");
 const { config } = require("../config");
-const { logger } = require("../utils/logger");
+const { logger, redactLogText } = require("../utils/logger");
 
 // VU-55：env 读取集中到 config；下面仍用 toValidInt 兜住历史非法值语义。
 const DEFAULT_BATCH_SIZE = config.chunkStateBatchSize();
@@ -31,8 +31,10 @@ const getQueueHealth = () => ({
   pending: getPendingCount(),
   consecutiveFailures,
   degraded: consecutiveFailures >= DEGRADED_AFTER_FAILURES,
+  // T-75：/api/health 是公开端点，lastError 曾原样回传 DB 异常的 message
+  // （可能含 SQL 片段、绝对路径、token）。与服务端日志同一口径脱敏后再暴露。
   lastError: lastFlushError
-    ? String(lastFlushError.message || lastFlushError)
+    ? redactLogText(String(lastFlushError.message || lastFlushError))
     : null,
 });
 
@@ -76,7 +78,12 @@ const getPendingCount = () => {
 const restorePendingStates = (states) => {
   for (const state of states) {
     const fileMap = getPendingFileMap(state.file_id);
-    fileMap.set(state.chunk_index, state);
+    // T-75：batch 已被 drainPendingStates 从 pending 摘出，persist 期间同 key
+    // 完全可能入队了更新的状态（如 status/size 流转）。无条件 set 会让失败的
+    // 旧批次覆盖新值，造成状态倒退。只恢复仍空缺的 key，新值优先。
+    if (!fileMap.has(state.chunk_index)) {
+      fileMap.set(state.chunk_index, state);
+    }
   }
 };
 
@@ -222,6 +229,9 @@ const flushPendingChunkStates = async () => {
       try {
         await persistChunkStates(batch);
       } catch (error) {
+        // T-75：直接调用 flush（如 T-60 落库失败路径）的失败此前不写
+        // lastFlushError，/api/health 会假绿；这里补齐可观测性。
+        lastFlushError = error;
         restorePendingStates(batch);
         throw error;
       }
@@ -249,6 +259,9 @@ const flushFileChunkStates = async (fileId) => {
       try {
         await persistChunkStates(batch);
       } catch (error) {
+        // T-75：直接调用 flush（如 T-60 落库失败路径）的失败此前不写
+        // lastFlushError，/api/health 会假绿；这里补齐可观测性。
+        lastFlushError = error;
         restorePendingStates(batch);
         throw error;
       }

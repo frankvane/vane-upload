@@ -46,8 +46,10 @@ const toPublicFile = (file) => {
   }
   const plain = typeof file.toJSON === "function" ? file.toJSON() : { ...file };
   // 落库值是 `<userId>:<chunkKey>`（保证 file_id 全局唯一），对外仍回传客户端使用的 chunkKey。
+  // T-75：取最后一个冒号而非第一个——userId 若含冒号（历史脏数据 / 自定义鉴权），
+  // indexOf 会把中间段错当成 chunkKey 回传客户端。
   const rawFileId = String(plain.file_id || "");
-  const separator = rawFileId.indexOf(":");
+  const separator = rawFileId.lastIndexOf(":");
   return {
     file_id: separator >= 0 ? rawFileId.slice(separator + 1) : rawFileId,
     file_name: plain.file_name,

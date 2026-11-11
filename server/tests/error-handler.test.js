@@ -1,6 +1,7 @@
 // S6 回归：错误响应脱敏。
-// - test/development 环境：回传原始 error.message（便于调试与既有测试）。
-// - 其他环境（production）：仅返回通用文案，不得泄漏原始 message / 堆栈 / 路径。
+// - 仅 test 环境：回传原始 error.message（便于调试与既有测试）。
+// - development / production：一律返通用文案，不得泄漏原始 message / 堆栈 / 路径
+//   （T-75：development 也是真实暴露面，本地起服务同样可能被外部访问）。
 // 注意：显式设置 NODE_ENV，避免与其他测试文件的全局 env 相互覆盖。
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -35,6 +36,17 @@ test("test 环境：返回原始 error.message", () => {
   assert.equal(res.statusCode, 500);
   assert.equal(res.body.code, 500);
   assert.equal(res.body.message, "boom-detail");
+});
+
+test("T-75 development 环境：5xx 同样只返通用文案（不再泄漏原始 message）", () => {
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "development";
+  const res = makeRes();
+  errorHandler(new Error("SQLITE_ERROR: no such column: secret_column"), {}, res, () => {});
+  process.env.NODE_ENV = prev;
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.message, "服务器内部错误，请稍后重试");
+  assert.ok(!res.body.message.includes("secret_column"));
 });
 
 test("production 环境：仅返回通用文案，不泄漏原始 message", () => {
