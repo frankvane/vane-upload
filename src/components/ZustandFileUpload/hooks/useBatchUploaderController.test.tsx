@@ -667,6 +667,46 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(persisted.pausedChunks).toEqual([0, 1]);
     expect(h.uploadContext.onUploadError).not.toHaveBeenCalled();
     expect(h.uploadContext.onUploadComplete).not.toHaveBeenCalled();
+    // T-32：暂停是可继续的中断，onBatchComplete 不得报「1 个失败」
+    expect(h.uploadContext.onBatchComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ success: 0, failed: 0, total: 1 })
+    );
+  });
+
+  it("T-33 宿主 onUploadComplete 抛异常：已落 DONE 的文件仍计成功，批次正常结算", async () => {
+    const file = makeFile({ id: "host-boom", status: UploadStatus.QUEUED });
+    const store = useMemoryStorage([file]);
+    setEngineState([file], {});
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
+    h.uploadContext.onUploadComplete.mockImplementationOnce(() => {
+      throw new Error("host callback boom");
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    expect(store.get("host-boom")!.status).toBe(UploadStatus.DONE);
+    expect(h.uploadContext.onBatchComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ success: 1, failed: 0, total: 1 })
+    );
+  });
+
+  it("T-33 编排器抛异常时 finally 兜底复位 isUploading，且不产生未处理拒绝", async () => {
+    const file = makeFile({ id: "queue-boom", status: UploadStatus.QUEUED });
+    setEngineState([file], {});
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([file]);
+    h.orchestrator.runConcurrentQueue.mockRejectedValue(new Error("queue boom"));
+
+    const { result } = renderHook(() => useBatchUploader());
+    await act(async () => {
+      await expect(result.current.uploadAll()).rejects.toThrow("queue boom");
+    });
+
+    expect(h.storeState.setIsUploading).toHaveBeenCalledWith(false);
   });
 
   it("TC-211 任务结束前记录被删除：Worker 报成功也不写回，列表不复活（E2E-03）", async () => {

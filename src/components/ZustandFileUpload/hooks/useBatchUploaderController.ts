@@ -95,6 +95,9 @@ export function useBatchUploader(): BatchUploaderActions {
    */
   const userCancelledIdsRef = useRef<Set<string>>(new Set());
   const cancelledInBatchIdsRef = useRef<Set<string>>(new Set());
+  // T-32：本批被「暂停」的文件。暂停是可继续的中断，与取消同口径：推进批次进度，
+  // 但既不计成功也不计失败，否则悬浮条会显示「1 个失败」且重试全部会误重试。
+  const pausedInBatchIdsRef = useRef<Set<string>>(new Set());
 
   const {
     cleanupPolicy,
@@ -175,16 +178,21 @@ export function useBatchUploader(): BatchUploaderActions {
           hashMode: uploadConfig.hashMode,
         },
         onProgress: (detail) => {
-          // VU-40：三张 map 一次原子更新，订阅者只收到 1 次通知。
-          setProgressDetail(file.id, {
-            progress: detail.progress,
-            speed: detail.speed,
-            eta: detail.eta,
-          });
+          // 宿主回调一律隔离：抛异常不能把已完成的上传误判为失败（T-33）。
+          try {
+            // VU-40：三张 map 一次原子更新，订阅者只收到 1 次通知。
+            setProgressDetail(file.id, {
+              progress: detail.progress,
+              speed: detail.speed,
+              eta: detail.eta,
+            });
 
-          // 旧签名（number）保留兼容；新签名（detail）提供速率/剩余时间
-          uploadConfig.onUploadProgress?.(file, detail.progress);
-          uploadConfig.onUploadProgressDetail?.(file, detail);
+            // 旧签名（number）保留兼容；新签名（detail）提供速率/剩余时间
+            uploadConfig.onUploadProgress?.(file, detail.progress);
+            uploadConfig.onUploadProgressDetail?.(file, detail);
+          } catch {
+            // 进度展示失败不影响上传链路
+          }
         },
       });
 
@@ -219,6 +227,8 @@ export function useBatchUploader(): BatchUploaderActions {
       if (kind.kind === "paused") {
         // T3.3：分片边界暂停，状态置 PAUSED；保留 fileRef 以便续传，
         // 记录已上传分片索引（pausedChunks）供 UI 展示。
+        // T-32：登记为本批「暂停」，批次结算时从 failedCount 剔除。
+        pausedInBatchIdsRef.current.add(file.id);
         latest.status = UploadStatus.PAUSED;
         latest.progress =
           engine.store.getState().progressMap[file.id] ?? latest.progress ?? 0;
@@ -247,7 +257,12 @@ export function useBatchUploader(): BatchUploaderActions {
         await engine.storage.setItem(file.id, latest);
         syncFile(latest);
 
-        uploadConfig.onUploadComplete?.(latest, true);
+        // T-33：宿主回调失败不改变「文件已成功落盘」这一事实。
+        try {
+          uploadConfig.onUploadComplete?.(latest, true);
+        } catch {
+          // 宿主自行处理回调异常
+        }
         await cleanupPolicy.addCompletedFile(file.id);
         return true;
       }
@@ -263,7 +278,11 @@ export function useBatchUploader(): BatchUploaderActions {
       await engine.storage.setItem(file.id, latest);
       syncFile(latest);
 
-      uploadConfig.onUploadError?.(latest, kind.message);
+      try {
+        uploadConfig.onUploadError?.(latest, kind.message);
+      } catch {
+        // 宿主回调失败不改变「文件已失败」这一事实
+      }
       return false;
     },
     [
@@ -282,9 +301,6 @@ export function useBatchUploader(): BatchUploaderActions {
       summary: { successCount: number; failedCount: number; skippedCount?: number },
       total: number
     ) => {
-      setIsUploading(false);
-      await flushRefresh();
-
       setBatchInfo((prev) =>
         applyFinalized(prev, summary, total, {
           autoCleanup: uploadConfig.autoCleanup,
@@ -303,7 +319,7 @@ export function useBatchUploader(): BatchUploaderActions {
         cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
       }
     },
-    [setIsUploading, flushRefresh, setBatchInfo, uploadConfig, cleanupPolicy]
+    [setBatchInfo, uploadConfig, cleanupPolicy]
   );
 
   /**
@@ -335,16 +351,19 @@ export function useBatchUploader(): BatchUploaderActions {
       setIsUploading(true);
       if (options.resetCancelCounters) {
         cancelledInBatchIdsRef.current.clear();
+        pausedInBatchIdsRef.current.clear();
       }
       setBatchInfo(options.batchInfo);
 
-      // 本批被取消并已结算的任务数：只在本批次内有效，不必做成 ref
+      // 本批被取消 / 暂停并已结算的任务数：只在本批次内有效，不必做成 ref
       let cancelledCount = 0;
+      let pausedCount = 0;
 
       try {
         const summary = await runConcurrentQueue({
           items: files,
-          concurrency: Math.min(fileConcurrency, files.length),
+          // T-36：并发数归一化交给编排器单点处理，非法值不会再变成空批次
+          concurrency: fileConcurrency,
           shouldStop: () => controller.signal.aborted,
           beforeEach: async (file): Promise<BeforeEachOutcome> => {
             if (controller.signal.aborted) {
@@ -382,6 +401,10 @@ export function useBatchUploader(): BatchUploaderActions {
             if (options.trackCancelled && cancelledInBatchIdsRef.current.delete(item.id)) {
               cancelledCount += 1;
               setBatchInfo(applySettledCancelled);
+            } else if (pausedInBatchIdsRef.current.delete(item.id)) {
+              // T-32：暂停与取消同口径 —— 推进进度，既不计成功也不计失败
+              pausedCount += 1;
+              setBatchInfo(applySettledCancelled);
             } else {
               setBatchInfo((prev) => applySettled(prev, success));
             }
@@ -393,12 +416,20 @@ export function useBatchUploader(): BatchUploaderActions {
           aborted: controller.signal.aborted,
           summary: {
             successCount: summary.successCount,
-            failedCount: Math.max(summary.failedCount - cancelledCount, 0),
+            // T-08 / T-32：用户取消与暂停都不算失败
+            failedCount: Math.max(
+              summary.failedCount - cancelledCount - pausedCount,
+              0
+            ),
             skippedCount: summary.skippedCount,
           },
         };
       } finally {
         endBatchSession(controller);
+        // T-33：无论批次正常结束还是编排器抛异常，都必须复位上传态并刷新列表。
+        // 放在 finally 而不是 finalizeBatch，异常路径才不会把 isUploading 永久卡在 true。
+        setIsUploading(false);
+        await flushRefresh();
       }
     },
     [
@@ -406,6 +437,7 @@ export function useBatchUploader(): BatchUploaderActions {
       beginBatchSession,
       endBatchSession,
       setIsUploading,
+      flushRefresh,
       setBatchInfo,
       fileConcurrency,
       processFileUpload,

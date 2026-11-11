@@ -7,6 +7,8 @@ interface QueueTaskResult<T> {
   success: boolean;
   /** T-14：排队期被判为「不需要执行」（如记录已被用户删除）而跳过 */
   skipped?: boolean;
+  /** T-33：任务或前置钩子抛出的异常，透传给 onSettled 而不是静默吞掉 */
+  error?: unknown;
 }
 
 /**
@@ -40,11 +42,18 @@ export const loadAllUploadFiles = async (
   return listUploadFiles(storage);
 };
 
+/** T-36：非法并发数（NaN / Infinity / 0 / 负数）回落到 1，并钳到任务数。 */
+export const normalizeConcurrency = (value: number, itemCount: number): number => {
+  const total = Math.max(1, Math.floor(Number.isFinite(itemCount) ? itemCount : 1));
+  const requested = Number.isFinite(value) ? Math.floor(value) : 1;
+  return Math.max(1, Math.min(requested < 1 ? 1 : requested, total));
+};
+
 export const runConcurrentQueue = async <T>(
   options: RunConcurrentQueueOptions<T>
 ): Promise<QueueSummary> => {
   const { items, beforeEach, task, onSettled, shouldStop } = options;
-  const concurrency = Math.max(1, Math.min(options.concurrency, items.length || 1));
+  const concurrency = normalizeConcurrency(options.concurrency, items.length);
 
   if (items.length === 0) {
     return { successCount: 0, failedCount: 0, skippedCount: 0 };
@@ -54,6 +63,19 @@ export const runConcurrentQueue = async <T>(
   let successCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
+
+  /**
+   * T-33：onSettled 由宿主提供，抛异常不能把整批 Promise.all 拖成 reject
+   * （否则批次收尾不执行、isUploading 永久 true，还留下未处理拒绝）。
+   * 异常本身已通过 result.error 透传给宿主自行处理。
+   */
+  const settle = async (result: QueueTaskResult<T>): Promise<void> => {
+    try {
+      await onSettled?.(result);
+    } catch {
+      // 宿主回调失败不影响其它任务的结算
+    }
+  };
 
   const runner = async () => {
     while (true) {
@@ -73,21 +95,31 @@ export const runConcurrentQueue = async <T>(
         return;
       }
 
-      const outcome = await beforeEach?.(item, currentIndex);
+      // T-33：beforeEach 抛异常时该件计失败、把 error 透传给 onSettled，
+      // 其余任务继续执行，而不是让整批 reject。
+      let outcome: BeforeEachOutcome;
+      try {
+        outcome = await beforeEach?.(item, currentIndex);
+      } catch (error) {
+        failedCount += 1;
+        await settle({ item, index: currentIndex, success: false, error });
+        continue;
+      }
 
       // T-14：被 beforeEach 否决的任务不执行、不计成功也不计失败，只记「已跳过」。
       // 仍然回调 onSettled，让上层把批次计数（current / active）推进到位。
       if (outcome === "skip") {
         skippedCount += 1;
-        await onSettled?.({ item, index: currentIndex, success: false, skipped: true });
+        await settle({ item, index: currentIndex, success: false, skipped: true });
         continue;
       }
 
       let success = false;
+      let taskError: unknown;
       try {
         success = await task(item, currentIndex);
-      } catch {
-        success = false;
+      } catch (error) {
+        taskError = error;
       }
 
       if (success) {
@@ -96,7 +128,7 @@ export const runConcurrentQueue = async <T>(
         failedCount += 1;
       }
 
-      await onSettled?.({ item, index: currentIndex, success });
+      await settle({ item, index: currentIndex, success, error: taskError });
     }
   };
 
