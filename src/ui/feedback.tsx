@@ -41,6 +41,8 @@ export const Tooltip: React.FC<TooltipProps> = ({
   } | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const childRef = React.useRef<HTMLElement | null>(null);
+  // T-70：稳定 id 关联触发器与浮层（aria-describedby），避免硬编码/重复。
+  const tooltipId = React.useId();
 
   const show = React.useCallback(() => {
     if (timerRef.current) window.clearTimeout(timerRef.current);
@@ -68,7 +70,26 @@ export const Tooltip: React.FC<TooltipProps> = ({
     };
   }, []);
 
+  // T-70：可见时把「关 tooltip」登记到共享 ESC 栈，ESC 可关（最上层浮层优先）。
+  React.useEffect(() => {
+    if (!visible) return;
+    return registerEscapeHandler(() => hide());
+  }, [visible, hide]);
+
   if (!title) return children;
+
+  // T-70：合并子元素既有同名事件，避免 cloneElement 直接覆盖原 onClick/onFocus 等。
+  const childProps = (children.props ?? {}) as Record<string, unknown>;
+  const mergeHandler = (name: string, handler: () => void) => {
+    const existing = childProps[name];
+    if (typeof existing === "function") {
+      return (...args: unknown[]) => {
+        (existing as (...a: unknown[]) => void)(...args);
+        handler();
+      };
+    }
+    return handler;
+  };
 
   const container = getPopupContainer?.() ?? document.body;
 
@@ -76,16 +97,18 @@ export const Tooltip: React.FC<TooltipProps> = ({
     <>
       {React.cloneElement(children, {
         ref: childRef,
-        onMouseEnter: show,
-        onMouseLeave: hide,
-        onFocus: show,
-        onBlur: hide,
+        onMouseEnter: mergeHandler("onMouseEnter", show),
+        onMouseLeave: mergeHandler("onMouseLeave", hide),
+        onFocus: mergeHandler("onFocus", show),
+        onBlur: mergeHandler("onBlur", hide),
+        "aria-describedby": visible ? tooltipId : undefined,
       } as Partial<React.HTMLAttributes<HTMLElement>>)}
       {canDOM &&
         visible &&
         pos &&
         createPortal(
           <div
+            id={tooltipId}
             className="rui-tooltip"
             style={{
               left: pos.left,
@@ -217,6 +240,34 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
 
 /* ============================ Modal ============================ */
 
+// T-70：可聚焦元素选择器 + Tab 圈禁。对话框打开后 Tab/Shift+Tab 在面板内循环，
+// 键盘焦点不逃出 panel（满足 aria-modal 的无障碍承诺）。
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+
+const trapTab = (
+  event: React.KeyboardEvent<HTMLElement>,
+  container: HTMLElement | null,
+): void => {
+  if (event.key !== "Tab" || !container) return;
+  const focusable = Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  );
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+};
+
 export interface ModalProps {
   title?: React.ReactNode;
   open?: boolean;
@@ -259,8 +310,14 @@ const ModalInner: React.FC<ModalProps> = ({
     return registerEscapeHandler(() => onCancelRef.current?.());
   }, []);
 
+  // T-70：打开时记录来源焦点并聚焦对话框；关闭（卸载）时归还来源焦点。
+  const previouslyFocusedRef = React.useRef<HTMLElement | null>(null);
   React.useEffect(() => {
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     dialogRef.current?.focus();
+    return () => {
+      previouslyFocusedRef.current?.focus?.();
+    };
   }, []);
 
   // 尊重 open：关闭时不渲染弹层（此前忽略 open 导致弹层常驻，调用方无法隐藏）
@@ -278,6 +335,7 @@ const ModalInner: React.FC<ModalProps> = ({
           aria-modal="true"
           tabIndex={-1}
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => trapTab(e, dialogRef.current)}
         >
           {title !== undefined && (
             <div className="rui-modal-header">
@@ -421,11 +479,17 @@ export const Drawer: React.FC<DrawerProps> = ({
     onCloseRef.current = onClose;
   });
 
+  // T-70：打开时记录来源焦点并聚焦面板；关闭时归还来源焦点。
+  const previouslyFocusedRef = React.useRef<HTMLElement | null>(null);
   React.useEffect(() => {
     if (!open) return;
     const unregisterEscape = registerEscapeHandler(() => onCloseRef.current?.());
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     panelRef.current?.focus();
-    return unregisterEscape;
+    return () => {
+      unregisterEscape();
+      previouslyFocusedRef.current?.focus?.();
+    };
   }, [open]);
 
   if (!open) return null;
@@ -440,6 +504,7 @@ export const Drawer: React.FC<DrawerProps> = ({
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
+        onKeyDown={(e) => trapTab(e, panelRef.current)}
       >
         {title !== undefined && (
           <div className="rui-drawer-header">

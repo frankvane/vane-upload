@@ -51,8 +51,11 @@ const Title: React.FC<
   React.HTMLAttributes<HTMLHeadingElement> & { level?: 1 | 2 | 3 | 4 | 5 }
 > = ({ level = 1, className, children, style, ...rest }) => {
   const size = [28, 24, 20, 18, 16][level - 1];
+  // T-70：按 level 渲染对应语义标签，而不是无论 level 恒渲染 <h1>。
+  // 否则抽屉里的「总体统计」等次级标题也会成为第二个 h1，破坏页面唯一 h1 的层级。
+  const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5";
   return (
-    <h1
+    <Tag
       className={["rui-text", className || ""].filter(Boolean).join(" ")}
       // style 必须放在内部默认值之后合并：此前 {...rest} 在内部 style 之后展开，
       // 传入 style={{marginTop:24}} 会整体覆盖，导致字号/去边距丢失（h1 回退 2em）。
@@ -65,7 +68,7 @@ const Title: React.FC<
       {...rest}
     >
       {children}
-    </h1>
+    </Tag>
   );
 };
 

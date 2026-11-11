@@ -237,6 +237,31 @@ describe("T-15 StorageStatsDrawer 渲染", () => {
     expect(store.getState().storageStatsVisible).toBe(false);
     expect(container).toBeTruthy();
   });
+
+  it("打开时焦点移入抽屉、关闭后归还来源焦点（T-70 焦点管理）", () => {
+    const { store } = mount(<StorageStatsDrawer />);
+    // 准备一个来源焦点元素（模拟「打开统计」触发按钮）并聚焦
+    const trigger = document.createElement("button");
+    trigger.textContent = "打开统计";
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    act(() => {
+      store.getState().setStorageStatsVisible(true);
+    });
+    const panel = document.querySelector(".rui-drawer") as HTMLElement;
+    expect(panel).not.toBeNull();
+    // 打开即把焦点移入面板（不落在 body，屏幕阅读器可获知浮层出现）
+    expect(panel).toHaveFocus();
+
+    act(() => {
+      store.getState().setStorageStatsVisible(false);
+    });
+    // 关闭后焦点归还来源（不丢失到 body）
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
 });
 
 describe("T-15 ProcessProgressDisplay 渲染", () => {

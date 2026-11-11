@@ -29,15 +29,30 @@ describe("ui/typography · Paragraph / Title", () => {
     expect(container.querySelector("p")).toBeInTheDocument();
   });
 
-  it("Title 按 level 映射字号，自定义 style 不覆盖字号", () => {
+  it("Title 按 level 映射字号与语义标签，自定义 style 不覆盖字号", () => {
     const { container } = render(
       <Typography.Title level={3} style={{ marginTop: 24 }}>
         T
       </Typography.Title>,
     );
-    const h = container.querySelector("h1")!;
+    // T-70：level=3 渲染为 <h3>，不再恒为 <h1>
+    const h = container.querySelector("h3")!;
     expect(h.style.fontSize).toBe("20px");
     expect(h.style.marginTop).toBe("24px");
+    expect(container.querySelector("h1")).toBeNull();
+  });
+
+  it.each([
+    [1, "h1"],
+    [2, "h2"],
+    [3, "h3"],
+    [4, "h4"],
+    [5, "h5"],
+  ] as const)("Title level=%i 渲染为 %s（T-70）", (level, tag) => {
+    const { container } = render(
+      <Typography.Title level={level}>T</Typography.Title>,
+    );
+    expect(container.querySelector(tag)).not.toBeNull();
   });
 });
 
