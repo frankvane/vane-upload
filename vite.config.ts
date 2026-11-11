@@ -117,7 +117,6 @@ export default defineConfig({
         "src/components/ZustandFileUpload/hooks/useBatchUploader.ts",
         "src/components/ZustandFileUpload/types/workerProtocol.ts",
         "src/components/ZustandFileUpload/utils/auth.ts",
-        "src/ui/collapse.tsx",
         "src/ui/index.ts",
       ],
       // T-22：按 W2 实测基线（stmts 81.41 / branch 68.65 / funcs 73.86 /
