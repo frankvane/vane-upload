@@ -1,7 +1,7 @@
 /**
  * 上传 Worker 的消息协议（T-17：从 uploadWorker.ts 抽出，纯类型搬迁）。
  */
-import type { UploadHashMode } from "../types/upload";
+import type { WorkerNetworkParams, WorkerUploadConfig } from "../types/upload";
 
 export type UploadWorkerMessage =
   | {
@@ -27,27 +27,10 @@ export type UploadWorkerMessage =
       chunkCache?: {
         instanceId: string;
       };
-      networkParams?: {
-        chunkConcurrency?: number;
-        maxRetries?: number;
-        timeout?: number;
-        retryInterval?: number;
-      };
-      uploadConfig: {
-        baseURL: string;
-        uploadApi: string;
-        checkApi: string;
-        mergeApi: string;
-        /** T-19：显式续传状态接口；缺省时按 checkApi 的命名约定推导 */
-        statusApi?: string;
-        authHeaders?: Record<string, string>;
-        /** 是否携带 Cookie（credentials:'include'）。默认 false（same-origin） */
-        withCredentials?: boolean;
-        /** 调试日志开关：默认 false，关闭时 Worker 内不产生任何日志输出 */
-        debug?: boolean;
-        /** 文件哈希模式：sample 时服务端合并跳过全量 md5 强校验（分片级校验保留） */
-        hashMode?: UploadHashMode;
-      };
+      // T-58：复用共享 WorkerNetworkParams（与 UploadWorkerRequest 同源，不再漂移）。
+      networkParams?: WorkerNetworkParams;
+      // T-58：复用共享 WorkerUploadConfig（与 UploadWorkerRequest 同源，含 statusApi）。
+      uploadConfig: WorkerUploadConfig;
     }
   | {
       type: "cancel";

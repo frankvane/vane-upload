@@ -149,6 +149,38 @@ describe("runUploadTask uploadConfig 贯通（T2.1 mergeApi）", () => {
     }
   });
 
+  it("T-58：消息只带白名单内的 uploadConfig 字段（JS 消费方混入未知字段也进不来）", async () => {
+    // 模拟 JS 库消费方直接调 runUploadTask，在 uploadConfig 上挂了敏感/冗余字段。
+    const dirty = {
+      ...apiConfig,
+      statusApi: "/api/file/status",
+      authHeaders: { Authorization: "Bearer leaked" },
+      rogueField: "should-not-leak",
+      internalToken: "secret-should-not-leak",
+    } as unknown as Parameters<typeof pool.runUploadTask>[0]["uploadConfig"];
+
+    await pool.runUploadTask({
+      ...baseOptions(),
+      uploadConfig: dirty,
+    });
+
+    const posted = FakeUploadWorker.instances[0]!.posted[0]!;
+    // 白名单字段原样存在（含 statusApi / authHeaders，二者此前是 UploadWorkerRequest
+    // 漂移掉、Worker 真实消费却类型不可见的关键字段）。
+    expect(posted.uploadConfig).toMatchObject({
+      baseURL: "",
+      uploadApi: "/api/file/upload",
+      checkApi: "/api/file/instant",
+      mergeApi: "/api/file/merge",
+      statusApi: "/api/file/status",
+      authHeaders: { Authorization: "Bearer leaked" },
+    });
+    // 未知字段不得进入 Worker 消息体。
+    for (const dead of ["rogueField", "internalToken"]) {
+      expect(posted.uploadConfig).not.toHaveProperty(dead);
+    }
+  });
+
   it("完成后的 Worker 被回收进空闲池（不泄漏）", async () => {
     await pool.runUploadTask({
       ...baseOptions(),

@@ -238,6 +238,72 @@ export interface UploadConfig {
   chunkCacheMaxFileSize?: number;
 }
 
+/**
+ * T-58：上传 Worker 实际消费的 API 配置（**单一来源**）。
+ *
+ * 此前存在三处漂移的定义：
+ *  - `types/workerProtocol.ts` 的 `UploadWorkerRequest.uploadConfig`（**缺 `statusApi`**，
+ *    且 `networkParams` 仍含已删的 `networkType/fileConcurrency/chunkSize`）；
+ *  - `worker/uploadWorkerTypes.ts` 的 `UploadWorkerMessage.uploadConfig`（含 `statusApi`）；
+ *  - `services/uploadWorkerBridge.ts` 的本地 `UploadWorkerApiConfig`。
+ * 三者收敛到这一处后，Worker 读取端（`uploadWorker.ts:186` 真实消费 `statusApi`）
+ * 与发送端契约不可能再分歧——`m.uploadConfig.statusApi` 不再触发 TS2339。
+ */
+export interface WorkerUploadConfig {
+  baseURL: string;
+  uploadApi: string;
+  checkApi: string;
+  mergeApi: string;
+  /** T-19：显式续传状态接口；缺省时 Worker 按命名约定推导 */
+  statusApi?: string;
+  /** 已在主线程解析好的鉴权头（序列化传入 Worker） */
+  authHeaders?: Record<string, string>;
+  /** 是否携带 Cookie（credentials:'include'）；默认 false（same-origin） */
+  withCredentials?: boolean;
+  /** 调试日志开关（默认 false，关闭时 Worker 内不产生日志） */
+  debug?: boolean;
+  /** 文件哈希模式：sample 时服务端合并跳过全量 md5 强校验（分片级校验保留） */
+  hashMode?: UploadHashMode;
+}
+
+/**
+ * T-58：Worker 实际消费的网络并发 / 重试参数（**单一来源**）。
+ * 仅含 `uploadWorker.ts:157-161` 真正读取的字段；
+ * `networkType` / `fileConcurrency` / `chunkSize` 只服务主线程 UI / 批次 / 分片键，
+ * Worker 从不消费，故不在此（此前曾被错误塞入 `UploadWorkerRequest.networkParams`）。
+ */
+export interface WorkerNetworkParams {
+  chunkConcurrency: number;
+  maxRetries: number;
+  timeout?: number;
+  retryInterval?: number;
+}
+
+/**
+ * T-58：把内部 `UploadConfig` 白名单组装成 `WorkerUploadConfig`（比照 T-18 逐字段）。
+ * 即使调用方（含 JS 库消费方直接调 `runUploadTask`）在传入对象上挂了额外字段，
+ * 也只有白名单字段进入 Worker 消息体——与 bridge 处 `networkParams` 的白名单同源保证。
+ *
+ * @param config 主线程合并后的完整配置（含 API / 运行时字段）
+ * @param authHeaders 已在主线程解析好的鉴权头（不持久化、不进 `UploadConfig`）
+ */
+export function buildWorkerUploadConfig(
+  config: UploadConfig,
+  authHeaders: Record<string, string>,
+): WorkerUploadConfig {
+  return {
+    baseURL: config.baseURL,
+    uploadApi: config.uploadApi,
+    checkApi: config.checkApi,
+    mergeApi: config.mergeApi,
+    statusApi: config.statusApi,
+    authHeaders,
+    withCredentials: config.withCredentials,
+    debug: config.debug,
+    hashMode: config.hashMode,
+  };
+}
+
 export const statusMap: Record<string, { text: string; color: string }> = {
   queued: { text: "排队中", color: "default" },
   "queued-for-upload": { text: "待上传", color: "default" },

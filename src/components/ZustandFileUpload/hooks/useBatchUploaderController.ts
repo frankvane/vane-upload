@@ -1,5 +1,5 @@
 ﻿import { useCallback, useMemo, useRef } from "react";
-import { BatchInfo, UploadFile, UploadStatus } from "../types/upload";
+import { BatchInfo, UploadFile, UploadStatus, buildWorkerUploadConfig } from "../types/upload";
 
 import {
   loadAllUploadFiles,
@@ -166,17 +166,11 @@ export function useBatchUploader(): BatchUploaderActions {
           chunkConcurrency,
           maxRetries,
         },
-        uploadConfig: {
-          baseURL: uploadConfig.baseURL,
-          uploadApi: uploadConfig.uploadApi,
-          checkApi: uploadConfig.checkApi,
-          mergeApi: uploadConfig.mergeApi,
-          statusApi: uploadConfig.statusApi,
-          authHeaders: await resolveAuthHeaders(uploadConfig),
-          withCredentials: uploadConfig.withCredentials,
-          debug: uploadConfig.debug,
-          hashMode: uploadConfig.hashMode,
-        },
+        // T-58：白名单组装 Worker 配置（比照 T-18 逐字段，杜绝未知字段进 Worker 消息）。
+        uploadConfig: buildWorkerUploadConfig(
+          uploadConfig,
+          await resolveAuthHeaders(uploadConfig),
+        ),
         onProgress: (detail) => {
           // 宿主回调一律隔离：抛异常不能把已完成的上传误判为失败（T-33）。
           try {

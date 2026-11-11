@@ -1,4 +1,4 @@
-import { UploadFile, type UploadHashMode, type UploadProgressDetail } from "../types/upload";
+import { UploadFile, type UploadProgressDetail, type WorkerNetworkParams, type WorkerUploadConfig } from "../types/upload";
 import {
   UploadWorkerRequest,
   UploadWorkerResponse,
@@ -13,32 +13,10 @@ import { markPerf } from "../../../shared/perfTrace";
 import { createProgressThrottle } from "./progressThrottle";
 
 /**
- * T-18：只保留**上传 Worker 实际读取**的字段（uploadWorker.ts 的
- * `networkParams?.chunkConcurrency / maxRetries / timeout / retryInterval`）。
- * 此前还塞了 networkType / fileConcurrency / chunkSize，三者都只服务主线程
- * 的 UI 展示、批次并发与文件分片键计算，Worker 从不消费——每次任务都白克隆一遍。
+ * T-58：原本地 `UploadWorkerNetworkParams` / `UploadWorkerApiConfig` 已收敛到
+ * `types/upload.ts` 的 `WorkerNetworkParams` / `WorkerUploadConfig`（单一来源），
+ * 此处直接复用，避免第四处漂移。
  */
-interface UploadWorkerNetworkParams {
-  chunkConcurrency: number;
-  maxRetries: number;
-  timeout?: number;
-  retryInterval?: number;
-}
-
-interface UploadWorkerApiConfig {
-  baseURL: string;
-  uploadApi: string;
-  checkApi: string;
-  mergeApi: string;
-  /** T-19：显式指定续传状态接口；缺省时 Worker 自行按命名约定推导。 */
-  statusApi?: string;
-  authHeaders?: Record<string, string>;
-  withCredentials?: boolean;
-  /** 调试日志开关（默认 false，关闭时 Worker 内不产生日志） */
-  debug?: boolean;
-  /** 文件哈希模式（T3.1）：sample 时服务端合并跳过全量 md5 强校验 */
-  hashMode?: UploadHashMode;
-}
 
 interface RunUploadTaskOptions {
   file: UploadFile;
@@ -49,8 +27,8 @@ interface RunUploadTaskOptions {
   fileRef?: File;
   /** 分片缓存（方案 A）：fileRef 缺失时 Worker 从 IndexedDB 读取尚未确认的分片 */
   chunkCache?: { instanceId: string };
-  networkParams: UploadWorkerNetworkParams;
-  uploadConfig: UploadWorkerApiConfig;
+  networkParams: WorkerNetworkParams;
+  uploadConfig: WorkerUploadConfig;
   signal?: AbortSignal;
   /** T3.4：进度载荷升级为字节级详情（progress/speed/eta） */
   onProgress?: (detail: UploadProgressDetail) => void;
@@ -435,15 +413,26 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         },
         fileRef: options.fileRef,
         chunkCache: options.chunkCache,
-        // T-18：按白名单组装，上游对象即使混入额外字段也不会进 Worker 消息。
-        // 类型收敛之外再给一道运行时保证（库消费方可能用 JS 调用）。
+        // T-18 / T-58：按白名单组装，上游对象（含 JS 库消费方直接传入）即使混入
+        // 额外字段也不会进 Worker 消息——类型收敛（WorkerUploadConfig 单一来源）
+        // 之外再给一道运行时保证。
         networkParams: {
           chunkConcurrency: options.networkParams.chunkConcurrency,
           maxRetries: options.networkParams.maxRetries,
           timeout: options.networkParams.timeout,
           retryInterval: options.networkParams.retryInterval,
         },
-        uploadConfig: options.uploadConfig,
+        uploadConfig: {
+          baseURL: options.uploadConfig.baseURL,
+          uploadApi: options.uploadConfig.uploadApi,
+          checkApi: options.uploadConfig.checkApi,
+          mergeApi: options.uploadConfig.mergeApi,
+          statusApi: options.uploadConfig.statusApi,
+          authHeaders: options.uploadConfig.authHeaders,
+          withCredentials: options.uploadConfig.withCredentials,
+          debug: options.uploadConfig.debug,
+          hashMode: options.uploadConfig.hashMode,
+        },
       };
 
       // 注意：File 通过结构化克隆传入 Worker（不转移）。主线程注册表仍持有该引用，

@@ -1,4 +1,4 @@
-﻿import type { UploadHashMode } from "./upload";
+﻿import type { WorkerNetworkParams, WorkerUploadConfig } from "./upload";
 
 export type UploadWorkerRequest =
   | {
@@ -26,32 +26,12 @@ export type UploadWorkerRequest =
       chunkCache?: {
         instanceId: string;
       };
-      networkParams?: {
-        networkType?: string;
-        fileConcurrency?: number;
-        chunkConcurrency?: number;
-        chunkSize?: number;
-        maxRetries?: number;
-        timeout?: number;
-        retryInterval?: number;
-      };
-      uploadConfig: {
-        baseURL: string;
-        uploadApi: string;
-        checkApi: string;
-        mergeApi: string;
-        /** 鉴权请求头（已在主线程解析好，序列化传入 Worker） */
-        authHeaders?: Record<string, string>;
-        /** 是否携带 Cookie（credentials:'include'）。默认 false（same-origin）：
-         *  跨域 Bearer 头鉴权不触发 CORS credentials 强校验；仅同域/跨域
-         *  Cookie 鉴权时显式开启，且服务端需返回
-         *  Access-Control-Allow-Credentials:true。 */
-        withCredentials?: boolean;
-        /** 调试日志开关：默认 false，关闭时 Worker 内不产生任何日志输出 */
-        debug?: boolean;
-        /** 文件哈希模式：sample 时服务端合并跳过全量 md5 强校验（分片级校验保留） */
-        hashMode?: UploadHashMode;
-      };
+      // T-58：复用共享 WorkerNetworkParams（仅含 Worker 真实消费的字段，
+      // 不再误带 networkType/fileConcurrency/chunkSize）。
+      networkParams?: WorkerNetworkParams;
+      // T-58：复用共享 WorkerUploadConfig（含 statusApi，消除与
+      // UploadWorkerMessage 的漂移，修复 m.uploadConfig.statusApi 的 TS2339）。
+      uploadConfig: WorkerUploadConfig;
     }
   | {
       /** 取消指定文件的上传任务：Worker 内 AbortController.abort() 中断在途请求 */
