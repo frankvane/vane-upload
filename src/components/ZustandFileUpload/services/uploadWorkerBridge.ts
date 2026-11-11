@@ -81,13 +81,8 @@ interface UploadTaskResult {
 export interface UploadWorkerPool {
   runUploadTask: (options: RunUploadTaskOptions) => Promise<UploadTaskResult>;
   cancelUploadTask: (fileId: string) => void;
-  /** T3.3：向处理该文件的 Worker 发送暂停指令（分片边界安全暂停） */
+  /** 向处理该文件的 Worker 发送暂停指令（D-05 方案 A：中断在途并回 paused） */
   pauseUploadTask: (fileId: string) => void;
-  /**
-   * T3.3：向处理该文件的 Worker 发送继续指令。
-   * @returns 是否存在存活的 Worker 任务；false 表示任务已结束/释放，需主线程重新发起上传
-   */
-  resumeUploadTask: (fileId: string) => boolean;
   /** 释放本实例持有的全部 worker（组件卸载时调用） */
   dispose: () => void;
 }
@@ -195,16 +190,6 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
       return;
     }
     worker.postMessage({ type: "pause", fileId });
-  };
-
-  const resumeUploadTask = (fileId: string): boolean => {
-    const worker = taskWorkerMap.get(fileId);
-    if (!worker) {
-      // 任务已结束或 Worker 已释放（如刷新/卸载）：主线程应重新发起上传续传
-      return false;
-    }
-    worker.postMessage({ type: "resume", fileId });
-    return true;
   };
 
   const runUploadTask = (
@@ -398,10 +383,10 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         }
 
         if (payload.type === "paused") {
-          // T3.3：Worker 已在分片边界挂起。本实例的 runUploadTask 收尾，并把该
-          // Worker 直接销毁（不回空闲池）：当前暂停态下 Worker 内部仍挂起于
-          // waitWhilePaused，回池会留下永不被唤醒的挂起闭包与残留 Map 条目；
-          // 续传由主线程重新发起（服务端分片校验保证字节级续传），无需复用该 Worker。
+          // D-05 方案 A：Worker 已「软取消 + 回 paused」并中断在途请求。本实例的
+          // runUploadTask 收尾，并把该 Worker 直接销毁（不回空闲池）：暂停态下 Worker
+          // 内部已无挂起闭包（挂起状态机已删），但续传由主线程重新发起（服务端分片校验
+          // 保证字节级续传），无需复用该 Worker，避免残留任务 Map 条目与状态串扰。
           shouldRecycleWorker = false;
           finish({
             success: false,
@@ -410,11 +395,6 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
             pausedChunks: payload.uploadedChunks,
             totalChunks: payload.totalChunks,
           });
-          return;
-        }
-
-        if (payload.type === "resumed") {
-          // T3.3：Worker 已解除挂起并从断点续传，不在此结束任务
           return;
         }
 
@@ -493,7 +473,6 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
     runUploadTask,
     cancelUploadTask,
     pauseUploadTask,
-    resumeUploadTask,
     dispose,
   };
 };

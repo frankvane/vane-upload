@@ -576,23 +576,9 @@ export function useBatchUploader(): BatchUploaderActions {
       if (file.status !== UploadStatus.PAUSED) {
         return;
       }
-      // 优先解除 Worker 内挂起（会话内暂停：不重传，从断点续传）
-      const alive = engine.workerPool.resumeUploadTask(file.id);
-      if (alive) {
-        engine.store.getState().patchFile(file.id, {
-          status: UploadStatus.UPLOADING,
-          errorMessage: undefined,
-        });
-        await engine.storage.setItem(file.id, {
-          ...file,
-          status: UploadStatus.UPLOADING,
-          errorMessage: undefined,
-        });
-        return;
-      }
-
-      // Worker 已释放（刷新/卸载后）：重新发起上传，服务端分片校验保证字节级续传。
-      // 会话内 fileRef 优先；刷新后若分片缓存就绪同样可续传，只有两者都没有才降级重选。
+      // D-05 方案 A：Worker 挂起状态机已删除，「继续」统一走主线程重跑续传——
+      // 服务端 instant 校验已传分片并跳过，字节级续传；会话内 fileRef 优先，
+      // 刷新后若分片缓存就绪同样可续传，只有两者都没有才降级重选。
       const fileRef = engine.fileRegistry.getFileRef(file.id);
       const hasCache = fileRef
         ? true

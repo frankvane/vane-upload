@@ -55,7 +55,6 @@ const h = vi.hoisted(() => {
       runUploadTask: vi.fn(),
       cancelUploadTask: vi.fn(),
       pauseUploadTask: vi.fn(),
-      resumeUploadTask: vi.fn(() => true),
     },
     storage: {
       setItem: vi.fn(async (_id: string, _value: UploadFile) => undefined),
@@ -263,7 +262,6 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     h.engine.workerPool.runUploadTask.mockReset();
     h.engine.workerPool.cancelUploadTask.mockClear();
     h.engine.workerPool.pauseUploadTask.mockClear();
-    h.engine.workerPool.resumeUploadTask.mockReturnValue(true);
     h.engine.storage.setItem.mockResolvedValue(undefined);
     h.engine.storage.getItem.mockResolvedValue({} as UploadFile);
     h.orchestrator.loadAllUploadFiles.mockResolvedValue([]);
@@ -390,23 +388,29 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(h.engine.workerPool.pauseUploadTask).not.toHaveBeenCalled();
   });
 
-  it("resumeUploadFile：PAUSED 且 Worker 仍存活时恢复为 UPLOADING", async () => {
+  it("resumeUploadFile：PAUSED 且无续传来源时降级为「需重选」（统一主线程重跑，不依赖 Worker 存活）", async () => {
     const paused = makeFile({ id: "pa", status: UploadStatus.PAUSED });
-    h.engine.workerPool.resumeUploadTask.mockReturnValue(true);
+    h.engine.fileRegistry.getFileRef.mockReturnValue(undefined);
+    h.chunkCache.isFileCacheReady.mockResolvedValue(false);
     const { result } = renderHook(() => useBatchUploader());
 
     await act(async () => {
       await result.current.resumeUploadFile(paused);
     });
 
-    expect(h.engine.workerPool.resumeUploadTask).toHaveBeenCalledWith("pa");
+    // D-05 方案 A：续传统一走主线程重跑，不再调用已被删除的 resumeUploadTask；
+    // 无缓存可续传时降级为 ERROR/awaitingReselect，而非假装续传成功。
     expect(h.patchFile).toHaveBeenCalledWith("pa", {
-      status: UploadStatus.UPLOADING,
-      errorMessage: undefined,
+      status: UploadStatus.ERROR,
+      errorMessage: "本地续传缓存缺失，请重新选择该文件以继续上传",
+      awaitingReselect: true,
     });
     expect(h.engine.storage.setItem).toHaveBeenCalledWith(
       "pa",
-      expect.objectContaining({ status: UploadStatus.UPLOADING })
+      expect.objectContaining({
+        status: UploadStatus.ERROR,
+        awaitingReselect: true,
+      })
     );
   });
 
@@ -418,7 +422,6 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
       await result.current.resumeUploadFile(queued);
     });
 
-    expect(h.engine.workerPool.resumeUploadTask).not.toHaveBeenCalled();
     expect(h.patchFile).not.toHaveBeenCalled();
   });
 

@@ -370,7 +370,7 @@ describe("runUploadTask 消息回调路径（T2.8 补齐）", () => {
   });
 });
 
-describe("pauseUploadTask / resumeUploadTask（T3.3）", () => {
+describe("pauseUploadTask（D-05 方案 A：中断在途 + 回 paused）", () => {
   beforeEach(() => {
     pool = createUploadWorkerPool();
     FakeUploadWorker.instances = [];
@@ -414,64 +414,12 @@ describe("pauseUploadTask / resumeUploadTask（T3.3）", () => {
     expect(worker.terminated).toBe(true);
   });
 
-  it("resumeUploadTask 对运行中的任务返回 true 并发送 resume（T3.3 解除挂起）", async () => {
-    FakeUploadWorker.autoRespond = false;
-    const taskPromise = pool.runUploadTask({
-      ...baseOptions(),
-      uploadConfig: apiConfig,
-    });
-
-    const worker = FakeUploadWorker.instances[0]!;
-
-    const alive = pool.resumeUploadTask("file-1");
-    expect(alive).toBe(true);
-    const resumeMessage = worker.posted.find((m) => m.type === "resume");
-    expect(resumeMessage).toBeTruthy();
-    expect(resumeMessage?.fileId).toBe("file-1");
-
-    // resume 不结束任务：用 done 收尾
-    worker.onmessage?.({
-      data: { type: "done", skipped: false },
-    } as MessageEvent);
-    const result = await taskPromise;
-    expect(result.success).toBe(true);
-  });
-
-  it("resumeUploadTask 对不存在/已暂停释放的任务返回 false（触发主线程重跑）", () => {
-    // 任务未启动或已 paused 收尾（fileId 从 taskWorkerMap 移除）→ 返回 false
-    const alive = pool.resumeUploadTask("ghost-file");
-    expect(alive).toBe(false);
-  });
-
   it("pauseUploadTask 对不存在/已释放的任务调用是显式 no-op（返回 undefined）", () => {
     // 任务未运行或已 paused 收尾（fileId 从 taskWorkerMap 移除）：直接返回 undefined。
     const result = pool.pauseUploadTask("ghost-file");
     expect(result).toBeUndefined();
   });
 
-  it("paused 后再 resume 同一 fileId：因 Worker 已销毁，resumeUploadTask 返回 false", async () => {
-    FakeUploadWorker.autoRespond = false;
-    const taskPromise = pool.runUploadTask({
-      ...baseOptions(),
-      uploadConfig: apiConfig,
-    });
-
-    const worker = FakeUploadWorker.instances[0]!;
-    pool.pauseUploadTask("file-1");
-    worker.onmessage?.({
-      data: {
-        type: "paused",
-        fileId: "file-1",
-        uploadedChunks: 1,
-        totalChunks: 3,
-      },
-    } as MessageEvent);
-    await taskPromise;
-
-    // Worker 已销毁且 fileId 已从 taskWorkerMap 移除
-    expect(worker.terminated).toBe(true);
-    expect(pool.resumeUploadTask("file-1")).toBe(false);
-  });
 });
 
 describe("P1-8 任务静默看门狗（worker 挂起不再永久停在 UPLOADING）", () => {
@@ -501,8 +449,7 @@ describe("P1-8 任务静默看门狗（worker 挂起不再永久停在 UPLOADING
     expect(result.errorMessage).toContain("无响应");
     const worker = FakeUploadWorker.instances[0]!;
     expect(worker.terminated).toBe(true);
-    // 失联 Worker 不可复用
-    expect(pool.resumeUploadTask("file-1")).toBe(false);
+    // 失联 Worker 不可复用（D-05 后 resumeUploadTask 已删除，续传统一主线程重跑）
   });
 
   it("持续有进度消息时不被误杀", async () => {

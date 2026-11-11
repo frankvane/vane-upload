@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Worker 级 暂停/恢复 + 字节级进度 集成测试（T3.3 / T3.4）：
- * 直接加载 uploadWorker 模块（注册 self.onmessage），mock fetch 后：
- *  - 断言 pause 在分片边界挂起并回 paused（含 uploadedChunks/totalChunks）
- *  - 断言 resume 解除挂起后从断点续传直至 done（字节级进度详情随每次分片回传）
+ * Worker 级 暂停 集成测试（D-05 方案 A）：
+ * 直接加载 uploadWorker 模块（注册 self.onmessage），mock fetch 后断言——
+ *  - 暂停 = 中断在途请求 + 回 paused（含 uploadedChunks/totalChunks）
+ *  - 不再有「Worker 内挂起等待 resume」语义（该状态机已删）
+ *  - 已删除的 resume 指令被忽略：不会回到 done / resumed
  */
 
 const postedMessages: Array<Record<string, unknown>> = [];
 
 let hangUpload = false; // true：分片上传请求挂起（不 resolve），用于确定性暂停
-let uploadResolveDelayMs = 0; // 分片上传 resolve 前的延迟，用于制造续传窗口
 
 const jsonResponse = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -34,11 +34,8 @@ const fetchMock = vi.fn(async (url: string) => {
   }
   if (String(url).includes("/upload")) {
     if (hangUpload) {
-      // 挂起：模拟长时间在途请求，便于验证暂停能停止后续分片
+      // 挂起：模拟长时间在途请求，便于验证暂停能中断在途
       return new Promise<Response>(() => undefined);
-    }
-    if (uploadResolveDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, uploadResolveDelayMs));
     }
     return new Response("ok", { status: 200 });
   }
@@ -72,13 +69,12 @@ const waitForMessage = (
     tick();
   });
 
-describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
+describe("uploadWorker 暂停（D-05 方案 A：软取消 + 回 paused）", () => {
   beforeEach(async () => {
     vi.stubGlobal("fetch", fetchMock);
     fetchMock.mockClear();
     postedMessages.length = 0;
     hangUpload = false;
-    uploadResolveDelayMs = 0;
     (self as unknown as { postMessage: unknown }).postMessage = (message: {
       type: string;
     }) => {
@@ -92,7 +88,7 @@ describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
     vi.resetModules();
   });
 
-  it("暂停时挂起在分片边界并回 paused（含已传分片数与总分片数），不再发起新上传", async () => {
+  it("暂停时中断在途请求并回 paused（含已传/总分片数），不回 resumed、不续传、不 done", async () => {
     hangUpload = true; // 分片请求挂起，制造“在途”状态
     const fileSize = 3 * 1024; // 3 个分片
     const fileRef = new File([new Uint8Array(fileSize).fill(7)], "pause.bin");
@@ -125,7 +121,7 @@ describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
       expect(uploadCalls.length).toBeGreaterThan(0);
     });
 
-    // 发送暂停
+    // 发送暂停：D-05 方案 A 应中断在途并回 paused（不再挂起等待 resume）
     await dispatch({ type: "pause", fileId: "pause-case-1" });
 
     const pausedMsg = (await waitForMessage(
@@ -134,6 +130,8 @@ describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
 
     expect(pausedMsg.totalChunks).toBe(3);
     expect(pausedMsg.uploadedChunks).toBe(0); // 唯一在途分片尚未完成
+    // 不得再回 resumed（挂起状态机已删），也不得直接 done
+    expect(postedMessages.some((m) => m.type === "resumed")).toBe(false);
     expect(postedMessages.some((m) => m.type === "done")).toBe(false);
 
     // 暂停后不应再发起新的分片请求（事件驱动断言，替代固定 120ms 等待）
@@ -141,75 +139,11 @@ describe("uploadWorker 暂停 / 恢复（T3.3）", () => {
       String(u).includes("/upload")
     );
     expect(uploadCallsAfterPause.length).toBe(1);
-  });
 
-  it("暂停后继续（resume）从断点续传至完成，并回传字节级进度详情", async () => {
-    uploadResolveDelayMs = 30; // 每个分片 30ms，制造续传窗口
-    const fileSize = 3 * 1024;
-    const fileRef = new File([new Uint8Array(fileSize).fill(3)], "resume.bin");
-
-    void dispatch({
-      type: "upload",
-      fileInfo: {
-        id: "resume-case-1",
-        fileName: "resume.bin",
-        fileSize,
-        hash: "1".repeat(32),
-        chunkSize: 1024,
-        chunkKey: `${"1".repeat(32)}_${fileSize}_1024`,
-      },
-      fileRef,
-      networkParams: { chunkConcurrency: 1, maxRetries: 1 },
-      uploadConfig: {
-        baseURL: "",
-        uploadApi: "/api/file/upload",
-        checkApi: "/api/file/instant",
-        mergeApi: "/api/file/merge",
-      },
-    });
-
-    // 等待首个分片进度回传（progress 消息不含 fileId，仅按 type 匹配）
-    await waitForMessage((m) => m.type === "progress");
-
-    // 暂停
-    await dispatch({ type: "pause", fileId: "resume-case-1" });
-    expect(
-      postedMessages.some(
-        (m) => m.type === "paused" && m.fileId === "resume-case-1"
-      )
-    ).toBe(true);
-
-    // 继续
-    await dispatch({ type: "resume", fileId: "resume-case-1" });
-
-    // 应最终完成
-    await waitForMessage((m) => m.type === "done");
-    expect(postedMessages.some((m) => m.type === "done")).toBe(true);
-
-    // 全部 3 个分片均已（重新）上传
-    const uploadCalls = fetchMock.mock.calls.filter(([u]) =>
-      String(u).includes("/upload")
-    );
-    expect(uploadCalls.length).toBe(3);
-
-    // 字节级进度详情：至少一条 progress 携带完整字段且语义正确
-    const progressMsgs = postedMessages.filter(
-      (m) => m.type === "progress"
-    ) as Array<{
-      progress: number;
-      uploadedBytes: number;
-      totalBytes: number;
-      speed: number;
-      eta: number;
-    }>;
-    expect(progressMsgs.length).toBeGreaterThan(0);
-    const last = progressMsgs[progressMsgs.length - 1]!;
-    expect(last.totalBytes).toBe(fileSize);
-    expect(last.uploadedBytes).toBeGreaterThan(0);
-    expect(last.uploadedBytes).toBeLessThanOrEqual(fileSize);
-    expect(last.progress).toBeGreaterThan(0);
-    expect(last.progress).toBeLessThanOrEqual(100);
-    expect(typeof last.speed).toBe("number");
-    expect(typeof last.eta).toBe("number");
+    // 已删除的 resume 指令应被忽略：不会回到 done / resumed
+    await dispatch({ type: "resume", fileId: "pause-case-1" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(postedMessages.some((m) => m.type === "resumed")).toBe(false);
+    expect(postedMessages.some((m) => m.type === "done")).toBe(false);
   });
 });

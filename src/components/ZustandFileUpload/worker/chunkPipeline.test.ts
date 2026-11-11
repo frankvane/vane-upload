@@ -64,8 +64,6 @@ const makeCtx = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   chunkConcurrency: 1,
   signal: new AbortController().signal,
   taskStats: new Map<string, { uploadedChunks: number; totalChunks: number }>(),
-  isPaused: () => false,
-  waitWhilePaused: async () => {},
   debug: vi.fn(),
   postMessage: vi.fn(),
   ...over,

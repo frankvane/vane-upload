@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * T-56：Worker 4 个模块级任务 Map（taskAbortControllers / taskAllowedHosts /
- * taskPauseState / taskStats）必须在每个任务结束（成功 / 取消 / 秒传短路 /
- * 后端不可用任一提前 return）后清空，不得跨任务残留。
+ * T-56：Worker 3 个模块级任务 Map（taskAbortControllers / taskAllowedHosts /
+ * taskStats）必须在每个任务结束（成功 / 取消 / 秒传短路 /
+ * 后端不可用任一提前 return）后清空，不得跨任务残留。T-57 删除 taskPauseState 后剩 3 个。
  *
  * 直接加载 uploadWorker 模块（注册 self.onmessage），mock fetch 让 /instant 命中
  * 秒传（uploaded:true），复用同一模块实例连续派发两个秒传任务，断言 4 个 Map 尺寸全 0。
@@ -113,11 +113,10 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
         .length
     ).toBe(2);
 
-    // 两个秒传任务均走外层 finally 清理：4 个 Map 不得残留任何条目。
+    // 两个秒传任务均走外层 finally 清理：3 个 Map 不得残留任何条目。
     expect(__test_getTaskMapSizes()).toEqual({
       abort: 0,
       hosts: 0,
-      pause: 0,
       stats: 0,
     });
   });
@@ -133,7 +132,6 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
     expect(__test_getTaskMapSizes()).toEqual({
       abort: 0,
       hosts: 0,
-      pause: 0,
       stats: 0,
     });
 
@@ -155,7 +153,6 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
     expect(__test_getTaskMapSizes()).toEqual({
       abort: 0,
       hosts: 0,
-      pause: 0,
       stats: 0,
     });
   });

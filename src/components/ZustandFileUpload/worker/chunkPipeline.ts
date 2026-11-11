@@ -52,8 +52,6 @@ export interface ChunkPipelineContext {
   chunkConcurrency: number;
   signal: AbortSignal;
   taskStats: Map<string, { uploadedChunks: number; totalChunks: number }>;
-  isPaused: () => boolean;
-  waitWhilePaused: (fileId: string, signal?: AbortSignal) => Promise<void>;
   debug: WorkerDebug;
   postMessage: (message: unknown) => void;
 }
@@ -85,8 +83,6 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
     chunkConcurrency,
     signal,
     taskStats,
-    isPaused,
-    waitWhilePaused,
     debug,
     postMessage,
   } = ctx;
@@ -116,12 +112,6 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
     };
 
     const uploadChunk = async (i: number) => {
-      // 分片边界安全暂停（T3.3）：开始下一个分片前检查，暂停则挂起等待 resume
-      await waitWhilePaused(fileInfo.id, signal);
-      if (signal.aborted) {
-        throw new Error("上传已取消");
-      }
-
       // 字节来源：会话内 fileRef 按需 slice；刷新后续传从分片缓存读取。
       // 缓存缺片时抛出专用错误，避免被当成普通网络失败。
       const readChunk = async (): Promise<ArrayBuffer> => {
@@ -248,19 +238,6 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
         type: "error",
         message: `本地续传缓存缺失（分片 ${cacheMissingIndex + 1}/${chunkCount}），请重新选择文件后继续上传`,
         cacheMissing: true,
-      });
-      return;
-    }
-
-    // 暂停边界：若暂停到达时所有在途分片已结束（极端时序），在此确认 paused，
-    // 并结束本次上传任务（Worker 回到空闲，等待主线程 resume 重新发起或取消）
-    if (isPaused()) {
-      const stats = taskStats.get(fileInfo.id);
-      postMessage({
-        type: "paused",
-        fileId: fileInfo.id,
-        uploadedChunks: stats?.uploadedChunks ?? totalUploadedChunks,
-        totalChunks: stats?.totalChunks ?? chunkCount,
       });
       return;
     }

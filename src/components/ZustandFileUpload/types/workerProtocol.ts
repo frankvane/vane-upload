@@ -59,13 +59,8 @@ export type UploadWorkerRequest =
       fileId: string;
     }
   | {
-      /** 暂停指定文件的上传任务（T3.3）：分片边界安全暂停，Worker 挂起等待 resume */
+      /** 暂停指定文件的上传任务（D-05 方案 A）：中断在途请求并回 paused，由主线程重跑续传 */
       type: "pause";
-      fileId: string;
-    }
-  | {
-      /** 继续指定文件的上传任务（T3.3）：解除 Worker 挂起，从断点续传 */
-      type: "resume";
       fileId: string;
     };
 
@@ -123,10 +118,5 @@ export type UploadWorkerResponse =
       uploadedChunks: number;
       /** 总分片数 */
       totalChunks: number;
-    }
-  | {
-      /** 继续确认（T3.3）：Worker 已解除挂起并从断点续传 */
-      type: "resumed";
-      fileId: string;
     };
 

@@ -29,46 +29,13 @@ const REQUEST_ORIGIN = (() => {
   }
   return undefined;
 })();
-// 每个上传任务的暂停状态（T3.3）：pause 置 paused=true，分片循环在边界 await 挂起，
-// resume 触发 resumeResolver 解除挂起；taskStats 记录续传所需的已传分片数/总分片数。
-const taskPauseState = new Map<
-  string,
-  { paused: boolean; resumeResolver: (() => void) | null }
->();
+// T-57（D-05 方案 A）：删除 Worker 挂起状态机——暂停不再在 Worker 内挂起等待 resume，
+// 而是「软取消 + 回 paused」，续传由主线程重新发起（服务端分片校验保证字节级续传）。
+// taskStats 记录续传所需的已传分片数/总分片数。
 const taskStats = new Map<
   string,
   { uploadedChunks: number; totalChunks: number }
 >();
-
-/**
- * 分片边界安全暂停的挂起原语（T3.3）：在分片任务开始处 await 本函数，
- * pause 消息抵达后本调用将挂起，直到 resume 消息触发 resumeResolver 解除；
- * 暂停期间若收到 cancel（taskSignal abort），同样解除挂起，交由上层以取消收场。
- */
-function waitWhilePaused(fileId: string, signal?: AbortSignal): Promise<void> {
-  const st = taskPauseState.get(fileId);
-  if (!st || !st.paused) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    st.resumeResolver = () => {
-      st.resumeResolver = null;
-      resolve();
-    };
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          if (st.resumeResolver) {
-            st.resumeResolver = null;
-            resolve();
-          }
-        },
-        { once: true },
-      );
-    }
-  });
-}
 
 // T-17：调试通道与重试客户端各自成模块；主文件只负责把 Worker 的消息出口接上。
 const { debug, setEnabled: setDebugEnabled } = createDebugChannel((message) =>
@@ -98,47 +65,27 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         debug("收到取消指令，已中断上传", { fid }, true);
       }
       taskAllowedHosts.delete(fid);
-      // 若正处于暂停挂起，解除等待避免 resume 永不触发
-      const pauseSt = taskPauseState.get(fid);
-      if (pauseSt && pauseSt.resumeResolver) {
-        const resolver = pauseSt.resumeResolver;
-        pauseSt.resumeResolver = null;
-        resolver();
-      }
-      taskPauseState.delete(fid);
       taskStats.delete(fid);
       self.postMessage({ type: "cancelled", fileId: fid });
       return;
     }
 
-    // 暂停：仅置标志并确认；分片循环在边界 await 挂起，等待 resume（T3.3）
+    // 暂停（D-05 方案 A）：不再在 Worker 内挂起等待 resume，而是「软取消 + 回 paused」——
+    // 中断在途请求（与 cancel 复用同一 AbortController），回传 paused 与已传分片数，
+    // 由 bridge terminate 本 Worker；续传由主线程重新发起（服务端分片校验保证续传）。
     if (event.data.type === "pause") {
       const { fileId: fid } = event.data;
-      const st = taskPauseState.get(fid);
-      if (st) {
-        st.paused = true;
-        const stats = taskStats.get(fid);
-        self.postMessage({
-          type: "paused",
-          fileId: fid,
-          uploadedChunks: stats?.uploadedChunks ?? 0,
-          totalChunks: stats?.totalChunks ?? 0,
-        });
+      const controller = taskAbortControllers.get(fid);
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
       }
-      return;
-    }
-
-    // 继续：解除挂起，分片循环从断点续传（T3.3）
-    if (event.data.type === "resume") {
-      const { fileId: fid } = event.data;
-      const st = taskPauseState.get(fid);
-      if (st && st.paused) {
-        st.paused = false;
-        const resolver = st.resumeResolver;
-        st.resumeResolver = null;
-        resolver?.();
-        self.postMessage({ type: "resumed", fileId: fid });
-      }
+      const stats = taskStats.get(fid);
+      self.postMessage({
+        type: "paused",
+        fileId: fid,
+        uploadedChunks: stats?.uploadedChunks ?? 0,
+        totalChunks: stats?.totalChunks ?? 0,
+      });
       return;
     }
 
@@ -182,8 +129,6 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     // 任务级取消信号：CANCEL 消息或主线程 terminate 均可中断全部在途请求（P1-8）
     const taskController = new AbortController();
     taskAbortControllers.set(fileInfo.id, taskController);
-    // 初始化暂停状态与续传统计（T3.3）
-    taskPauseState.set(fileInfo.id, { paused: false, resumeResolver: null });
     taskSignal = taskController.signal;
 
     debug("文件信息", {
@@ -384,8 +329,6 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         chunkConcurrency,
         signal: taskSignal!,
         taskStats,
-        isPaused: () => taskPauseState.get(fileInfo.id)?.paused === true,
-        waitWhilePaused,
         debug,
         postMessage: (message) => self.postMessage(message),
       });
@@ -428,7 +371,6 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     // runChunkPipeline 的 try/finally，这些提前路径会绕过它，导致 Map 跨任务残留。
     if (fileId) {
       taskAbortControllers.delete(fileId);
-      taskPauseState.delete(fileId);
       taskStats.delete(fileId);
       taskAllowedHosts.delete(fileId);
     }
@@ -439,18 +381,16 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
 // 不预物化任务数组）；主线程与预处理 Worker 共用同一实现，避免两套语义漂移。
 
 /**
- * 测试钩子（仅测试使用，不进入业务路径）：暴露 4 个模块级任务 Map 的当前尺寸，
- * 用于验证「任务结束（成功 / 取消 / 任一提前 return）后无残留」（T-56）。
- * 生产代码不调用本函数；未引用时不影响产物体积。
+ * 测试钩子（仅测试使用，不进入业务路径）：暴露模块级任务 Map 的当前尺寸，
+ * 用于验证「任务结束（成功 / 取消 / 任一提前 return）后无残留」（T-56 / T-57）。
+ * T-57 删除 taskPauseState 后仅剩 3 个；生产代码不调用本函数。
  */
 export const __test_getTaskMapSizes = (): {
   abort: number;
   hosts: number;
-  pause: number;
   stats: number;
 } => ({
   abort: taskAbortControllers.size,
   hosts: taskAllowedHosts.size,
-  pause: taskPauseState.size,
   stats: taskStats.size,
 });
