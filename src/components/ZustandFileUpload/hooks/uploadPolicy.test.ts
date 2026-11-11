@@ -8,9 +8,9 @@ import {
   createInitialBatchInfo,
   isUploadSuccessKind,
   withClearedCountdown,
-  type BatchInfo,
   type UploadResultKind,
 } from "./uploadPolicy";
+import type { BatchInfo } from "../types/upload";
 
 const baseBatch = (): BatchInfo => ({
   current: 1,

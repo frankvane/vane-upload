@@ -415,7 +415,6 @@ exports.mergeChunks = async (req, res) => {
   let transaction = null;
   let targetPath = "";
   let stagingPath = "";
-  let mergeFileId = "";
   let userId = "";
   let releaseMergeLock = () => undefined;
   // VU-01：只有本请求确实完成过 moveIntoPlace，失败清理才有权删除 targetPath。
@@ -437,7 +436,6 @@ exports.mergeChunks = async (req, res) => {
     const safeFileId = sanitizeFileId(file_id);
     // VU-01/VU-02：所有分片路径、落盘名、FileChunk 键都带用户命名空间。
     const storageId = buildScopedFileId(userId, safeFileId);
-    mergeFileId = storageId;
     const safeName = sanitizeFilename(name);
 
     if (!safeFileId || !safeName || size === undefined || total === undefined) {

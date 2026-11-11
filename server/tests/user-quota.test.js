@@ -1,5 +1,4 @@
 // P1-4：user 维度分片配额——同一凭据更换 file_id 仍受限。
-const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const test = require("node:test");

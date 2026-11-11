@@ -95,19 +95,24 @@ describe("UploadProvider / UploadContext", () => {
 
     // 传入覆盖值后，context value 同步反映（行为而非“不抛错”）
     rerender(
-      renderWithProvider(<Probe />, {
-        maxFiles: 5,
-        maxFileSize: 5 * 1024 * 1024,
-        autoUpload: false,
-        uiMode: "compact",
-        onUploadStart: () => {},
-      }).children
+      <UploadProvider
+        settingsSource="props"
+        {...{
+          maxFiles: 5,
+          maxFileSize: 5 * 1024 * 1024,
+          autoUpload: false,
+          uiMode: "simple",
+          onUploadStart: () => {},
+        }}
+      >
+        <Probe />
+      </UploadProvider>
     );
     const over = captured.at(-1)!.value;
     expect(over.maxFiles).toBe(5);
     expect(over.maxFileSize).toBe(5 * 1024 * 1024);
     expect(over.autoUpload).toBe(false);
-    expect(over.uiMode).toBe("compact");
+    expect(over.uiMode).toBe("simple");
     expect(typeof over.onUploadStart).toBe("function");
   });
 
@@ -133,7 +138,11 @@ describe("UploadProvider / UploadContext", () => {
 
     // 传入 instanceId：重建引擎，且 storage 以该 instanceId 创建
     h.createUploadStorage.mockClear();
-    rerender(renderWithProvider(<Probe />, { instanceId: "tenant-A" }).children);
+    rerender(
+      <UploadProvider settingsSource="props" {...{ instanceId: "tenant-A" }}>
+        <Probe />
+      </UploadProvider>
+    );
     const second = captured.at(-1)!;
 
     expect(h.createUploadStorage).toHaveBeenCalledTimes(1);

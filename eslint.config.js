@@ -4,13 +4,23 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 
+// 后端（server 工作区）为 CommonJS + 纯 Node 运行环境，沿用 Node 全局表。
+// 但 Node 20+ 已将 File / crypto 提升为内置全局，server 又通过 require 重新引入同名符号，
+// 会触发 no-redeclare。这里从 lint 全局表中移除二者，让 require 引入的本地声明合法，
+// 同时保留规则对「同作用域内真实重复声明」的捕获能力。
+const serverNodeGlobals = (() => {
+  const g = { ...globals.node };
+  delete g.File;
+  delete g.crypto;
+  return g;
+})();
+
 export default tseslint.config(
   {
     ignores: [
       "dist/**",
       "coverage/**",
       "node_modules/**",
-      "server/**",
       "**/*.tsbuildinfo",
     ],
   },
@@ -71,6 +81,30 @@ export default tseslint.config(
       globals: {
         ...globals.node,
       },
+    },
+  },
+  {
+    // 后端（server 工作区）：CommonJS + 纯 Node 运行环境，此前长期未被 lint 覆盖。
+    // 仅挂 core JS 推荐规则 + Node 全局；TS 规则不介入（server 不依赖 TS）。
+    files: ["server/**/*.js"],
+    languageOptions: {
+      sourceType: "commonjs",
+      globals: serverNodeGlobals,
+    },
+    rules: {
+      // CommonJS 以 require() 引入依赖，@typescript-eslint/no-require-imports 对 CJS 无意义。
+      "@typescript-eslint/no-require-imports": "off",
+      // 改用 core no-unused-vars，并允许 Express 错误中间件的 4 参签名里
+      // 下划线前缀形参（如 _next / _err）按约定忽略，避免误报。
+      "@typescript-eslint/no-unused-vars": "off",
+      "no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
     },
   },
 );

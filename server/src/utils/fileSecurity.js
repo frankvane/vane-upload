@@ -10,6 +10,8 @@ const MAX_FILENAME_LENGTH = 255;
 
 const sanitizeFilename = (inputName) => {
   const baseName = path.basename(String(inputName || ""));
+  // 控制字符（\u0000-\u001f）需显式剔除，避免文件名注入/截断；该字符类是刻意的。
+  // eslint-disable-next-line no-control-regex
   const sanitized = baseName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
   return (sanitized || `file-${Date.now()}`).slice(0, MAX_FILENAME_LENGTH);
 };

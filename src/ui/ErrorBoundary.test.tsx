@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -9,7 +10,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
  */
 
 // 渲染即抛错的子组件
-const Boom = (): JSX.Element => {
+const Boom = (): ReactElement => {
   throw new Error("boom on render");
 };
 
@@ -39,7 +40,7 @@ describe("ErrorBoundary（F6：顶层错误边界）", () => {
   });
 
   it("自定义 fallbackRender 替代默认兜底", () => {
-    const Custom = (error: Error): JSX.Element => (
+    const Custom = (error: Error): ReactElement => (
       <div data-testid="custom">custom: {error.message}</div>
     );
     render(

@@ -45,10 +45,11 @@ const h = vi.hoisted(() => {
     allowedFileTypes: [] as string[],
     autoUpload: false,
     hashMode: "full" as const,
+    autoUploadDelay: 120 as number | undefined,
   };
   const engine = {
     instanceId: "default",
-    storage: { setItem: vi.fn(() => Promise.resolve()) },
+    storage: { setItem: vi.fn((_key: string, _value: unknown) => Promise.resolve()) },
     fileRegistry: { registerFileRef: vi.fn() },
     workerPool: { dispose: vi.fn() },
     store: { getState: () => ({ files: [] as Array<{ id: string }> }) },
@@ -117,6 +118,7 @@ beforeEach(() => {
   h.config.allowedFileTypes = [];
   h.config.autoUpload = false;
   h.config.hashMode = "full";
+  h.config.autoUploadDelay = 120;
 
   h.instances.length = 0;
   h.engine.storage.setItem.mockClear();

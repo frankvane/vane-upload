@@ -48,7 +48,7 @@ const h = vi.hoisted(() => {
       setState: vi.fn(),
     },
     fileRegistry: {
-      getFileRef: vi.fn(() => undefined),
+      getFileRef: vi.fn(() => undefined as File | undefined),
       releaseFileRef: vi.fn(),
     },
     workerPool: {
@@ -138,7 +138,7 @@ vi.mock("../context/useUploadContext", () => ({
 
 vi.mock("../services/uploadOrchestrator", () => ({
   loadAllUploadFiles: (...args: unknown[]) =>
-    h.orchestrator.loadAllUploadFiles(...args),
+    (h.orchestrator.loadAllUploadFiles as (...a: unknown[]) => unknown)(...args),
   runConcurrentQueue: (...args: unknown[]) =>
     h.orchestrator.runConcurrentQueue(...args),
 }));

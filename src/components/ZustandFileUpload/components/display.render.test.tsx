@@ -264,6 +264,7 @@ describe("T-15 ProcessProgressDisplay 渲染", () => {
           total: 10,
           success: 3,
           failed: 0,
+          oversized: 0,
         }}
         loading={false}
         cost={128}
@@ -278,7 +279,7 @@ describe("T-15 ProcessProgressDisplay 渲染", () => {
   it("total 为 0 时进度按 0 处理，不出现 NaN", () => {
     const { container } = mount(
       <ProcessProgressDisplay
-        processProgress={{ processed: 0, total: 0, success: 0, failed: 0 }}
+        processProgress={{ processed: 0, total: 0, success: 0, failed: 0, oversized: 0 }}
         loading={false}
         cost={null}
       />
@@ -296,6 +297,7 @@ describe("T-15 ProcessProgressDisplay 渲染", () => {
           total: 987654321,
           success: 123456789,
           failed: 0,
+          oversized: 0,
         }}
         loading
         cost={999999}
