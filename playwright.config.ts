@@ -64,7 +64,20 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `set "NODE_ENV=development" && set "PORT=3000" && set "AUTH_MODE=demo" && set "RATE_LIMIT_ENABLED=false" && set "SERVER_DATA_DIR=${E2E_DATA_DIR}" && set "SERVER_TMP_UPLOAD_DIR=${E2E_TMP_UPLOAD_DIR}" && set "SERVER_UPLOADS_DIR=${E2E_UPLOADS_DIR}" && node server/src/index.js`,
+      // T-43：改用 Playwright 的 `env` 字段注入环境变量，而非 Windows `set "X=Y" &&`
+      // 语法——后者在 Linux CI runner 上 `bash` 把 `set "AUTH_MODE=demo"` 当成位置参数、
+      // 不 export，后端以默认的 secure 模式启动，首条请求即 401，E2E 全绿实为假绿。
+      // `env` 由 Playwright 跨平台设置，本地（Windows）与 CI（Linux）行为一致。
+      command: "node server/src/index.js",
+      env: {
+        NODE_ENV: "development",
+        PORT: "3000",
+        AUTH_MODE: "demo",
+        RATE_LIMIT_ENABLED: "false",
+        SERVER_DATA_DIR: E2E_DATA_DIR,
+        SERVER_TMP_UPLOAD_DIR: E2E_TMP_UPLOAD_DIR,
+        SERVER_UPLOADS_DIR: E2E_UPLOADS_DIR,
+      },
       cwd: __dirname,
       url: "http://127.0.0.1:3000/api/health",
       timeout: 60_000,

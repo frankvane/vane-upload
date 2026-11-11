@@ -39,7 +39,8 @@ jobs:
       - name: Locate failing stage
         if: failure()
         run: |
-          for s in typecheck lint test:coverage test:server:coverage build size:check; do
+          set -o pipefail
+          for s in check-node typecheck lint test:coverage check-coverage-floor test:server:coverage build size:check check:dev-only; do
             if npm run "$s" >"/tmp/$s.log" 2>&1; then
               echo "PASS  $s"
             else
@@ -65,3 +66,47 @@ jobs:
           TAIL=$(tail -n 3 /tmp/docker-build.log | tr '\n' ' ' | cut -c1-300)
           echo "::error title=镜像构建失败::首个错误行为「${FIRST}」；尾部「${TAIL}」"
           exit 1
+      # T-44：镜像构建成功后**真 run** 容器并轮询健康状态，非 healthy 打印日志并失败。
+      # 删除 /api/health 路由（或让 USER node 写不了三个 VOLUME）会让这一步变红，
+      # 从而把「镜像能起、但服务不健康」这类假绿挡在门禁外。
+      - name: Container image run + health wait
+        run: |
+          set -o pipefail
+          docker run -d --name vane-ci -p 3000:3000 \
+            -e AUTH_MODE=secure \
+            -e PORT=3000 \
+            vane-upload-server:ci
+          for i in $(seq 1 20); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' vane-ci 2>/dev/null || echo "no-health")
+            echo "wait $i: health=$status"
+            if [ "$status" = "healthy" ]; then
+              echo "container healthy"
+              docker logs vane-ci 2>&1 | tail -n 20
+              docker rm -f vane-ci >/dev/null 2>&1 || true
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error title=容器未进入 healthy::60s 内未健康，打印日志"
+          docker logs vane-ci 2>&1 | tail -n 40
+          docker rm -f vane-ci >/dev/null 2>&1 || true
+          exit 1
+
+  # T-43：浏览器级 E2E 作为独立 job 与 verify 并行跑，避免拖慢快门禁；
+  # 也隔离 E2E 的偶发抖动（VU-63-6 冷启动），不与单元测试门禁互相牵连。
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      # T-43：安装 chromium 及其系统依赖（GitHub runner 默认 root，--with-deps 可用）。
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: E2E (browser-level regression)
+        run: npm run test:e2e
