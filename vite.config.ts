@@ -75,20 +75,26 @@ export default defineConfig({
     clearMocks: true,
     // VU-60：每个用例后恢复所有 spy/mock 的原始实现，避免测试间因 mock 残留互相污染。
     restoreMocks: true,
-    // VU-62：前端覆盖率采集。provider 需 `@vitest/coverage-v8`，当前沙箱无外网未安装；
-    // 联网环境执行 `npm i -D @vitest/coverage-v8` 后，`npm run test:coverage` 即生效。
-    // 阈值设为保守初值（防退化），待 VU-58/59 补测后据实测基线校准提升。
+    // VU-62 / T-42：前端覆盖率采集。provider 为 `@vitest/coverage-v8`（已在 devDependencies
+    // 安装），`npm run test:coverage` 直接生效并受阈值门禁约束。阈值基于 W2 实测基线统一
+    // 留约 3 点余量（见下方 thresholds 注释），随 T-51 补测推进据实测基线校准提升。
     coverage: {
       provider: "v8",
+      // T-42：Vitest 5.1.0 的 coverage 不支持 `all` 选项（该字段未进入类型且运行时被忽略），
+      // “未被执行（未被 import）的源文件也计入报告” 由上方 `include: ["src/**/*.{ts,tsx}"]`
+      // 实现——命中的文件即使零覆盖也会进入报告，使「新增零测试模块」被聚合指标与逐文件
+      // 门禁（scripts/check-coverage-floor.mjs）捕获，而非完全隐形。配合 exclude 把已知的
+      // 零测试模块（T-51 将逐步补测/收窄）先行豁免，避免历史债务触发误报。
+
       // VU-63/CI：报告与 .tmp 落点重定向到项目外的临时目录（见 COVERAGE_OUT_DIR），
       // 绕过 WorkBuddy 对受监控目录名 + 单目录删文件数 >50 的批量删除守卫。
       reportsDirectory: COVERAGE_OUT_DIR,
       // VU-62/CI：关闭覆盖率目录自动清理，避免触发 WorkBuddy 批量删除安全守卫
       // （clean 默认会在启动前 rm 整个 coverage/，文件数超阈值被守卫拦截导致 ci 中断）。
       clean: false,
-      // VU-62/CI：仅用 text 报告器。html/lcov 会在 coverage/.tmp 暂存每个源文件，
-      // 文件数超过 WorkBuddy 批量删除守卫阈值（50）导致 ci 中断；text 已满足阈值校验与展示。
-      reporter: ["text"],
+      // T-42：新增 json 报告器（写 coverage-final.json）供 scripts/check-coverage-floor.mjs
+      // 做逐文件零覆盖门禁；lcov 一并产出便于第三方工具消费。
+      reporter: ["text", "json", "lcov"],
       include: ["src/**/*.{ts,tsx}"],
       exclude: [
         "src/**/*.test.{ts,tsx}",
@@ -98,6 +104,21 @@ export default defineConfig({
         "**/*.d.ts",
         "src/main.tsx",
         "src/App.tsx",
+        // T-42/T-51：已知零测试模块豁免（all:true 下计为 0% 会误伤 CI）。
+        // 这类主要是 barrel / demo / dev / e2e 入口，以及少数未补测的运行时模块；
+        // T-51 将逐步补测或收窄本列表，禁止把「有分支逻辑」的模块长期留在豁免里。
+        "src/index.ts",
+        "src/e2e-full-main.tsx",
+        "src/e2e-main.tsx",
+        "src/demo/**",
+        "src/dev/**",
+        "src/components/ZustandFileUpload/components/index.ts",
+        "src/components/ZustandFileUpload/hooks/index.ts",
+        "src/components/ZustandFileUpload/hooks/useBatchUploader.ts",
+        "src/components/ZustandFileUpload/types/workerProtocol.ts",
+        "src/components/ZustandFileUpload/utils/auth.ts",
+        "src/ui/collapse.tsx",
+        "src/ui/index.ts",
       ],
       // T-22：按 W2 实测基线（stmts 81.41 / branch 68.65 / funcs 73.86 /
       // lines 82.64，T-17 后 56 文件 405 用例）统一留约 3 点余量。
