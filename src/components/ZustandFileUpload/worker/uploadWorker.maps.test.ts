@@ -156,4 +156,47 @@ describe("uploadWorker 任务 Map 清理（T-56）", () => {
       stats: 0,
     });
   });
+
+  // T-73 ⑤-A：全局 catch（参数校验抛错）路径也必须走外层 finally，
+  // 不能让 taskAllowedHosts 里刚 set 的条目跨任务残留。
+  it("缺少 fileRef / chunkCache 抛错后，finally 仍清空 3 个 Map 且只回 1 条 error", async () => {
+    const { __test_getTaskMapSizes } = await import("./uploadWorker");
+    const message = buildUploadMessage("no-ref", 1024);
+
+    await dispatch({
+      ...message,
+      fileRef: undefined,
+      chunkCache: undefined,
+    });
+
+    const errors = postedMessages.filter((m) => m.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toBe("缺少必要参数：fileRef 或 chunkCache");
+    expect(postedMessages.some((m) => m.type === "done")).toBe(false);
+    // 抛错发生在 taskAllowedHosts.set 之后，若 finally 缺失这里会是 hosts:1
+    expect(__test_getTaskMapSizes()).toEqual({
+      abort: 0,
+      hosts: 0,
+      stats: 0,
+    });
+  });
+
+  it("抛错任务之后紧接着派发秒传任务，Map 不串味且 done(skipped) 仍精确为 1", async () => {
+    const { __test_getTaskMapSizes } = await import("./uploadWorker");
+    const message = buildUploadMessage("no-ref-2", 1024);
+    await dispatch({ ...message, fileRef: undefined, chunkCache: undefined });
+    postedMessages.length = 0;
+
+    await dispatch(buildUploadMessage("instant-after-error", 2 * 1024 * 1024));
+
+    expect(
+      postedMessages.filter((m) => m.type === "done" && m.skipped === true)
+    ).toHaveLength(1);
+    expect(postedMessages.filter((m) => m.type === "error")).toHaveLength(0);
+    expect(__test_getTaskMapSizes()).toEqual({
+      abort: 0,
+      hosts: 0,
+      stats: 0,
+    });
+  });
 });

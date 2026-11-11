@@ -301,4 +301,62 @@ describe("UploadCleanupPolicy", () => {
     expect(policy.pendingCount()).toBe(1);
     expect(mockGetItem).not.toHaveBeenCalled();
   });
+
+  // T-73 ⑤-A：批量删除的失败语义。当前实现是裸 Promise.all（fail-fast），
+  // 断言「一条失败 → 整体以该错误 reject、其余删除仍已发起、后续刷新不执行」。
+  it("Promise.all(removeItem) 部分失败：精确传播该错误且不执行刷新", async () => {
+    const { options, files } = createOptions();
+    const ids = ["f-a", "f-b", "f-c"];
+    for (const id of ids) {
+      files.set(id, createFile(id, UploadStatus.DONE));
+    }
+    mockListUploadFiles.mockImplementation(async () =>
+      Array.from(files.values())
+    );
+    const failure = new Error("QuotaExceededError: f-b 删除失败");
+    mockRemoveItem.mockImplementation(async (id: string) => {
+      if (id === "f-b") throw failure;
+    });
+
+    const policy = new UploadCleanupPolicy(options);
+    for (const id of ids) {
+      await policy.addCompletedFile(id);
+    }
+    expect(policy.pendingCount()).toBe(3);
+
+    await expect(policy.forceCleanupUI()).rejects.toBe(failure);
+    // 三条删除都已发起（不是串行短路），且失败后不刷新 UI 快照。
+    expect(mockRemoveItem.mock.calls.map(([id]) => id)).toEqual([
+      "f-a",
+      "f-b",
+      "f-c",
+    ]);
+    expect(options.refreshFiles).not.toHaveBeenCalled();
+    expect(options.setFiles).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [UploadStatus.ERROR, "ERROR"],
+    [UploadStatus.UPLOADING, "UPLOADING"],
+    [UploadStatus.QUEUED, "QUEUED"],
+    [UploadStatus.PAUSED, "PAUSED"],
+  ] as const)("在途/失败状态 %s 不进入删除集合，精确零删除", async (status, label) => {
+    const { options, files } = createOptions();
+    const id = `f-${label.toLowerCase()}`;
+    files.set(id, createFile(id, status));
+    mockListUploadFiles.mockImplementation(async () =>
+      Array.from(files.values())
+    );
+
+    const policy = new UploadCleanupPolicy(options);
+    await policy.cleanupUploadedFiles();
+    policy.dispose();
+    await policy.forceCleanupUI();
+
+    expect(policy.pendingCount()).toBe(0);
+    expect(mockRemoveItem).not.toHaveBeenCalledWith(id);
+    // 快照刷新仍执行且保留该记录（不误删）
+    expect(options.refreshFiles).toHaveBeenCalledTimes(1);
+    expect(options.refreshFiles).toHaveBeenCalledWith([files.get(id)]);
+  });
 });

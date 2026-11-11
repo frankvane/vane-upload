@@ -27,6 +27,13 @@ const VITE_DEPS_CACHE_DIR =
   process.env.VITE_DEPS_CACHE_DIR ||
   path.join(os.tmpdir(), "vane-upload-vite-deps");
 
+/** 测试池默认 forks；仅允许白名单内的覆盖值，避免误配导致静默降速。 */
+const VITEST_POOL = (
+  ["forks", "threads", "vmForks", "vmThreads"] as const
+).includes(process.env.VITEST_POOL as "forks")
+  ? (process.env.VITEST_POOL as "forks" | "threads" | "vmForks" | "vmThreads")
+  : "forks";
+
 export default defineConfig({
   cacheDir: VITE_DEPS_CACHE_DIR,
   plugins: [react()],
@@ -68,7 +75,12 @@ export default defineConfig({
     environment: "jsdom",
     // 本仓库沿用源项目的 vitest 配置：默认 pool 在部分沙箱下无法初始化
     // worker 会话，改用 forks 稳定初始化。
-    pool: "forks",
+    // VU-60 / T-73：某些沙箱会话里 forks / threads 会出现 worker state 注入失效
+    // （setup 的 afterEach 报 "Vitest failed to find the current suite"，
+    // 测试文件自身报 "Cannot read properties of undefined (reading 'config')"），
+    // 重跑也不可恢复。默认仍为 forks，不改远端 CI 语义；排查 / 回归时可用
+    // `VITEST_POOL=vmForks npm test` 切到 VM 池（模块内联，state 注入稳定）。
+    pool: VITEST_POOL,
     setupFiles: "./src/test/setup.ts",
     include: ["src/**/*.test.{ts,tsx}"],
     css: true,

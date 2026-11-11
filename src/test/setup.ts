@@ -3,6 +3,59 @@ import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import "fake-indexeddb/auto";
 
+// VU-60 / T-73：切到 VM 池（`VITEST_POOL=vmForks`）时 globalThis.performance
+// 是 Node perf_hooks.Performance，只有 now/toJSON/timeOrigin，没有 User Timing
+// （mark / clearMarks / getEntriesByType / getEntriesByName），会让 T-29 埋点
+// 用例直接报 "performance.clearMarks is not a function"。jsdom 自带完整实现，
+// 故仅在 API 缺失时补一个内存版最小实现，保持两种池下的行为一致；已有原生
+// 实现时完全不介入（默认 forks 环境零影响）。
+if (
+  typeof performance !== "undefined" &&
+  typeof (performance as unknown as { mark?: unknown }).mark !== "function"
+) {
+  type PerfEntry = {
+    name: string;
+    entryType: string;
+    startTime: number;
+    duration: number;
+  };
+  let marks: PerfEntry[] = [];
+  let measures: PerfEntry[] = [];
+  const api = performance as unknown as Record<string, unknown>;
+  const makeEntry = (name: string, entryType: string): PerfEntry => ({
+    name,
+    entryType,
+    startTime: performance.now(),
+    duration: 0,
+  });
+  api.mark = (name: string): PerfEntry => {
+    const entry = makeEntry(name, "mark");
+    marks.push(entry);
+    return entry;
+  };
+  api.measure = (name: string): PerfEntry => {
+    const entry = makeEntry(name, "measure");
+    measures.push(entry);
+    return entry;
+  };
+  api.getEntries = (): PerfEntry[] => [...marks, ...measures];
+  api.getEntriesByType = (type: string): PerfEntry[] =>
+    type === "mark" ? [...marks] : type === "measure" ? [...measures] : [];
+  api.getEntriesByName = (name: string, type?: string): PerfEntry[] =>
+    type === undefined
+      ? [...marks, ...measures].filter((entry) => entry.name === name)
+      : (api.getEntriesByType as (t: string) => PerfEntry[])(type).filter(
+          (entry) => entry.name === name
+        );
+  api.clearMarks = (name?: string): void => {
+    marks = name === undefined ? [] : marks.filter((entry) => entry.name !== name);
+  };
+  api.clearMeasures = (name?: string): void => {
+    measures =
+      name === undefined ? [] : measures.filter((entry) => entry.name !== name);
+  };
+}
+
 afterEach(() => {
   cleanup();
 });

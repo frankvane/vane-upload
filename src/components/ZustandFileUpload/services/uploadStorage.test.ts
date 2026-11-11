@@ -316,4 +316,131 @@ describe("uploadStorage（T2.8 补齐）", () => {
       expect(snapshot.files.map((file) => file.id)).toEqual(["done"]);
     });
   });
+
+  // T-73 ⑤-A：迁移层 / 批量写入的确定性契约，全部使用精确值断言。
+  describe("T-73 脏记录与批量写入（精确断言）", () => {
+    it("createdAt 相同的记录保持 iterate 顺序（Array.sort 稳定性契约）", async () => {
+      const ids = ["same-3", "same-1", "same-2"];
+      iterateMock.mockImplementation(async (callback) => {
+        for (const id of ids) {
+          callback(createFile(id, UploadStatus.DONE, { createdAt: 7 }), id);
+        }
+      });
+
+      const files = await listUploadFiles(fakeStorage);
+      // 相同 key 时不得按 id / order 二次排序，必须保持 iterate 的插入顺序。
+      expect(files.map((file) => file.id)).toEqual(["same-3", "same-1", "same-2"]);
+      expect(files.every((file) => file.createdAt === 7)).toBe(true);
+    });
+
+    it.each([
+      ["NaN", Number.NaN],
+      ["+Infinity", Number.POSITIVE_INFINITY],
+      ["-Infinity", Number.NEGATIVE_INFINITY],
+      ["字符串", "7"],
+      ["null", null],
+      ["对象", {}],
+    ] as const)("createdAt=%s 的落盘脏记录被精确丢弃", async (_label, createdAt) => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(
+          {
+            ...createFile("dirty", UploadStatus.QUEUED),
+            createdAt,
+          } as unknown as UploadFile,
+          "dirty"
+        );
+        callback(createFile("clean", UploadStatus.QUEUED, { createdAt: 1 }), "clean");
+      });
+
+      const files = await listUploadFiles(fakeStorage);
+      expect(files.map((file) => file.id)).toEqual(["clean"]);
+      expect(iterateMock).toHaveBeenCalledTimes(1);
+      // 读取即迁移，纯内存，绝不回写 IndexedDB
+      expect(setItemMock).not.toHaveBeenCalled();
+    });
+
+    it("历史记录（旧状态字符串 / 无 schemaVersion）在内存中补齐，且零写回", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(
+          {
+            id: "legacy",
+            fileName: "legacy.bin",
+            createdAt: 1,
+            status: "success",
+          },
+          "legacy"
+        );
+      });
+
+      const files = await listUploadFiles(fakeStorage);
+      expect(files).toHaveLength(1);
+      expect(files[0]!.status).toBe(UploadStatus.DONE);
+      expect(files[0]!.schemaVersion).toBe(UPLOAD_SCHEMA_VERSION);
+      expect(files[0]!.progress).toBe(0);
+      expect(setItemMock).not.toHaveBeenCalled();
+    });
+
+    it("Unicode / 双向控制符 id 与 fileName 不被过滤或改写", async () => {
+      const id = "tab\u202E\u2066file\u200B\u{1F4C4}";
+      const fileName = "报告\u202Epdf\uFF0F.txt";
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile(id, UploadStatus.QUEUED, { fileName, createdAt: 1 }), id);
+      });
+
+      const files = await listUploadFiles(fakeStorage);
+      expect(files).toHaveLength(1);
+      expect(files[0]!.id).toBe(id);
+      expect(files[0]!.id.length).toBe(id.length);
+      expect(files[0]!.fileName).toBe(fileName);
+    });
+
+    it("Promise.all(setItem) 部分失败：整体以该错误 reject，且其余写入已并发发起", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("w1", UploadStatus.UPLOADING), "w1");
+        callback(createFile("w2", UploadStatus.QUEUED), "w2");
+        callback(createFile("w3", UploadStatus.PREPARING_UPLOAD), "w3");
+      });
+      const failure = new Error("QuotaExceededError: w2 落盘失败");
+      setItemMock.mockImplementation(async (key: string) => {
+        if (key === "w2") throw failure;
+      });
+
+      await expect(recoverUploadQueueOnMount(fakeStorage)).rejects.toBe(failure);
+      // fail-fast 只影响 Promise 结算，不影响「所有写入都已发起」：三条都在。
+      expect(setItemMock).toHaveBeenCalledTimes(3);
+      expect(setItemMock.mock.calls.map(([key]) => key)).toEqual(["w1", "w2", "w3"]);
+      expect(iterateMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("Promise.all(removeItem) 部分失败：整体 reject，但全部引用已释放", async () => {
+      const failure = new Error("removeItem failed: b");
+      removeItemMock.mockImplementation(async (key: string) => {
+        if (key === "b") throw failure;
+      });
+      fakeRegistry.releaseFileRef.mockClear();
+
+      await expect(
+        removeUploadFilesByIds(["a", "b", "c"], fakeStorage, fakeRegistry)
+      ).rejects.toBe(failure);
+      expect(removeItemMock.mock.calls.map(([key]) => key)).toEqual(["a", "b", "c"]);
+      expect(fakeRegistry.releaseFileRef.mock.calls.map(([id]) => id)).toEqual([
+        "a",
+        "b",
+        "c",
+      ]);
+    });
+
+    it("recoverInterruptedUploadFiles 的批量写入同样 fail-fast 且全部发起", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("i1", UploadStatus.UPLOADING), "i1");
+        callback(createFile("i2", UploadStatus.UPLOADING), "i2");
+      });
+      const failure = new Error("setItem failed: i1");
+      setItemMock.mockRejectedValue(failure);
+
+      await expect(recoverInterruptedUploadFiles(fakeStorage)).rejects.toBe(failure);
+      expect(setItemMock).toHaveBeenCalledTimes(2);
+      expect(setItemMock.mock.calls.map(([key]) => key)).toEqual(["i1", "i2"]);
+    });
+  });
 });
