@@ -605,10 +605,12 @@
   height: 6px;
 }
 .rui-progress-inner {
+  width: 100%;
   height: 100%;
+  transform-origin: left;
   border-radius: 100px;
   background: linear-gradient(90deg, var(--rui-brand-hover), var(--rui-brand));
-  transition: width var(--rui-dur-base) var(--rui-ease);
+  transition: transform var(--rui-dur-base) var(--rui-ease);
 }
 .rui-progress-text {
   font-size: 13px;

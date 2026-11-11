@@ -445,7 +445,7 @@ export const Progress: React.FC<ProgressProps> = ({
       <div className="rui-progress-rail">
         <div
           className="rui-progress-inner"
-          style={{ width: `${clamped}%`, background: strokeColor }}
+          style={{ transform: `scaleX(${clamped / 100})`, background: strokeColor }}
         />
       </div>
       {showInfo && (

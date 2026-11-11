@@ -148,6 +148,14 @@ describe("ui/primitives · Progress", () => {
     expect(container.querySelector(".rui-progress-status-success")).not.toBeNull();
     expect(screen.getByText("完成 50%")).toBeInTheDocument();
   });
+
+  it("inner 用 transform: scaleX 驱动而非 width（避免高频重排）", () => {
+    const { container } = render(<Progress percent={40} />);
+    const inner = container.querySelector(".rui-progress-inner") as HTMLElement;
+    // 填充由 scaleX 表达，不再用内联 width 驱动 -> 进度高频变化只触发合成层、不触发 layout
+    expect(inner.style.transform).toMatch(/scaleX\(0?\.4\)/);
+    expect(inner.style.width).not.toBe("40%");
+  });
 });
 
 describe("ui/primitives · Switch", () => {
