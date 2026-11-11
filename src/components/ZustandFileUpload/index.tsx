@@ -173,6 +173,15 @@ const ZustandFileUploadCore: React.FC = () => {
         );
       }
 
+      // T-40：历史排队任务与「中断后恢复」是两件事，分别按事实取数，
+      // 既不重复提示，也不会因只改 recoveredCount 而让 autoResume 漏触发。
+      const resumableCount = recovery.resumableCount ?? 0;
+      if (resumableCount > 0) {
+        messageApi.info(
+          `${resumableCount} 个排队任务的续传缓存就绪，将从断点继续上传`
+        );
+      }
+
       if (recovery.missingFileRefCount > 0) {
         messageApi.warning(
           `${recovery.missingFileRefCount} 个文件本地续传缓存缺失，需重新选择后上传`
@@ -182,7 +191,7 @@ const ZustandFileUploadCore: React.FC = () => {
       const shouldAutoResume =
         state.autoUpload &&
         !state.isNetworkOffline &&
-        recovery.recoveredCount > 0;
+        recovery.recoveredCount + (recovery.resumableCount ?? 0) > 0;
 
       if (shouldAutoResume) {
         messageApi.info("检测到中断上传任务，正在自动继续上传");

@@ -72,6 +72,8 @@ export interface UploadRecoverySummary {
   recoveredCount: number;
   /** 中断且既无运行时 fileRef、也无分片缓存的条数，需用户重新选择后上传 */
   missingFileRefCount: number;
+  /** 刷新前就在队列中、缓存就绪因而保持 QUEUED 参与自动续传的条数 */
+  resumableCount?: number;
 }
 
 /**
@@ -187,6 +189,7 @@ export const recoverUploadQueueOnMount = async (
   let totalInterrupted = 0;
   let recoveredCount = 0;
   let missingFileRefCount = 0;
+  let resumableCount = 0;
   const handledByStageOne = new Set<string>();
 
   const afterRecovery = files.map((file): UploadFile => {
@@ -230,10 +233,14 @@ export const recoverUploadQueueOnMount = async (
     // 刷新前就在队列中的记录：缓存就绪同样零点击续传；否则仍需重选。
     if (canResumeWithoutReselect(file, readyCachedFileIds)) {
       totalInterrupted += 1;
-      recoveredCount += 1;
+      resumableCount += 1;
       // 保持 QUEUED，交由 autoUpload 再次拉起；无需改写其它字段。
       return file;
     }
+    // T-40：降级同样要计入 summary，否则 index.tsx 因 totalInterrupted===0
+    // 直接 return，用户只看到一条没有提示的 ERROR 行。
+    totalInterrupted += 1;
+    missingFileRefCount += 1;
     return {
       ...file,
       status: UploadStatus.ERROR,
@@ -256,7 +263,7 @@ export const recoverUploadQueueOnMount = async (
 
   return {
     files: finalFiles,
-    summary: { totalInterrupted, recoveredCount, missingFileRefCount },
+    summary: { totalInterrupted, recoveredCount, missingFileRefCount, resumableCount },
     writeCount: writes.length,
   };
 };

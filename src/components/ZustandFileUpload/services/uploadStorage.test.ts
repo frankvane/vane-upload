@@ -227,11 +227,28 @@ describe("uploadStorage（T2.8 补齐）", () => {
       expect(snapshot.files[0]?.status).toBe(UploadStatus.QUEUED);
       expect(snapshot.summary).toEqual({
         totalInterrupted: 1,
-        recoveredCount: 1,
+        recoveredCount: 0,
         missingFileRefCount: 0,
+        resumableCount: 1,
       });
       expect(snapshot.writeCount).toBe(0);
       expect(setItemMock).not.toHaveBeenCalled();
+    });
+
+    it("T-40 历史 QUEUED + 缓存缺失：降级为 ERROR 且 summary 有可展示计数", async () => {
+      iterateMock.mockImplementation(async (callback) => {
+        callback(createFile("q-stale", UploadStatus.QUEUED), "q-stale");
+      });
+
+      const snapshot = await recoverUploadQueueOnMount(fakeStorage, {
+        listReadyFileIds: async () => new Set<string>(),
+      });
+
+      expect(snapshot.files[0]?.status).toBe(UploadStatus.ERROR);
+      expect(snapshot.files[0]?.awaitingReselect).toBe(true);
+      // 修复前这里两个计数都是 0，index.tsx 直接 return，用户只看到无声 ERROR 行
+      expect(snapshot.summary.totalInterrupted).toBe(1);
+      expect(snapshot.summary.missingFileRefCount).toBe(1);
     });
   });
 
@@ -257,9 +274,10 @@ describe("uploadStorage（T2.8 补齐）", () => {
       // 已完成文件完全不动
       expect(snapshot.files[2]?.status).toBe(UploadStatus.DONE);
       expect(snapshot.summary).toEqual({
-        totalInterrupted: 1,
+        totalInterrupted: 2,
         recoveredCount: 0,
-        missingFileRefCount: 1,
+        missingFileRefCount: 2,
+        resumableCount: 0,
       });
       // 只写发生变化的 2 条，且每条只写最终态一次
       expect(snapshot.writeCount).toBe(2);
