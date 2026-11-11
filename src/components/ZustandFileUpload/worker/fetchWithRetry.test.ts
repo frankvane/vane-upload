@@ -66,6 +66,42 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
     expect(headers.Authorization).toBeUndefined();
   });
 
+  it("T-31 相对 URL + 同源 origin 仍携带鉴权头（相对 base 不再 401）", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(ok());
+
+    await fetchWithRetry(
+      "/api/file/check",
+      { method: "POST" },
+      {
+        authHeaders: { Authorization: "Bearer auto" },
+        allowedHosts: [],
+        baseOrigin: "https://app.example.com",
+      },
+      deps,
+    );
+
+    const headers = spy.mock.calls[0]![1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer auto");
+  });
+
+  it("T-31 空白名单 + 外域绝对 URL 不携带鉴权头（不再无条件放行）", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(ok());
+
+    await fetchWithRetry(
+      "https://evil.example.com/api",
+      { method: "GET" },
+      {
+        authHeaders: { Authorization: "Bearer secret" },
+        allowedHosts: [],
+        baseOrigin: "https://app.example.com",
+      },
+      deps,
+    );
+
+    const headers = spy.mock.calls[0]![1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
   it("5xx 按 retryInterval 退避重试，成功后只请求两次", async () => {
     const spy = vi
       .spyOn(globalThis, "fetch")

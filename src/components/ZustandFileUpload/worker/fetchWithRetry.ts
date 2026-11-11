@@ -17,6 +17,8 @@ export interface FetchRetryConfig {
   credentials?: RequestCredentials;
   /** F3：允许携带鉴权头的宿主白名单；URL host 不在白名单内时不附加 authHeaders */
   allowedHosts?: string[];
+  /** T-31：同源判定的 origin，由 Worker 显式注入，用于解析相对 URL */
+  baseOrigin?: string;
   /** 外部取消信号（任务级 AbortController）：abort 时中断在途 fetch 与重试 */
   signal?: AbortSignal;
 }
@@ -50,6 +52,7 @@ export async function fetchWithRetry(
     authHeaders,
     credentials,
     allowedHosts,
+    baseOrigin,
     signal,
   }: FetchRetryConfig = {},
   deps: FetchRetryDeps,
@@ -61,9 +64,9 @@ export async function fetchWithRetry(
   debug(`开始请求: ${url}`, { method: options.method, maxRetries });
 
   // 合并鉴权头（authHeaders 优先级低于调用方显式 headers，避免覆盖 Content-Type 等）
-  // F3：仅当目标 URL 的 host 命中白名单时才附加 authHeaders；非白名单域名
-  // （如错误的 baseURL / 外部 URL）一律不携带 Bearer，避免 token 泄漏到任意站点。
-  const sendAuth = isUrlAllowed(url, allowedHosts ?? []);
+  // F3：绝对 URL 需命中白名单或与 baseOrigin 同源；相对 URL 需能借 baseOrigin
+  // 落到同源。否则一律不携带 Bearer，避免 token 泄漏到任意站点。
+  const sendAuth = isUrlAllowed(url, allowedHosts ?? [], baseOrigin);
   const mergedHeaders: Record<string, string> = {
     ...(sendAuth ? (authHeaders ?? {}) : {}),
     ...(options.headers as Record<string, string> | undefined),

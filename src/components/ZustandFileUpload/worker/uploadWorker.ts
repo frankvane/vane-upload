@@ -16,6 +16,19 @@ const taskAbortControllers = new Map<string, AbortController>();
 // 每个上传任务允许携带鉴权头的宿主白名单（F3，SSRF/token 泄漏防护），
 // 由 baseURL 推导，随任务开始解析、结束清理。
 const taskAllowedHosts = new Map<string, string[]>();
+// T-31：同源判定的 origin。lib 构建把 worker 内联成 blob: URL，其 location.origin
+// 通常继承创建页；少数运行时返回 "null"，此时从 blob: href 内嵌的 URL 再取一次。
+// 模块自身不缓存请求结果，只算一次，避免每个请求都读 location。
+const REQUEST_ORIGIN = (() => {
+  try {
+    const { origin, href } = self.location;
+    if (origin && origin !== "null") return origin;
+    if (href?.startsWith("blob:")) return new URL(href.slice(5)).origin;
+  } catch {
+    // 无 location 的测试环境：相对 URL 会被保守拒绝，绝对 URL 白名单路径不受影响
+  }
+  return undefined;
+})();
 // 每个上传任务的暂停状态（T3.3）：pause 置 paused=true，分片循环在边界 await 挂起，
 // resume 触发 resumeResolver 解除挂起；taskStats 记录续传所需的已传分片数/总分片数。
 const taskPauseState = new Map<
@@ -215,6 +228,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         authHeaders,
         credentials: credentialsMode,
         allowedHosts: taskAllowedHosts.get(fileInfo.id),
+        baseOrigin: REQUEST_ORIGIN,
         signal: taskSignal,
         ...extra,
       });
