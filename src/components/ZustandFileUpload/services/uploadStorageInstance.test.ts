@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import localforage from "localforage";
 import type LocalForage from "localforage";
 
 import {
@@ -76,5 +77,36 @@ describe("createUploadStorage 实例隔离", () => {
     const fromB = await b.getItem<{ from: string }>("sameKey");
     expect(fromA?.from).toBe("A");
     expect(fromB?.from).toBe("B");
+  });
+});
+
+describe("T-66：代理转发到同一底层连接（不分裂）", () => {
+  it("setItem/getItem/removeItem/iterate 都委托给同一底层实例", () => {
+    const setItem = vi.fn();
+    const getItem = vi.fn();
+    const removeItem = vi.fn();
+    const iterate = vi.fn();
+    const fakeStore = {
+      setItem,
+      getItem,
+      removeItem,
+      iterate,
+    } as unknown as LocalForage;
+    const createSpy = vi
+      .spyOn(localforage, "createInstance")
+      .mockReturnValue(fakeStore);
+
+    const storage = createUploadStorage("delegate-test");
+    storage.setItem("k", { a: 1 });
+    storage.getItem("k");
+    storage.removeItem("k");
+    storage.iterate(() => undefined);
+
+    // 四个方法都调用到底层同一实例的对应方法（同一连接，无代理分裂）
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(getItem).toHaveBeenCalledTimes(1);
+    expect(removeItem).toHaveBeenCalledTimes(1);
+    expect(iterate).toHaveBeenCalledTimes(1);
+    createSpy.mockRestore();
   });
 });

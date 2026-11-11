@@ -20,13 +20,27 @@ export const DEFAULT_UPLOAD_STORE_NAME = "upload_files";
  */
 const withSchemaVersion = (store: UploadStorage): UploadStorage => {
   const wrapped = Object.create(store) as UploadStorage;
+  // setItem 写入前统一盖章 schemaVersion。
   wrapped.setItem = ((key: string, value: unknown, callback?: unknown) =>
     store.setItem(
       key,
       stampUploadSchema(value) as never,
       callback as never
     )) as UploadStorage["setItem"];
-  return wrapped;
+  // T-66：Object.create 代理会把继承方法（getItem / iterate / removeItem / clear …）
+  // 的 this 指到空壳 wrapped，导致这些操作走错连接 / 静默失败（设计称「代理读写分裂」）。
+  // 用 Proxy 把所有方法调用的 this 重新绑回真正的 localforage 实例，保证
+  // setItem / getItem / iterate / removeItem 全部走同一底层连接。
+  return new Proxy(wrapped, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value === "function") {
+        return (...args: unknown[]) =>
+          (value as (...a: unknown[]) => unknown).call(store, ...args);
+      }
+      return value;
+    },
+  }) as UploadStorage;
 };
 
 export const createUploadStorage = (instanceId?: string): UploadStorage =>
