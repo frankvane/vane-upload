@@ -53,6 +53,14 @@ export interface BatchUploaderActions {
   retryAllFailedFiles: () => Promise<RetrySummary>;
   forceCleanupUI: () => Promise<void>;
   pendingCleanupCount: () => number;
+  /**
+   * 仅供单测：暴露批次内「用户取消 / 暂停」集合的大小，用于断言整批取消后集合已清空。
+   * 不影响生产行为。
+   */
+  __testInternals?: {
+    cancelledInBatchCount: () => number;
+    pausedInBatchCount: () => number;
+  };
 }
 
 /**
@@ -113,6 +121,21 @@ export function useBatchUploader(): BatchUploaderActions {
     autoCleanup: uploadConfig.autoCleanup,
   });
 
+  /**
+   * T-64：落盘 + 同步到 store 的统一收口。
+   * processFileUpload 内 6 处「await engine.storage.setItem(id, f); syncFile(f);」
+   * 完全重复；抽成单一 helper，保证任何分支都不会漏掉 syncFile 造成
+   * 「持久化已推进、内存行却是旧引用」的竞态（T-07 / E2E-03 正守护这类问题）。
+   * id 显式传入：调用方始终持有已知 file.id，不依赖 latest（持久化回读对象）是否带 id。
+   */
+  const persistAndSync = useCallback(
+    async (id: string, file: UploadFile) => {
+      await engine.storage.setItem(id, file);
+      syncFile(file);
+    },
+    [engine, syncFile]
+  );
+
   const processFileUpload = useCallback(
     async (file: UploadFile, signal?: AbortSignal): Promise<boolean> => {
       if (signal?.aborted) {
@@ -144,8 +167,7 @@ export function useBatchUploader(): BatchUploaderActions {
           file.progress = 0;
           file.errorMessage = "本地续传缓存缺失，请重新选择该文件以继续上传";
           file.awaitingReselect = true;
-          await engine.storage.setItem(file.id, file);
-          syncFile(file);
+          await persistAndSync(file.id, file);
           return false;
         }
       } else {
@@ -154,8 +176,7 @@ export function useBatchUploader(): BatchUploaderActions {
       }
 
       file.status = UploadStatus.UPLOADING;
-      await engine.storage.setItem(file.id, file);
-      syncFile(file);
+      await persistAndSync(file.id, file);
 
       const result = await engine.workerPool.runUploadTask({
         file,
@@ -213,8 +234,7 @@ export function useBatchUploader(): BatchUploaderActions {
         }
         latest.errorMessage = undefined;
         latest.awaitingReselect = false;
-        await engine.storage.setItem(file.id, latest);
-        syncFile(latest);
+        await persistAndSync(file.id, latest);
         return false;
       }
 
@@ -234,8 +254,7 @@ export function useBatchUploader(): BatchUploaderActions {
             (_, k) => k
           );
         }
-        await engine.storage.setItem(file.id, latest);
-        syncFile(latest);
+        await persistAndSync(file.id, latest);
         return false;
       }
 
@@ -248,8 +267,7 @@ export function useBatchUploader(): BatchUploaderActions {
         // 已完成（含秒传）：分片缓存不再需要，立即清理；Worker 成功路径同样会删。
         void clearFileChunkCache(engine.instanceId, file.id);
 
-        await engine.storage.setItem(file.id, latest);
-        syncFile(latest);
+        await persistAndSync(file.id, latest);
 
         // T-33：宿主回调失败不改变「文件已成功落盘」这一事实。
         try {
@@ -269,8 +287,7 @@ export function useBatchUploader(): BatchUploaderActions {
         latest.awaitingReselect = true;
       }
       void clearFileChunkCache(engine.instanceId, file.id);
-      await engine.storage.setItem(file.id, latest);
-      syncFile(latest);
+      await persistAndSync(file.id, latest);
 
       try {
         uploadConfig.onUploadError?.(latest, kind.message);
@@ -282,6 +299,7 @@ export function useBatchUploader(): BatchUploaderActions {
     [
       engine,
       syncFile,
+      persistAndSync,
       chunkConcurrency,
       maxRetries,
       setProgressDetail,
@@ -420,6 +438,12 @@ export function useBatchUploader(): BatchUploaderActions {
         };
       } finally {
         endBatchSession(controller);
+        // T-63：整批取消（cancelUpload 会向两个集合写入被取消/暂停文件 id）后必须清空，
+        // 否则残留 id 会泄漏到后续「不带 resetCancelCounters」的批次（续传 / 重试批），
+        // 被 onSettled 误判为「用户取消 / 暂停」而错计失败/成功统计。
+        // 正常完成的批次里这些 id 已被 onSettled 消费（delete），此处为兜底清空。
+        cancelledInBatchIdsRef.current.clear();
+        pausedInBatchIdsRef.current.clear();
         // T-33：无论批次正常结束还是编排器抛异常，都必须复位上传态并刷新列表。
         // 放在 finally 而不是 finalizeBatch，异常路径才不会把 isUploading 永久卡在 true。
         setIsUploading(false);
@@ -592,13 +616,23 @@ export function useBatchUploader(): BatchUploaderActions {
         getMessageApi().warning("本地续传缓存缺失，请重新选择文件以继续上传");
         return;
       }
-      // 复用上传链路：服务端 instant 校验已传分片并跳过，字节级续传
-      void processFileUpload(
-        { ...file, status: UploadStatus.UPLOADING, progress: file.progress ?? 0 },
-        undefined
+      // T-63：续传复用 uploadAll 的批量编排（单文件批），而不是 void 直接调
+      // processFileUpload（旧实现：无会话 signal、无 isUploading、无对账，且
+      // fire-and-forget 抛错无人接）。走 runBatch 带来三点正确性：
+      //   1) 接入 beginBatchSession / setIsUploading —— 续传状态对外可见、可被 cancelUpload 中止；
+      //   2) 接上批次 controller.signal —— 续传途中点「整批取消」能真正 abort；
+      //   3) 走完整 finalizeBatch 对账 —— 统计口径与「上传全部」完全一致。
+      // 服务端 instant 校验会跳过已传分片，做到字节级续传。
+      const { aborted, summary } = await runBatch(
+        [{ ...file, status: UploadStatus.QUEUED, progress: file.progress ?? 0 }],
+        { batchInfo: createInitialBatchInfo(1) }
       );
+      if (aborted) {
+        return;
+      }
+      await finalizeBatch(summary, 1);
     },
-    [engine, getMessageApi, processFileUpload]
+    [engine, getMessageApi, runBatch, finalizeBatch]
   );
 
   /**
@@ -758,6 +792,11 @@ export function useBatchUploader(): BatchUploaderActions {
       retryAllFailedFiles,
       forceCleanupUI,
       pendingCleanupCount,
+      // 测试钩子：断言整批取消后取消/暂停集合已清空（不影响生产行为）。
+      __testInternals: {
+        cancelledInBatchCount: () => cancelledInBatchIdsRef.current.size,
+        pausedInBatchCount: () => pausedInBatchIdsRef.current.size,
+      },
     }),
     [
       uploadAll,
@@ -770,6 +809,8 @@ export function useBatchUploader(): BatchUploaderActions {
       retryAllFailedFiles,
       forceCleanupUI,
       pendingCleanupCount,
+      cancelledInBatchIdsRef,
+      pausedInBatchIdsRef,
     ]
   );
 }

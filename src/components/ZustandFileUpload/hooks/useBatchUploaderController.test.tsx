@@ -852,4 +852,72 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     expect(persisted.awaitingReselect).toBe(true);
     expect(persisted.errorMessage).toContain("本地续传缓存缺失");
   });
+
+  /* ================== T-63：续传接入批次编排 + 整批取消集合清空 ================== */
+
+  it("T-63：resumeUploadFile 有续传来源时走 runBatch（单文件批），对账为 DONE 且 isUploading 正确", async () => {
+    const paused = makeFile({ id: "pa", status: UploadStatus.PAUSED, progress: 40 });
+    setEngineState([paused], { pa: 40 });
+    // 会话内上传：fileRef 存在 → 字节来自 fileRef，缓存只决定刷新后能否续传
+    h.engine.fileRegistry.getFileRef.mockReturnValue(
+      new File([new Uint8Array(4)], "pa.bin")
+    );
+    h.chunkCache.isFileCacheReady.mockResolvedValue(true);
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
+    h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
+
+    const { result } = renderHook(() => useBatchUploader());
+
+    await act(async () => {
+      await result.current.resumeUploadFile(paused);
+    });
+
+    // 续传接入了批次编排：runBatch 内部的并发队列跑了一遍 task
+    expect(h.orchestrator.runConcurrentQueue).toHaveBeenCalledTimes(1);
+    // isUploading 被正确置起又复位（旧实现 void 调用，setIsUploading 完全不触发）
+    expect(h.storeState.setIsUploading).toHaveBeenNthCalledWith(1, true);
+    expect(h.storeState.setIsUploading).toHaveBeenLastCalledWith(false);
+    // 走完整对账：单文件续传成功 → onBatchComplete success:1 / failed:0
+    expect(h.uploadContext.onBatchComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ success: 1, failed: 0, total: 1 })
+    );
+    // DONE 终态落盘（字节级续传由服务端 instant 校验跳过已传分片）
+    expect(h.engine.storage.setItem).toHaveBeenCalledWith(
+      "pa",
+      expect.objectContaining({ status: UploadStatus.DONE })
+    );
+  });
+
+  it("T-63：uploadAll 进行中整批取消后 cancelledInBatchIdsRef 清空、不污染统计", async () => {
+    // 文件处于 UPLOADING（既是自动可上传状态，又能让 cancelUpload 写入集合），
+    // 复现「上传进行中用户点整批取消」的窗口。
+    const uploading = makeFile({
+      id: "mid",
+      status: UploadStatus.UPLOADING,
+      progress: 50,
+    });
+    setEngineState([uploading], { mid: 50 });
+    h.orchestrator.loadAllUploadFiles.mockResolvedValue([uploading]);
+
+    let actions: ReturnType<typeof useBatchUploader> | null = null;
+    // 队列启动后立刻触发整批取消（abort 控制器 + 向集合写入文件 id），编排器随即退出。
+    h.orchestrator.runConcurrentQueue.mockImplementation(async () => {
+      actions!.cancelUpload();
+      return { successCount: 0, failedCount: 0, skippedCount: 0 };
+    });
+
+    const { result } = renderHook(() => useBatchUploader());
+    actions = result.current;
+
+    await act(async () => {
+      await result.current.uploadAll();
+    });
+
+    // 批次结束后集合必须清空：否则会泄漏到后续不带 resetCancelCounters 的续传/重试批，
+    // 被 onSettled 误判为「用户取消」而错计统计。
+    expect(result.current.__testInternals!.cancelledInBatchCount()).toBe(0);
+    expect(result.current.__testInternals!.pausedInBatchCount()).toBe(0);
+    // 整批取消后 isUploading 复位
+    expect(h.storeState.setIsUploading).toHaveBeenLastCalledWith(false);
+  });
 });
