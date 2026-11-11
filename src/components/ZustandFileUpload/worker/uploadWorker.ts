@@ -1,3 +1,4 @@
+import { normalizeConcurrency as clampConcurrency } from "../../../shared/concurrency";
 import { getAllowedHosts } from "../../../shared/urlSafety";
 import { joinUrl } from "../../../shared/url";
 import { resolveStatusApi } from "../../../shared/uploadApiPaths";
@@ -37,6 +38,16 @@ const taskStats = new Map<
   { uploadedChunks: number; totalChunks: number }
 >();
 
+// T-74：一次取消只回一条 `cancelled`。CANCEL 消息、chunkPipeline 的
+// signal.aborted 分支、内层/外层 catch 都可能各自发一条，按 fileId 去重，
+// 否则主线程会收到多条同义确认，UI 收尾逻辑被重复触发。
+const cancelledNotified = new Set<string>();
+const postCancelled = (fid: string): void => {
+  if (cancelledNotified.has(fid)) return;
+  cancelledNotified.add(fid);
+  self.postMessage({ type: "cancelled", fileId: fid });
+};
+
 // T-17：调试通道与重试客户端各自成模块；主文件只负责把 Worker 的消息出口接上。
 const { debug, setEnabled: setDebugEnabled } = createDebugChannel((message) =>
   self.postMessage(message),
@@ -66,7 +77,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       }
       taskAllowedHosts.delete(fid);
       taskStats.delete(fid);
-      self.postMessage({ type: "cancelled", fileId: fid });
+      postCancelled(fid);
       return;
     }
 
@@ -99,23 +110,30 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
 
     const { fileInfo, fileRef, chunkCache, networkParams, uploadConfig } =
       event.data;
-    fileId = fileInfo.id;
+    fileId = fileInfo?.id;
+    // T-74：新任务复用 fileId 时清掉上一次的取消标记
+    if (fileId) cancelledNotified.delete(fileId);
     const authHeaders = uploadConfig?.authHeaders;
+    // 调试开关只依赖配置，先打开，异常日志才不受上一任务遗留状态影响。
+    setDebugEnabled(uploadConfig?.debug === true);
+
+    // T-74：必要参数检查必须早于任何 fileInfo.id 访问——旧顺序下
+    // taskAllowedHosts.set(fileInfo.id) 先抛 TypeError，防御分支永远走不到。
+    if (!fileInfo) {
+      // 异常日志只带白名单字段：event.data 含 uploadConfig.authHeaders
+      // 与 fileRef，整体塞进 debug 会把凭据写进出站日志。
+      debug("缺少文件信息", { type: event.data.type }, true);
+      throw new Error("缺少必要参数：fileInfo");
+    }
+
     // F3：由 baseURL 推导允许携带鉴权头的宿主白名单（SSRF/token 泄漏防护）
     taskAllowedHosts.set(
       fileInfo.id,
       getAllowedHosts({ baseURL: uploadConfig?.baseURL })
     );
-    // 调试日志开关由每次上传任务的配置注入（默认关闭）
-    setDebugEnabled(uploadConfig?.debug === true);    // 仅当显式开启 withCredentials（Cookie 鉴权）时才带 'include'，否则 same-origin
+    // 仅当显式开启 withCredentials（Cookie 鉴权）时才带 'include'，否则 same-origin
     const credentialsMode: RequestCredentials =
       uploadConfig?.withCredentials === true ? "include" : "same-origin";
-
-    // 检查必要参数
-    if (!fileInfo) {
-      debug("缺少文件信息", event.data as unknown as Record<string, unknown>);
-      throw new Error("缺少必要参数：fileInfo");
-    }
 
     // 字节来源：会话内 fileRef 优先；刷新后续传仅由分片缓存提供。
     if (!fileRef && !chunkCache?.instanceId) {
@@ -142,6 +160,22 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     const fileSize = fileRef ? fileRef.size : fileInfo.fileSize;
     const chunkSize = fileInfo.chunkSize || 1024 * 1024;
     const chunkCount = Math.ceil(fileSize / chunkSize);
+
+    // T-74：0 字节文件没有任何分片，服务端 /merge 不接受 total=0。
+    // 发一次 100% progress 后直接 done，跳过预检 / 上传 / 合并。
+    if (fileSize <= 0) {
+      self.postMessage({
+        type: "progress",
+        progress: 100,
+        uploadedBytes: 0,
+        totalBytes: 0,
+        speed: 0,
+        eta: 0,
+      });
+      self.postMessage({ type: "done", skipped: false });
+      return;
+    }
+
     const cacheKey = chunkCache?.instanceId
       ? { instanceId: chunkCache.instanceId, fileId: fileInfo.id }
       : null;
@@ -154,7 +188,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     });
 
     // 使用网络参数中的分片并发数和重试参数
-    const chunkConcurrency = networkParams?.chunkConcurrency || 2;
+    // T-76：chunkConcurrency 由用户配置注入 Worker，先钳到硬上限，
+    // 避免 Infinity / 超大值在 runCursorPool 里拉起海量 runner。
+    const chunkConcurrency = clampConcurrency(networkParams?.chunkConcurrency ?? 2);
     const retryOptions = {
       maxRetries: networkParams?.maxRetries || 3,
       timeout: networkParams?.timeout || 30000,
@@ -330,13 +366,20 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
         signal: taskSignal!,
         taskStats,
         debug,
-        postMessage: (message) => self.postMessage(message),
+        postMessage: (message) => {
+          // T-74：pipeline 的取消确认统一走去重出口
+          if ((message as { type?: string }).type === "cancelled") {
+            postCancelled(fileInfo.id);
+            return;
+          }
+          self.postMessage(message);
+        },
       });
     } catch (error) {
       // VU-07：取消时在途 fetch 抛 AbortError，旧实现统一上报 error，
       // 与主线程的 cancelled 收尾形成竞态，UI 可能显示「失败」。
       if (isCancellation(error, taskSignal)) {
-        self.postMessage({ type: "cancelled", fileId: fileId ?? "" });
+        postCancelled(fileId ?? "");
       } else if (error instanceof ChunkCacheMissError) {
         self.postMessage({
           type: "error",
@@ -356,7 +399,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
   } catch (error) {
     // Worker 执行过程中的全局错误处理（同样要区分取消）
     if (isCancellation(error, taskSignal)) {
-      self.postMessage({ type: "cancelled", fileId: fileId ?? "" });
+      postCancelled(fileId ?? "");
       return;
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -373,6 +416,7 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       taskAbortControllers.delete(fileId);
       taskStats.delete(fileId);
       taskAllowedHosts.delete(fileId);
+      cancelledNotified.delete(fileId);
     }
   }
 };

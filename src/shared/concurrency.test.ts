@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mapWithConcurrency, runCursorPool } from "./concurrency";
+import { MAX_CONCURRENCY, mapWithConcurrency, runCursorPool } from "./concurrency";
 
 /** 让出两个微任务，使同一轮的 runner 都能进入临界区，从而观察真实并发峰值。 */
 const yieldTwice = async () => {
@@ -115,6 +115,51 @@ describe("runCursorPool（VU-49 游标式并发池）", () => {
     });
     expect(nan.completed).toBe(3);
   });
+
+  it("T-76 超大/无穷并发被钳到硬上限，不再一次性拉起海量 runner", async () => {
+    let active = 0;
+    let peak = 0;
+    let cursor = 0;
+    const huge = await runCursorPool({
+      next: () => (cursor < 200 ? cursor++ : undefined),
+      concurrency: 100_000,
+      task: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await yieldTwice();
+        active -= 1;
+      },
+    });
+    expect(peak).toBe(MAX_CONCURRENCY);
+    expect(huge.completed).toBe(200);
+
+    cursor = 0;
+    const infinite = await runCursorPool({
+      next: () => (cursor < 5 ? cursor++ : undefined),
+      concurrency: Number.POSITIVE_INFINITY,
+      task: async () => undefined,
+    });
+    expect(infinite.completed).toBe(5);
+  });
+
+  it("T-76 totalTasks 对齐 mapWithConcurrency：runner 数不超过任务数", async () => {
+    let active = 0;
+    let peak = 0;
+    let cursor = 0;
+    const summary = await runCursorPool({
+      next: () => (cursor < 2 ? cursor++ : undefined),
+      concurrency: 8,
+      totalTasks: 2,
+      task: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await yieldTwice();
+        active -= 1;
+      },
+    });
+    expect(peak).toBe(2);
+    expect(summary.completed).toBe(2);
+  });
 });
 
 describe("mapWithConcurrency（VU-43 哈希并发池）", () => {
@@ -158,5 +203,20 @@ describe("mapWithConcurrency（VU-43 哈希并发池）", () => {
     const results = await mapWithConcurrency([], 4, task);
     expect(results).toEqual([]);
     expect(task).not.toHaveBeenCalled();
+  });
+
+  it("T-76 mapWithConcurrency 同样受 MAX_CONCURRENCY 硬上限约束", async () => {
+    let active = 0;
+    let peak = 0;
+    const items = Array.from({ length: 100 }, (_, i) => i);
+    const results = await mapWithConcurrency(items, 100_000, async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await yieldTwice();
+      active -= 1;
+      return undefined;
+    });
+    expect(results).toHaveLength(100);
+    expect(peak).toBe(MAX_CONCURRENCY);
   });
 });

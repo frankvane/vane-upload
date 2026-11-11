@@ -18,22 +18,44 @@ export interface DebugChannel {
   setEnabled: (enabled: boolean) => void;
 }
 
-/** VU-05：日志 data 的兜底脱敏——headers 按敏感键置换，字符串值洗掉裸 token。 */
+/** 只递归 plain object / 数组；File、Blob、Date 等保持原样，避免展开出无意义结构。 */
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  (Object.getPrototypeOf(value) === Object.prototype ||
+    Object.getPrototypeOf(value) === null);
+
+const MAX_SANITIZE_DEPTH = 4;
+
+const sanitizeValue = (value: unknown, depth: number): unknown => {
+  if (typeof value === "string") return scrubLogText(value);
+  if (depth >= MAX_SANITIZE_DEPTH) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeValue(item, depth + 1));
+  }
+  if (!isPlainObject(value)) return value;
+  const safe: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key.toLowerCase() === "headers" && nested && typeof nested === "object") {
+      safe[key] = redactHeaders(nested as Record<string, string>);
+    } else {
+      safe[key] = sanitizeValue(nested, depth + 1);
+    }
+  }
+  return safe;
+};
+
+/**
+ * VU-05 / T-74：日志 data 的兜底脱敏——headers 按敏感键置换，
+ * 字符串与嵌套对象递归洗掉裸 token（旧实现非字符串值原样透传，
+ * 一旦调用点误塞整个 event.data 就会把 authHeaders 写进出站日志）。
+ */
 const sanitizeDebugData = (
   data: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined => {
   if (!data) return undefined;
-  const safe: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(data)) {
-    if (key.toLowerCase() === "headers" && value && typeof value === "object") {
-      safe[key] = redactHeaders(value as Record<string, string>);
-    } else if (typeof value === "string") {
-      safe[key] = scrubLogText(value);
-    } else {
-      safe[key] = value;
-    }
-  }
-  return safe;
+  return sanitizeValue(data, 0) as Record<string, unknown>;
 };
 
 export const createDebugChannel = (

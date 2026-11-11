@@ -11,6 +11,8 @@ export interface CursorPoolOptions {
   /** 返回下一个待执行任务的索引；返回 undefined 表示队列已耗尽。 */
   next: () => number | undefined;
   concurrency: number;
+  /** T-76：本轮待执行任务总数；提供后 runner 数不会超过任务数（对齐 mapWithConcurrency）。 */
+  totalTasks?: number;
   task: (index: number) => Promise<void>;
   /** 每轮领取新任务前检查是否应当停止（取消 / 暂停）。 */
   shouldStop?: () => boolean;
@@ -24,9 +26,16 @@ export interface CursorPoolSummary {
   failedIndices: number[];
 }
 
-const normalizeConcurrency = (value: number): number => {
+/**
+ * T-76：并发硬上限。concurrency 由用户配置经 Worker 注入，
+ * 旧实现 Array.from({length: 巨大值}) 会一次性拉起海量 runner，
+ * 内存与在途连接同时被打爆；统一钳到 MAX_CONCURRENCY。
+ */
+export const MAX_CONCURRENCY = 32;
+
+export const normalizeConcurrency = (value: number): number => {
   if (!Number.isFinite(value)) return 1;
-  return Math.max(1, Math.floor(value));
+  return Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(value)));
 };
 
 /**
@@ -37,6 +46,12 @@ export const runCursorPool = async (
   options: CursorPoolOptions
 ): Promise<CursorPoolSummary> => {
   const { next, concurrency, task, shouldStop, onSuccess, onFailure } = options;
+  const normalized = normalizeConcurrency(concurrency);
+  // T-76：与 mapWithConcurrency 对齐——runner 数既受硬上限约束，也不超过任务数。
+  const total = Number.isFinite(options.totalTasks)
+    ? Math.max(1, Math.floor(options.totalTasks as number))
+    : normalized;
+  const runners = Math.min(normalized, total);
   const failedIndices: number[] = [];
   let completed = 0;
   let failed = 0;
@@ -59,9 +74,7 @@ export const runCursorPool = async (
     }
   };
 
-  await Promise.all(
-    Array.from({ length: normalizeConcurrency(concurrency) }, () => runner()),
-  );
+  await Promise.all(Array.from({ length: runners }, () => runner()));
 
   return { completed, failed, failedIndices };
 };

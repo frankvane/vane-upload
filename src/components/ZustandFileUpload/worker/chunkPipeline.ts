@@ -89,6 +89,8 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
 
   // 记录已完成的分片数量，用于计算进度
   let totalUploadedChunks = chunkCount - missingCount;
+  // T-74：本次会话真正上传的字节数，专供速率 / ETA 推导。
+  let uploadedBytesThisSession = 0;
   const failedChunks: number[] = [];
   // E2E-04：首个「连接级失败 / 5xx 已耗尽重试」的分片错误。
   // 一旦命中就停止领取新分片，避免后端不可用时把剩余分片全部再跑一遍。
@@ -157,6 +159,7 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
 
         // 更新进度
         totalUploadedChunks++;
+        uploadedBytesThisSession += chunkBuf.byteLength;
         const stats = taskStats.get(fileInfo.id);
         if (stats) {
           stats.uploadedChunks = totalUploadedChunks;
@@ -170,6 +173,7 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
           uploadedBytes,
           totalBytes: fileSize,
           elapsedMs,
+          bytesThisSession: uploadedBytesThisSession,
         });
         debug(`分片 ${i + 1} 上传成功，总进度: ${detail.progress}%`);
 
@@ -211,6 +215,8 @@ export async function runChunkPipeline(ctx: ChunkPipelineContext): Promise<void>
     await runCursorPool({
       next: nextChunk,
       concurrency: chunkConcurrency,
+      // T-76：只有 missingCount 个任务，不为已存在的分片白起 runner。
+      totalTasks: missingCount,
       task: uploadChunk,
       // 取消后不再领取新分片；缓存缺片后同样停止领取（剩余分片已无法读取）；
       // 连接级失败/5xx 后停止领取，尽快把明确错误抛给 UI（E2E-04）。

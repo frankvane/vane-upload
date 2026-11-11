@@ -7,6 +7,12 @@ export interface ComputeUploadProgressInput {
   totalBytes: number;
   /** 上传阶段已耗时（毫秒，>= 0） */
   elapsedMs: number;
+  /**
+   * T-74：本次会话实际上传的字节数。速率 / ETA 只由它推导，
+   * 不把服务端已有分片（续传命中 90% 时占绝大多数）算进瞬时速率。
+   * 不传时回退到 uploadedBytes，保持旧调用点语义。
+   */
+  bytesThisSession?: number;
 }
 
 const SAFE_MIN_SPEED = 1; // 避免 0 除导致 Infinity/NaN
@@ -15,7 +21,8 @@ const SAFE_MIN_SPEED = 1; // 避免 0 除导致 Infinity/NaN
  * 由字节累加推导上传进度详情（T3.4）。
  *
  * - progress：已上传占比 [0-100]，满 100 表示完成；
- * - speed：瞬时速率（字节/秒），由 uploadedBytes / elapsed 推导；
+ * - speed：瞬时速率（字节/秒），由本次会话上传字节 / elapsed 推导
+ *   （T-74：不把服务端已有分片算进来，否则续传首片即虚高几个数量级）；
  * - eta：预计剩余时间（秒），(总-已传)/speed，无法估算（speed≈0 或已传=总量）时为 0。
  *
  * 所有分支均做极值保护：elapsed=0 时 speed 记 0（尚未产生速率），
@@ -28,6 +35,9 @@ export function computeUploadProgress(
 
   const safeTotal = totalBytes > 0 ? totalBytes : 0;
   const safeUploaded = Math.max(0, Math.min(uploadedBytes, safeTotal));
+  // 进度仍按「已有分片 + 本次上传」的总量换算，避免续传时进度倒退；
+  // 但速率只看本次真正发出的字节。
+  const sessionBytes = Math.max(0, input.bytesThisSession ?? safeUploaded);
 
   let progress = 0;
   if (safeTotal > 0) {
@@ -38,8 +48,8 @@ export function computeUploadProgress(
   }
 
   let speed = 0;
-  if (elapsedMs > 0 && safeUploaded > 0) {
-    speed = Math.round((safeUploaded / elapsedMs) * 1000); // 字节/秒
+  if (elapsedMs > 0 && sessionBytes > 0) {
+    speed = Math.round((sessionBytes / elapsedMs) * 1000); // 字节/秒
   }
 
   let eta = 0;

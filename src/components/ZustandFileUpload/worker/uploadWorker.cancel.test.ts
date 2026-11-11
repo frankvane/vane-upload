@@ -132,9 +132,10 @@ describe("uploadWorker CANCEL 协议（T2.3）", () => {
     expect(postedMessages.some((m) => m.type === "done")).toBe(false);
     // VU-07：在途 fetch 的 AbortError 不得被上报成失败
     expect(postedMessages.some((m) => m.type === "error")).toBe(false);
+    // T-74：一次 CANCEL 只发一条 cancelled（CANCEL 消息 / pipeline / 两层 catch 去重）
     expect(
       postedMessages.filter((m) => m.type === "cancelled").length
-    ).toBeGreaterThan(0);
+    ).toBe(1);
   });
 
   it("CANCEL 后不再对同一任务发起任何新请求（重试短路）", async () => {

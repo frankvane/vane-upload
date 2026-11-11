@@ -87,4 +87,29 @@ describe("computeUploadProgress（T3.4 字节级进度/速率）", () => {
     expect(r.totalBytes).toBe(0);
     expect(Number.isFinite(r.speed)).toBe(true);
   });
+
+  it("T-74 续传命中 90%：速率只算本次上传字节，ETA 不被压成 0", () => {
+    const chunk = 1024 * 1024;
+    const r = computeUploadProgress({
+      uploadedBytes: 91 * chunk, // 服务端已有 90 片 + 本次 1 片
+      totalBytes: 100 * chunk,
+      elapsedMs: 1000,
+      bytesThisSession: chunk, // 这 1 秒真正发出的只有 1MB
+    });
+    expect(r.progress).toBe(91); // 进度仍按总量，不倒退
+    expect(r.speed).toBe(chunk); // 而非旧实现的 91MB/s
+    expect(r.eta).toBe(9); // 剩 9MB @ 1MB/s，而非 ETA≈0
+  });
+
+  it("T-74 bytesThisSession=0 时不产生虚高速率", () => {
+    const r = computeUploadProgress({
+      uploadedBytes: 90 * 1024 * 1024,
+      totalBytes: 100 * 1024 * 1024,
+      elapsedMs: 1,
+      bytesThisSession: 0,
+    });
+    expect(r.progress).toBe(90);
+    expect(r.speed).toBe(0);
+    expect(r.eta).toBe(0);
+  });
 });

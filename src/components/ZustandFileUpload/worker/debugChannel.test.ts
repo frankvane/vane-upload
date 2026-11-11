@@ -61,6 +61,28 @@ describe("debugChannel", () => {
     expect(JSON.stringify(msg)).not.toContain("secret-token");
   });
 
+  it("T-74 嵌套对象里的凭据也被脱敏，不会随对象原样透传", () => {
+    const post = vi.fn();
+    const { debug, setEnabled } = createDebugChannel(post);
+    setEnabled(true);
+
+    debug("异常消息", {
+      payload: {
+        headers: { authorization: "Bearer nested-secret" },
+        note: "Bearer inline-secret",
+      },
+    });
+
+    const calls = post.mock.calls as unknown as Array<
+      Array<{ data: Record<string, unknown> }>
+    >;
+    const msg = calls[0]![0]!;
+    expect(JSON.stringify(msg)).not.toContain("nested-secret");
+    expect(JSON.stringify(msg)).not.toContain("inline-secret");
+    const payload = msg.data.payload as { note: string };
+    expect(payload.note).toBe("Bearer ***");
+  });
+
   it("关闭后再次开启仍正常输出（节流窗口外）", () => {
     vi.useFakeTimers();
     const post = vi.fn();
