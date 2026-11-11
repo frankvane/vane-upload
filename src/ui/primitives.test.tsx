@@ -74,6 +74,12 @@ describe("ui/primitives · Tag / Badge", () => {
     const { container } = render(<Badge count={200} overflowCount={99} />);
     expect(container.textContent).toContain("99+");
   });
+
+  it("T-77 Badge count=0 不渲染孤立的 0", () => {
+    const { container } = render(<Badge count={0} />);
+    expect(container.firstChild).toBeNull();
+    expect(container.textContent).not.toContain("0");
+  });
 });
 
 describe("ui/primitives · Spin / Empty / Divider / Card", () => {
@@ -126,6 +132,26 @@ describe("ui/primitives · Alert / Statistic", () => {
     expect(screen.getByText("$")).toBeInTheDocument();
     expect(screen.getByText("MB")).toBeInTheDocument();
     expect(screen.getByText("3.14")).toBeInTheDocument();
+  });
+
+  it("T-77 Statistic 数字带千分位，precision 仍控制小数位", () => {
+    // 用运行时 locale 生成期望文案，避免把 CI 的 en-US 分组符写死；
+    // 但断言「确实有分组」以防该 locale 恰好无分组时用例恒真。
+    const grouped = (1234567).toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 20,
+    });
+    expect(grouped).not.toBe("1234567");
+
+    const { rerender } = render(<Statistic value={1234567} />);
+    expect(screen.getByText(grouped)).toBeInTheDocument();
+
+    const withPrecision = (1234567.891).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    rerender(<Statistic value={1234567.891} precision={2} />);
+    expect(screen.getByText(withPrecision)).toBeInTheDocument();
   });
 });
 

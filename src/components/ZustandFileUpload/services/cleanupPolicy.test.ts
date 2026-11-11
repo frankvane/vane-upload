@@ -288,4 +288,17 @@ describe("UploadCleanupPolicy", () => {
 
     expect(options.clearBatchInfo).not.toHaveBeenCalled();
   });
+
+  it("T-77 addCompletedFile 命中内存快照时不再读 IndexedDB", async () => {
+    const { options, files } = createOptions();
+    const done = createFile("f-mem", UploadStatus.DONE);
+    files.set(done.id, done);
+    mockGetItem.mockClear();
+
+    const policy = new UploadCleanupPolicy(options);
+    await policy.addCompletedFile("f-mem");
+
+    expect(policy.pendingCount()).toBe(1);
+    expect(mockGetItem).not.toHaveBeenCalled();
+  });
 });

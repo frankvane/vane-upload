@@ -33,6 +33,33 @@ import {
  */
 export const DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE = Number.POSITIVE_INFINITY;
 const DEFAULT_CHUNK_SIZE = 1024 * 1024;
+
+/**
+ * T-77：单批常驻分片数上限（默认 16，保持既有行为）与字节上限（默认 32 MiB）。
+ * 旧实现固定攒 16 片，8 MiB 分片时单批即常驻约 128 MiB，与「缓存内存占用与
+ * 文件大小解耦」的设计目标相悖。字节上限可配，超大分片时自动缩小批大小。
+ */
+export const DEFAULT_CACHE_BATCH_CHUNKS = 16;
+export const DEFAULT_CACHE_BATCH_MAX_BYTES = 32 * 1024 * 1024;
+let cacheBatchMaxBytes = DEFAULT_CACHE_BATCH_MAX_BYTES;
+
+/** 运行时调整单批常驻字节上限；非法值回退默认。 */
+export const setCacheBatchMaxBytes = (bytes: number): void => {
+  cacheBatchMaxBytes =
+    Number.isFinite(bytes) && bytes > 0
+      ? Math.max(1, Math.floor(bytes))
+      : DEFAULT_CACHE_BATCH_MAX_BYTES;
+};
+
+export const getCacheBatchMaxBytes = (): number => cacheBatchMaxBytes;
+
+/** 纯函数：按当前字节上限与分片大小解析本批最多常驻的分片数（至少 1）。 */
+export const resolveCacheBatchSize = (chunkSize: number): number => {
+  const safeChunkSize =
+    Number.isFinite(chunkSize) && chunkSize > 0 ? chunkSize : 1;
+  const byteLimited = Math.max(1, Math.floor(cacheBatchMaxBytes / safeChunkSize));
+  return Math.min(DEFAULT_CACHE_BATCH_CHUNKS, byteLimited);
+};
 /**
  * 空间预检安全余量：待缓存字节不得超过「quota - usage」的 80%（预留 20%）。
  * 相较旧版贴着 90% 配额写入，给浏览器自身与其他数据留出更多缓冲，
@@ -211,7 +238,10 @@ const runPrime = async (
 
       // 一次攒一批再交给 store 分事务写入，减少事务数量。
       const batch: Array<{ index: number; data: ArrayBuffer }> = [];
-      const batchEnd = Math.min(chunkCount, index + 16);
+      const batchEnd = Math.min(
+        chunkCount,
+        index + resolveCacheBatchSize(chunkSize)
+      );
       for (let cursor = index; cursor < batchEnd; cursor += 1) {
         const start = cursor * chunkSize;
         const end = Math.min(file.fileSize, start + chunkSize);

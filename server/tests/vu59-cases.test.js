@@ -660,14 +660,15 @@ test("TC-15 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘"
   const bogusMd5 = "00000000000000000000000000000000";
 
   // 两路并发：一路真实 md5、一路伪造 md5，但 storageId 完全相同。
+  const realParams = {
+    fileId: fid,
+    md5: realMd5,
+    name: "tc15.bin",
+    size: merged.length,
+    total: 3,
+  };
   const [real, bogus] = await Promise.all([
-    merge(app, {
-      fileId: fid,
-      md5: realMd5,
-      name: "tc15.bin",
-      size: merged.length,
-      total: 3,
-    }),
+    merge(app, realParams),
     merge(app, {
       fileId: fid,
       md5: bogusMd5,
@@ -677,8 +678,19 @@ test("TC-15 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘"
     }),
   ]);
 
-  const okCount = [real, bogus].filter((r) => r.status === 200).length;
-  assert.equal(okCount, 1, "同 storageId 并发合并只能有 1 路成功落盘");
+  // 哪一路先拿到合并锁取决于事件循环调度，两种顺序都是正确互斥：
+  //  - real 先拿锁 → real 200；bogus 等锁后按自己的 md5 查不到已合并行 → 503；
+  //  - bogus 先拿锁 → bogus 400（md5 校验失败、未落盘）；real 等锁后同样查不到
+  //    已合并行 → 503「文件正在合并中，请稍后重试」（VU-08 设计）。
+  // 旧断言直接数「200 的个数恰为 1」把后一种调度误判成失败，导致本用例偶发红。
+  // 这里模拟客户端 fetchWithRetry 对 503 重试，收敛到确定终态后再断言互斥语义。
+  const finalReal = real.status === 503 ? await merge(app, realParams) : real;
+  assert.equal(
+    finalReal.status,
+    200,
+    `真实 md5 那路最终应合并成功（含 503 重试），首轮=${real.status}`
+  );
+  assert.notEqual(bogus.status, 200, "伪造 md5 那路不得成功落盘");
 
   // 无论哪一路胜出，落盘都只能有 1 行——证明二者被同一把锁互斥，而非各写各的。
   const count = await File.count({ where: { file_id: `test:${fid}` } });

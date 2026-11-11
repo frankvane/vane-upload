@@ -143,6 +143,10 @@ export const Badge: React.FC<BadgeProps> = ({
       </span>
     );
   }
+  // T-77：count=0 不渲染孤立的 "0"（antd 口径：零计数即无徽标）。
+  if (count === 0) {
+    return null;
+  }
   const display =
     count !== undefined && count > overflowCount
       ? `${overflowCount}+`
@@ -382,9 +386,14 @@ export const Statistic: React.FC<StatisticProps> = ({
   precision,
   style,
 }) => {
+  // T-77：数字统一走 toLocaleString，带千分位；precision 仍控制小数位数，
+  // 未指定时尽量保留原始小数（maximumFractionDigits 上限 20）。
   const display =
-    typeof value === "number" && precision !== undefined
-      ? value.toFixed(precision)
+    typeof value === "number"
+      ? value.toLocaleString(undefined, {
+          minimumFractionDigits: precision ?? 0,
+          maximumFractionDigits: precision ?? 20,
+        })
       : value;
   return (
     <div className="rui-statistic" style={style}>

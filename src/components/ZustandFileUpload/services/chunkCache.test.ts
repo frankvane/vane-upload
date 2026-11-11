@@ -1,10 +1,15 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UploadStatus, type UploadFile } from "../types/upload";
 import {
   clearFileChunkCache,
   DEFAULT_CHUNK_CACHE_MAX_FILE_SIZE,
+  DEFAULT_CACHE_BATCH_CHUNKS,
+  DEFAULT_CACHE_BATCH_MAX_BYTES,
+  getCacheBatchMaxBytes,
   isFileCacheReady,
   primeChunkCache,
+  resolveCacheBatchSize,
+  setCacheBatchMaxBytes,
   __test_primeEntryCount,
 } from "./chunkCache";
 import {
@@ -511,5 +516,28 @@ describe("chunkCache（方案 A）", () => {
     };
     expect(await putFileCacheMetaIfGeneration(key, meta, 0)).toBe(true);
     expect((await getFileCacheMeta(key))?.state).toBe("ready");
+  });
+});
+
+describe("T-77 预热批次内存上限（与文件大小解耦）", () => {
+  afterEach(() => setCacheBatchMaxBytes(DEFAULT_CACHE_BATCH_MAX_BYTES));
+
+  it("默认上限下小分片仍攒 16 片，8MiB 分片收缩到 4 片", () => {
+    // 4 字节分片（本文件既有用例口径）行为不变，避免回归。
+    expect(resolveCacheBatchSize(4)).toBe(DEFAULT_CACHE_BATCH_CHUNKS);
+    // 32MiB / 8MiB = 4，而非固定 16 片造成约 128MiB 常驻。
+    expect(resolveCacheBatchSize(8 * 1024 * 1024)).toBe(4);
+    expect(getCacheBatchMaxBytes()).toBe(DEFAULT_CACHE_BATCH_MAX_BYTES);
+  });
+
+  it("上限可配，非法值回退默认，分片大小非法时至少 1 片", () => {
+    setCacheBatchMaxBytes(8);
+    expect(resolveCacheBatchSize(4)).toBe(2);
+
+    setCacheBatchMaxBytes(0);
+    expect(getCacheBatchMaxBytes()).toBe(DEFAULT_CACHE_BATCH_MAX_BYTES);
+    setCacheBatchMaxBytes(Number.NaN);
+    expect(getCacheBatchMaxBytes()).toBe(DEFAULT_CACHE_BATCH_MAX_BYTES);
+    expect(resolveCacheBatchSize(0)).toBe(DEFAULT_CACHE_BATCH_CHUNKS);
   });
 });

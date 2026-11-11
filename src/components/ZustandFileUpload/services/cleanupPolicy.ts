@@ -73,7 +73,13 @@ export class UploadCleanupPolicy {
   }
 
   async addCompletedFile(fileId: string) {
-    const file = await this.options.storage.getItem<UploadFile>(fileId);
+    // T-77：文件刚完成时状态已在 store 内存态，直接用内存快照判定即可，
+    // 避免 N 个文件各开一次 IndexedDB getItem 事务（清理阶段本来已收敛为
+    // 一次 iterate）。仅内存态缺该 id（如历史遗留记录）时才回退读取，
+    // 且内存态是「倒计时期间又重新上传」的最新状态，判定更准。
+    const live = this.options.getFiles().find((item) => item.id === fileId);
+    const file =
+      live ?? (await this.options.storage.getItem<UploadFile>(fileId));
     if (!file) {
       return;
     }

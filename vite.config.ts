@@ -110,6 +110,11 @@ export default defineConfig({
         "src/index.ts",
         "src/e2e-full-main.tsx",
         "src/e2e-main.tsx",
+        // T-49 新增的两个 Playwright 变体入口（secure / smalllimit）：与上面
+        // 两个 e2e 入口同类，纯 createRoot 挂载、由 E2E spec 覆盖，vitest
+        // 不加载它们。此前漏加导致 check-coverage-floor 误判为零覆盖。
+        "src/e2e-secure-main.tsx",
+        "src/e2e-smalllimit-main.tsx",
         "src/demo/**",
         "src/dev/**",
         "src/components/ZustandFileUpload/components/index.ts",
