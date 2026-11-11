@@ -314,14 +314,35 @@ test("VU-55：所有 process.env 读取收敛到 src/config/index.js", () => {
 });
 
 // ---------------------------------------------------------------- VU-08
+test("VU-08：合并锁 acquireOrWait 原子，并发同键不互相覆盖", async () => {
+  const reg = createMergeLockRegistry({
+    waitTimeoutMs: () => 5000,
+    maxWaiters: () => 64,
+  });
+  const r1 = await reg.acquireOrWait("same");
+  assert.equal(r1.waited, false, "首个请求应直接拿到锁");
+  assert.equal(typeof r1.release, "function");
+
+  // 第二个并发请求：锁已存在，应进入等待而非覆盖。
+  const r2Promise = reg.acquireOrWait("same");
+  await new Promise((r) => setTimeout(r, 10)); // 让 r2 进入 await
+  assert.equal(reg.waiters("same"), 1, "等待者应被计入");
+
+  r1.release();
+  const r2 = await r2Promise;
+  assert.equal(r2.waited, true, "等待方应拿到 waited=true");
+  assert.equal(r2.release, null, "等待方不应再持有锁");
+  assert.equal(reg.size(), 0, "释放后锁应清空");
+});
+
 test("VU-08：合并锁等待有超时，且等待者数量有上限", async () => {
   const timed = createMergeLockRegistry({
     waitTimeoutMs: () => 20,
     maxWaiters: () => 5,
   });
-  const releaseTimed = timed.acquire("k");
+  const releaseTimed = (await timed.acquireOrWait("k")).release;
   await assert.rejects(
-    () => timed.wait("k"),
+    () => timed.acquireOrWait("k"),
     (error) => error.statusCode === 503 && /timeout/.test(error.message)
   );
   releaseTimed();
@@ -331,10 +352,10 @@ test("VU-08：合并锁等待有超时，且等待者数量有上限", async () 
     waitTimeoutMs: () => 5000,
     maxWaiters: () => 1,
   });
-  const releaseCapped = capped.acquire("k");
-  const firstWaiter = capped.wait("k");
+  const releaseCapped = (await capped.acquireOrWait("k")).release;
+  const firstWaiter = capped.acquireOrWait("k");
   await assert.rejects(
-    () => capped.wait("k"),
+    () => capped.acquireOrWait("k"),
     (error) => error.statusCode === 429
   );
   releaseCapped();

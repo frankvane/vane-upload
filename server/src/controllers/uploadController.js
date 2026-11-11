@@ -80,7 +80,8 @@ const mergeLocks = createMergeLockRegistry({
 });
 
 // VU-15：提供给 janitor 的「正在合并的文件集合」。合并键形如
-// `${userId}:${storageId}:${md5}`，取中间段即为分片落盘所用的 storageId。
+// `${userId}:${storageId}`，取末段即为分片落盘所用的 storageId。
+// mergeKey 不含 md5：同一文件（同 storageId）必须串行合并，避免并发竞争同一 staging / 落盘路径；
 // janitor 据此跳过这些文件的孤儿分片，避免合并进行中把源分片清掉导致合并失败。
 exports.getMergingStorageIds = () =>
   new Set(mergeLocks.keys().map((key) => key.split(":")[1]));
@@ -93,6 +94,10 @@ exports.__quotaInternals = {
   getGlobalChunkUsage,
   getUserChunkUsage,
 };
+
+// VU-08 测试钩子：暴露合并锁注册表，便于断言「mergeKey 按 userId:storageId 计价（不含 md5）」。
+// 仅用于单测，不影响生产行为。
+exports.__mergeLockInternals = { mergeLocks };
 
 
 exports.instantCheck = async (req, res) => {
@@ -497,10 +502,13 @@ exports.mergeChunks = async (req, res) => {
       });
     }
 
-    // VU-08：mergeKey 已带 userId（不同用户不互相阻塞）；
-    // 等待同键合并时加超时与等待者上限，避免无限挂起 / 无界堆积。
-    const mergeKey = `${userId}:${storageId}:${md5}`;
-    if (await mergeLocks.wait(mergeKey)) {
+    // VU-08：mergeKey 按 userId:storageId 计价（不同文件 / 不同用户互不阻塞），
+    // 同一文件始终串行合并，避免并发合并竞争同一 staging / 落盘路径。
+    // acquireOrWait 是原子的：要么本次拿到锁（waited=false），要么等待既有合并完成（waited=true），
+    // 不会再出现「都从 wait 得到 false 再 acquire 互相覆盖」的竞态。
+    const mergeKey = `${userId}:${storageId}`;
+    const lockResult = await mergeLocks.acquireOrWait(mergeKey);
+    if (lockResult.waited) {
       const mergedFile = await withSqliteBusyRetry(() =>
         File.findOne({
           where: { md5, size: fileSize, status: 1, user_id: userId },
@@ -511,7 +519,7 @@ exports.mergeChunks = async (req, res) => {
       }
       return jsonError(res, 503, "文件正在合并中，请稍后重试");
     }
-    releaseMergeLock = mergeLocks.acquire(mergeKey);
+    releaseMergeLock = lockResult.release;
 
     await flushFileChunkStates(storageId);
 
@@ -520,7 +528,7 @@ exports.mergeChunks = async (req, res) => {
     // 导致并发合并触发 SQLITE_BUSY（P1-13a）。
     const existingFile = await withSqliteBusyRetry(() =>
       File.findOne({
-        where: { md5, size, status: 1, user_id: userId },
+        where: { md5, size: fileSize, status: 1, user_id: userId },
       })
     );
     if (existingFile) {

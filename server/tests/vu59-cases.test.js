@@ -631,6 +631,49 @@ test("TC-14 并发合并同键（10 个 Promise.all）→ 仅 1 次落盘，File
 });
 
 // =========================================================================
+// TC-15：mergeKey 仅按 userId:storageId 计价（不含 md5）
+// 同 storageId、不同 md5 的两个并发合并必须互斥，绝不会各跑各的、重复合并同一批分片。
+// （T-61 修复前 mergeKey 含 md5，同 storageId 不同 md5 会拿到不同的锁、并发双写。）
+// =========================================================================
+test("TC-15 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘", async () => {
+  const fid = "tc15";
+  const parts = [];
+  for (let i = 0; i < 3; i += 1) {
+    const b = Buffer.from(`W${i}`);
+    parts.push(b);
+    await uploadChunk(app, { fileId: fid, index: i, buffer: b });
+  }
+  const merged = Buffer.concat(parts);
+  const realMd5 = md5Buffer(merged);
+  const bogusMd5 = "00000000000000000000000000000000";
+
+  // 两路并发：一路真实 md5、一路伪造 md5，但 storageId 完全相同。
+  const [real, bogus] = await Promise.all([
+    merge(app, {
+      fileId: fid,
+      md5: realMd5,
+      name: "tc15.bin",
+      size: merged.length,
+      total: 3,
+    }),
+    merge(app, {
+      fileId: fid,
+      md5: bogusMd5,
+      name: "tc15.bin",
+      size: merged.length,
+      total: 3,
+    }),
+  ]);
+
+  const okCount = [real, bogus].filter((r) => r.status === 200).length;
+  assert.equal(okCount, 1, "同 storageId 并发合并只能有 1 路成功落盘");
+
+  // 无论哪一路胜出，落盘都只能有 1 行——证明二者被同一把锁互斥，而非各写各的。
+  const count = await File.count({ where: { file_id: `test:${fid}` } });
+  assert.equal(count, 1, "同 storageId 不应重复落盘");
+});
+
+// =========================================================================
 // TC-20：秒传命中
 // =========================================================================
 test("TC-20 秒传命中：A 换 file_id 仍 uploaded:true；B 为 false；DTO 无 user_id/file_path", async () => {
