@@ -1,5 +1,5 @@
 import React from "react";
-import { act, render } from "@testing-library/react";
+import { act, fireEvent, render, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 interface CapturedTableProps {
@@ -13,14 +13,54 @@ const { captured } = vi.hoisted(() => ({
 }));
 
 // VU-46：FileTable 已改为从 ui/table 具名导入，mock 路径同步收窄到该模块，
-// 只替换 Table 为「记录 props 的空壳」，其余 UI 组件保持真实实现。
+// 只替换 Table 为「记录 props 的轻量渲染壳」——按 dataSource/columns 真正渲染出行
+// 与单元格，使 columns[].render（尤其是操作列按钮）在 DOM 中可见，从而可对其
+// onClick / disabled 做交互断言；同时继续记录 props 供 VU-41 稳定性断言复用。
 vi.mock("../../../ui/table", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
     Table: (props: CapturedTableProps) => {
       captured.push(props);
-      return null;
+      const { columns, dataSource, rowKey = "key" } = props;
+      return (
+        <table data-testid="file-table-mock">
+          <tbody>
+            {dataSource.map((record, rowIndex) => {
+              const key = (record as Record<string, unknown>)[
+                rowKey as string
+              ] as React.Key;
+              return (
+                <tr
+                  key={String(key)}
+                  className="rui-table-row"
+                  data-row-key={String(key)}
+                >
+                  {(columns as Array<Record<string, unknown>>).map(
+                    (col, colIndex) => {
+                      const value = (record as Record<string, unknown>)[
+                        col.dataIndex as string
+                      ];
+                      const rendered = col.render
+                        ? (
+                            col.render as (
+                              v: unknown,
+                              rec: unknown,
+                              idx: number,
+                            ) => React.ReactNode
+                          )(value, record, rowIndex)
+                        : value;
+                      return (
+                        <td key={(col.key as string) ?? colIndex}>{rendered}</td>
+                      );
+                    },
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      );
     },
   };
 });
@@ -157,5 +197,199 @@ describe("VU-41 FileTable 数据源稳定性", () => {
     expect(after.dataSource[1]).toBe(unchangedBefore);
     // 变化行是新对象，会被对应 TableRow 正常重渲染（仅 1 行，而非全表）
     expect(after.dataSource[0]).not.toBe(before.dataSource[0]);
+  });
+});
+
+/**
+ * T-71：操作列交互断言。Table 已被上面的 mock 改为「轻量渲染壳」，操作列的 5 个按钮
+ * 真正渲染进 DOM，因此其 onClick 与 disabled 分支均可被断言。每条断言都精确到具体的
+ * 禁用条件，改坏任一按钮的 disabled 逻辑都会让用例转红。
+ */
+type ActionHandlers = {
+  pauseUploadFile: ReturnType<typeof vi.fn>;
+  resumeUploadFile: ReturnType<typeof vi.fn>;
+  cancelUploadFile: ReturnType<typeof vi.fn>;
+  handleDeleteFile: ReturnType<typeof vi.fn>;
+  handleRetryUpload: ReturnType<typeof vi.fn>;
+};
+
+const makeHandlers = (): ActionHandlers => ({
+  pauseUploadFile: vi.fn(),
+  resumeUploadFile: vi.fn(),
+  cancelUploadFile: vi.fn(),
+  handleDeleteFile: vi.fn(),
+  handleRetryUpload: vi.fn(),
+});
+
+// useUploadStore 是读取 UploadStoreContext 的 hook，测试里要拿 store 实例本身须经由
+// useUploadEngine().store（与 VU-41 用例同一来源）；CaptureStore 把实例抓到 actionStoreRef。
+let actionStoreRef: ReturnType<typeof useUploadEngine>["store"] | null = null;
+const CaptureStore: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  actionStoreRef = useUploadEngine().store;
+  return <>{children}</>;
+};
+
+const renderActionTable = (
+  files: UploadFile[],
+  handlers: ActionHandlers,
+  opts: { isNetworkOffline?: boolean; isUploading?: boolean } = {},
+) => {
+  const utils = render(
+    <UploadProvider settingsSource="props">
+      <CaptureStore>
+        <FileTable
+          fileOperations={{
+            retryingFiles: {},
+            handleDeleteFile: handlers.handleDeleteFile,
+            handleRetryUpload: handlers.handleRetryUpload,
+          }}
+          pauseUploadFile={handlers.pauseUploadFile}
+          resumeUploadFile={handlers.resumeUploadFile}
+          cancelUploadFile={handlers.cancelUploadFile}
+        />
+      </CaptureStore>
+    </UploadProvider>,
+  );
+  const store = actionStoreRef!;
+  act(() => {
+    store.getState().setFiles(files);
+  });
+  if (opts.isNetworkOffline !== undefined) {
+    // store 无 setIsNetworkOffline action，离线态由网络探测 hook 经 setState 写入
+    act(() => store.setState({ isNetworkOffline: opts.isNetworkOffline }));
+  }
+  if (opts.isUploading !== undefined) {
+    act(() => store.getState().setIsUploading(opts.isUploading));
+  }
+  return utils;
+};
+
+describe("T-71 FileTable 操作列交互断言", () => {
+  it.each([
+    [UploadStatus.UPLOADING, ["暂停", "取消", "删除"]],
+    [UploadStatus.PAUSED, ["继续", "删除"]],
+    [UploadStatus.ERROR, ["重试", "删除"]],
+    [UploadStatus.DONE, ["删除"]],
+    [UploadStatus.INSTANT, ["删除"]],
+  ])("状态 %s 渲染正确的操作按钮集合", (status, expected) => {
+    const handlers = makeHandlers();
+    const file = { ...makeFile("f-1"), status } as UploadFile;
+    const { container } = renderActionTable([file], handlers);
+    const row = container.querySelector(".rui-table-row")!;
+    const labels = Array.from(row.querySelectorAll("button")).map((b) =>
+      (b.textContent ?? "").trim(),
+    );
+    expect(labels).toEqual(expected);
+  });
+
+  it("点击操作按钮触发对应回调（暂停/取消/继续/重试/删除）", () => {
+    const handlers = makeHandlers();
+    const uploading = {
+      ...makeFile("u-1"),
+      status: UploadStatus.UPLOADING,
+    } as UploadFile;
+    const paused = {
+      ...makeFile("p-1"),
+      status: UploadStatus.PAUSED,
+    } as UploadFile;
+    const error = { ...makeFile("e-1"), status: UploadStatus.ERROR } as UploadFile;
+    const { container } = renderActionTable(
+      [uploading, paused, error],
+      handlers,
+    );
+
+    const rows = container.querySelectorAll(".rui-table-row");
+    const row0 = rows[0] as HTMLElement;
+    fireEvent.click(within(row0).getByText("暂停"));
+    expect(handlers.pauseUploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "u-1" }),
+    );
+    fireEvent.click(within(row0).getByText("取消"));
+    expect(handlers.cancelUploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "u-1" }),
+    );
+    fireEvent.click(within(row0).getByText("删除"));
+    expect(handlers.handleDeleteFile).toHaveBeenCalledWith("u-1");
+
+    const row1 = rows[1] as HTMLElement;
+    fireEvent.click(within(row1).getByText("继续"));
+    expect(handlers.resumeUploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "p-1" }),
+    );
+
+    const row2 = rows[2] as HTMLElement;
+    fireEvent.click(within(row2).getByText("重试"));
+    expect(handlers.handleRetryUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "e-1" }),
+    );
+  });
+
+  it("离线时 暂停/继续/重试 禁用，取消/删除 仍可用", () => {
+    const handlers = makeHandlers();
+    const uploading = {
+      ...makeFile("u-1"),
+      status: UploadStatus.UPLOADING,
+    } as UploadFile;
+    const paused = {
+      ...makeFile("p-1"),
+      status: UploadStatus.PAUSED,
+    } as UploadFile;
+    const error = { ...makeFile("e-1"), status: UploadStatus.ERROR } as UploadFile;
+    const { container } = renderActionTable(
+      [uploading, paused, error],
+      handlers,
+      { isNetworkOffline: true },
+    );
+
+    const rows = container.querySelectorAll(".rui-table-row");
+    const row0 = rows[0] as HTMLElement;
+    expect(within(row0).getByText("暂停")).toBeDisabled();
+    expect(within(row0).getByText("取消")).not.toBeDisabled();
+    expect(within(row0).getByText("删除")).not.toBeDisabled();
+    const row1 = rows[1] as HTMLElement;
+    expect(within(row1).getByText("继续")).toBeDisabled();
+    const row2 = rows[2] as HTMLElement;
+    expect(within(row2).getByText("重试")).toBeDisabled();
+    expect(within(row2).getByText("删除")).not.toBeDisabled();
+  });
+
+  it("上传进行中（isActionDisabled）时 重试 禁用", () => {
+    const handlers = makeHandlers();
+    const error = { ...makeFile("e-1"), status: UploadStatus.ERROR } as UploadFile;
+    const { container } = renderActionTable([error], handlers, {
+      isUploading: true,
+    });
+    const row = container.querySelector(".rui-table-row") as HTMLElement;
+    expect(within(row).getByText("重试")).toBeDisabled();
+    // 离线无关、非重试状态：删除始终可用（除非正在重试）
+    expect(within(row).getByText("删除")).not.toBeDisabled();
+  });
+
+  it("某文件正在重试时，其所有操作按钮禁用（含 loading 态）", () => {
+    const handlers = makeHandlers();
+    const error = { ...makeFile("e-1"), status: UploadStatus.ERROR } as UploadFile;
+    const utils = render(
+      <UploadProvider settingsSource="props">
+        <CaptureStore>
+          <FileTable
+            fileOperations={{
+              retryingFiles: { "e-1": true },
+              handleDeleteFile: handlers.handleDeleteFile,
+              handleRetryUpload: handlers.handleRetryUpload,
+            }}
+            pauseUploadFile={handlers.pauseUploadFile}
+            resumeUploadFile={handlers.resumeUploadFile}
+            cancelUploadFile={handlers.cancelUploadFile}
+          />
+        </CaptureStore>
+      </UploadProvider>,
+    );
+    act(() => {
+      actionStoreRef!.getState().setFiles([error]);
+    });
+    const row = utils.container.querySelector(".rui-table-row") as HTMLElement;
+    // 正在重试时 重试 按钮显示「重试中」且禁用
+    expect(within(row).getByText("重试中")).toBeDisabled();
+    expect(within(row).getByText("删除")).toBeDisabled();
   });
 });

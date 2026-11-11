@@ -34,9 +34,11 @@ export const Collapse: React.FC<CollapseProps> = ({
     defaultActiveKey ?? [],
   );
   const keys = activeKey ?? innerKeys;
+  // T-72：展开项通常少量，includes 无所谓性能；统一转 Set 保持口径一致。
+  const keySet = new Set(keys);
 
   const toggle = (key: string) => {
-    const next = keys.includes(key)
+    const next = keySet.has(key)
       ? keys.filter((k) => k !== key)
       : [...keys, key];
     if (!activeKey) setInnerKeys(next);
@@ -55,7 +57,7 @@ export const Collapse: React.FC<CollapseProps> = ({
       style={style}
     >
       {items.map((item) => {
-        const active = keys.includes(item.key);
+        const active = keySet.has(item.key);
         return (
           <div
             key={item.key}

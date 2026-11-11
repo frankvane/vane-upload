@@ -156,6 +156,15 @@ describe("ui/primitives · Progress", () => {
     expect(inner.style.transform).toMatch(/scaleX\(0?\.4\)/);
     expect(inner.style.width).not.toBe("40%");
   });
+
+  it("percent 为 NaN 时钳为 0，不把 NaN 落 DOM / aria-valuenow（T-72）", () => {
+    const { container } = render(<Progress percent={Number.NaN} />);
+    const bar = container.querySelector(".rui-progress") as HTMLElement;
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    const inner = container.querySelector(".rui-progress-inner") as HTMLElement;
+    // scaleX(NaN) 会让合成层失效并出现渲染异常，必须钳 0
+    expect(inner.style.transform).toBe("scaleX(0)");
+  });
 });
 
 describe("ui/primitives · Switch", () => {
@@ -184,6 +193,19 @@ describe("ui/primitives · Slider", () => {
     const track = container.querySelector(".rui-slider-track") as HTMLElement;
     expect(track.style.width).toBe("50%");
     expect(container.querySelector('input[type="range"]')).not.toBeNull();
+  });
+
+  it.each([
+    ["max===min 且 value 在区间内", 0, 0, 0],
+    ["max===min 且 value 越界（仍不除零）", 5, 5, 5],
+  ])("Slider %s 时不产生 Infinity/NaN（T-72）", (_label, min, max, value) => {
+    const { container } = render(<Slider min={min} max={max} value={value} />);
+    const track = container.querySelector(".rui-slider-track") as HTMLElement;
+    const handle = container.querySelector(".rui-slider-handle") as HTMLElement;
+    // max===min 分母为 0 时退化为 0%，轨道/手柄不越界
+    expect(track.style.width).toBe("0%");
+    expect(handle.style.left).toBe("0%");
+    expect(track.style.width).not.toMatch(/Infinity|NaN/);
   });
 });
 

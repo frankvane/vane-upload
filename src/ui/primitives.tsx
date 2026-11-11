@@ -420,7 +420,9 @@ export const Progress: React.FC<ProgressProps> = ({
   format,
   style,
 }) => {
-  const clamped = Math.max(0, Math.min(100, percent));
+  // T-72：percent 为 NaN（上游异常未落值时）原样落 DOM 与 aria-valuenow，
+  // 钳为 0，避免 scaleX(NaN) 与无障碍树出现 NaN。
+  const clamped = Number.isNaN(percent) ? 0 : Math.max(0, Math.min(100, percent));
   const statusClass =
     status === "success"
       ? "rui-progress-status-success"
@@ -556,7 +558,9 @@ export const Slider: React.FC<SliderProps> = ({
   onChange,
   style,
 }) => {
-  const pct = ((value - min) / (max - min)) * 100;
+  // T-72：max===min 时分母为 0，产生 Infinity% / NaN%，轨道与手柄越界。
+  // 退化为 0%（无区间即无进度可言）。
+  const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   const markEntries = marks ? Object.entries(marks) : [];
   return (
     <div className="rui-slider" style={style}>

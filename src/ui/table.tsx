@@ -75,15 +75,11 @@ function TableRowInner<RecordType extends object>({
   disabled,
   onToggleOne,
 }: TableRowProps<RecordType>) {
-  // VU-41：长列表跳过视口外行的布局与绘制，intrinsic size 避免滚动条抖动。
+  // VU-41：屏外行「跳过布局/绘制」的优化已统一在 ui.css
+  // `.rui-table tbody tr.rui-table-row` 声明（含 Firefox/Safari 降级注释），
+  // 此处不再内联重复定义，避免 48px 与 CSS 44px 两套口径互相打架。
   return (
-    <tr
-      className="rui-table-row"
-      style={{
-        contentVisibility: "auto",
-        containIntrinsicSize: "auto 48px",
-      }}
-    >
+    <tr className="rui-table-row">
       {hasRowSelection && (
         <td>
           <input
@@ -162,11 +158,11 @@ export function Table<RecordType extends object>({
 
   const toggleAll = React.useCallback(() => {
     if (!rowSelection) return;
+    // T-72：selectableKeys 可能数百行，逐个 includes 是 O(N²)；转 Set 后 O(N)。
+    const selectableSet = new Set(selectableKeys);
     if (allChecked) {
       rowSelection.onChange(
-        rowSelection.selectedRowKeys.filter(
-          (k) => !selectableKeys.includes(k),
-        ),
+        rowSelection.selectedRowKeys.filter((k) => !selectableSet.has(k)),
       );
     } else {
       const merged = new Set([...rowSelection.selectedRowKeys, ...selectableKeys]);
