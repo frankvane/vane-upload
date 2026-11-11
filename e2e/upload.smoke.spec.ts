@@ -170,7 +170,7 @@ test("VU-63-2 重复内容文件触发秒传（秒传成功）", async ({ page }
   await waitRowStatus(page, "orig.bin", "已完成");
   expect(await findProductFile(expectedMd5)).not.toBeNull();
 
-  // 再以不同文件名上传相同内容 → 后端命中 md5+size → 秒传
+  // 再以不同文件名上传相同内容 → 后端命中 md5+size → 秒传（确定性契约，T-50 收窄为单状态）
   await uploadFiles(page, [fixture("dup.bin", content)]);
   await waitRowStatus(page, "dup.bin", "秒传成功");
 
@@ -418,16 +418,15 @@ test("VU-63-10 重复上传同一文件去重（S09 / VU-19）", async ({ page }
   // 再次选择完全相同的文件（同名 + 同内容 + 同大小 + 同 lastModified）
   await uploadFiles(page, [file]);
 
-  // 去重生效：列表里只有 1 行，且终态为「秒传成功」或「已完成」
+  // 去重生效：列表里只有 1 行，且终态必须为「已完成」。同 key（hash|size|mtime|name）
+  // 二次选择会被前端去重合并进首传那条已「已完成」的记录，而非另起一行「秒传成功」——
+  // 这是确定性契约，T-50 不再用 .or() 放宽；一旦回退成独立的「秒传成功」行或记录数≠1，
+  // 本断言会精确变红。
   const row = page.locator("tbody tr", {
     has: page.locator("td", { hasText: "dedupe.bin" }),
   });
   await expect(row).toHaveCount(1, { timeout: 10_000 });
-  await expect(
-    row.getByText("秒传成功", { exact: true }).or(
-      row.getByText("已完成", { exact: true }),
-    ),
-  ).toBeVisible({ timeout: 20_000 });
+  await waitRowStatus(page, "dedupe.bin", "已完成", 20_000);
 });
 
 /**

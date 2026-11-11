@@ -45,8 +45,13 @@ export default defineConfig({
    * 起不来。指向系统临时目录后既不触发守卫，也不在仓库里留垃圾。
    */
   outputDir: process.env.PW_OUTPUT_DIR || path.join(os.tmpdir(), "vane-upload-pw"),
-  // T-29 的测量脚本只在 PERF_TRACE=1 时纳入，常规回归仍是 11 条 e2e。
-  testIgnore: process.env.PERF_TRACE === "1" ? [] : ["**/perf.*.spec.ts"],
+  // T-50：T-29 归因脚本（perf.*.spec.ts）默认不实际运行，但保留为「skipped」出现在 CI 汇总，
+  // 而非被 testIgnore 静默剔除——这样评审能看清哪些用例被有意跳过（skip 清单可见）。
+  // 是否真跑由其内部 test.skip(PERF_TRACE!=="1") 控制；PERF_TRACE=1 时两者都跑。
+  // 首字节「预算」护栏（first-byte.budget.spec.ts）命名不含 perf.*，始终参与常规回归。
+  // secure 模式 spec（secure.*.spec.ts）有独立配置 `playwright.secure.config.ts`（独立鉴权后端），
+  // 不能跑在 demo 模式默认配置下（demo 后端不强制鉴权会让其断言失真），故在此排除。
+  testIgnore: ["**/secure.*.spec.ts"],
   timeout: 90_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,
