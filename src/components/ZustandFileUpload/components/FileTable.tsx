@@ -49,11 +49,6 @@ const FileTable: React.FC<FileTableProps> = ({
   const isSimpleMode = uploadConfig.uiMode === "simple";
   const { retryingFiles, handleDeleteFile, handleRetryUpload } = fileOperations;
 
-  const rowIndexById = useMemo(
-    () => new Map(files.map((file, index) => [file.id, index + 1])),
-    [files]
-  );
-
   // VU-41：直接传 store 里的稳定文件引用，不再每次 map 展开出新 record。
   // Table 改用 rowKey="id"，因此无需额外注入 key 字段。
   const dataSource = files;
@@ -66,7 +61,7 @@ const FileTable: React.FC<FileTableProps> = ({
         title: "编号",
         dataIndex: "ID",
         key: "index",
-        render: (_: unknown, record: UploadFile) => rowIndexById.get(record.id),
+        render: (_: unknown, _record: UploadFile, index: number) => index + 1,
         align: "center" as AlignItem,
         width: "10%",
       },
@@ -211,7 +206,6 @@ const FileTable: React.FC<FileTableProps> = ({
         (c): c is (typeof allColumns)[number] => c !== undefined
       );
   }, [
-    rowIndexById,
     isSimpleMode,
     retryingFiles,
     isUploading,

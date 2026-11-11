@@ -128,4 +128,34 @@ describe("VU-41 FileTable 数据源稳定性", () => {
     // dataSource 仍是同一批文件引用
     expect(after.dataSource).toBe(before.dataSource);
   });
+
+  it("单文件置 DONE 不重建 columns，且未变文件保持同一引用（TableRow memo 不被击穿）", () => {
+    captured.length = 0;
+    storeRef = null;
+
+    render(
+      <UploadProvider settingsSource="props">
+        <Harness />
+      </UploadProvider>
+    );
+    const store = storeRef!;
+    act(() => {
+      store.getState().setFiles([makeFile("f-1"), makeFile("f-2")]);
+    });
+    const before = captured.at(-1)!;
+    const unchangedBefore = before.dataSource[1];
+
+    // 单文件状态变化：files 数组必然换新，但列定义不应随之重建，
+    // 否则真实表格里全部 TableRow 的 memo 被击穿、O(N) 重渲染。
+    act(() => {
+      store.getState().patchFile("f-1", { status: UploadStatus.DONE, progress: 100 });
+    });
+    const after = captured.at(-1)!;
+
+    expect(after.columns).toBe(before.columns);
+    // 未变化的文件对象引用稳定 -> 该行不会因父级重渲染而重渲染
+    expect(after.dataSource[1]).toBe(unchangedBefore);
+    // 变化行是新对象，会被对应 TableRow 正常重渲染（仅 1 行，而非全表）
+    expect(after.dataSource[0]).not.toBe(before.dataSource[0]);
+  });
 });
