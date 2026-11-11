@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import FileUploadActions from "./FileUploadActions";
 import { useUploadEngine } from "../context/UploadEngineContext";
 import { UploadProvider } from "../context/UploadContext";
+import { useUploadStore } from "../store/upload";
+import { useShallow } from "zustand/react/shallow";
 import type { UploadFile } from "../types/upload";
 
 type Store = ReturnType<typeof useUploadEngine>["store"];
@@ -102,5 +104,41 @@ describe("FileUploadActions", () => {
     expect(retry).not.toBeDisabled();
     fireEvent.click(retry);
     expect(props.fileOperations.handleRetryAllUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it("T-69：files 引用变化但 errorCount/数量不变时工具栏不重渲染", () => {
+    const props = baseProps();
+    let toolbarRenders = 0;
+    // 探针订阅与工具栏相同的派生标量，二者重渲染同频 -> 计数即工具栏重渲染次数。
+    const Probe: React.FC = () => {
+      useUploadStore(
+        useShallow((s) => ({
+          errorCount: s.files.filter((f) => f.status === "error").length,
+          filesLength: s.files.length,
+        })),
+      );
+      toolbarRenders += 1;
+      return <FileUploadActions {...props} />;
+    };
+    const { store } = mount(<Probe />);
+    const base = toolbarRenders; // 初始渲染
+
+    act(() => {
+      store.getState().setFiles([makeFile("a", "waiting"), makeFile("b", "waiting")]);
+    });
+    const afterAdd = toolbarRenders; // 数量 0 -> 2：应重渲染一次
+    expect(afterAdd).toBe(base + 1);
+
+    // 单文件在「非 error」状态间流转：errorCount 与数量都不变 -> 工具栏不应重渲染
+    act(() => {
+      store.getState().patchFile("a", { status: "uploading" });
+    });
+    expect(toolbarRenders).toBe(afterAdd);
+
+    // errorCount 真正变化（出现失败文件）：应重渲染一次
+    act(() => {
+      store.getState().patchFile("b", { status: "error" });
+    });
+    expect(toolbarRenders).toBe(afterAdd + 1);
   });
 });

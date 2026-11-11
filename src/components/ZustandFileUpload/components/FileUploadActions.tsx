@@ -1,7 +1,7 @@
 import { BarChartOutlined } from "../../../ui/icons";
 import { Button, InputNumber, Switch } from "../../../ui/primitives";
 import { Tooltip } from "../../../ui/feedback";
-import React, { useMemo } from "react";
+import React from "react";
 import type { BatchUploaderActions } from "../hooks/useBatchUploader";
 import type { FileOperationsActions } from "../hooks/useFileOperations";
 import { useEffectiveUploadConfig } from "../hooks/useEffectiveConfig";
@@ -28,25 +28,14 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
   fileOperations,
 }) => {
   const {
-    files,
+    errorCount,
+    filesLength,
     isUploading,
     isRetryingAll,
     isNetworkOffline,
     loading,
     cost,
     processProgress,
-  } = useUploadStore(
-    useShallow((state) => ({
-      files: state.files,
-      isUploading: state.isUploading,
-      isRetryingAll: state.isRetryingAll,
-      isNetworkOffline: state.isNetworkOffline,
-      loading: state.loading,
-      cost: state.cost,
-      processProgress: state.processProgress,
-    }))
-  );
-  const {
     setAutoUpload,
     setAutoCleanup,
     setCleanupDelay,
@@ -58,6 +47,16 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
     setStorageStatsVisible,
   } = useUploadStore(
     useShallow((state) => ({
+      // T-69：直接派生标量，避免订阅整个 files 数组——只有 errorCount / 数量
+      // 真正变化时才重渲染工具栏，files 引用变化（如单文件状态流转）不再击穿。
+      errorCount: state.files.filter((file) => file.status === "error").length,
+      filesLength: state.files.length,
+      isUploading: state.isUploading,
+      isRetryingAll: state.isRetryingAll,
+      isNetworkOffline: state.isNetworkOffline,
+      loading: state.loading,
+      cost: state.cost,
+      processProgress: state.processProgress,
       setAutoUpload: state.setAutoUpload,
       setAutoCleanup: state.setAutoCleanup,
       setCleanupDelay: state.setCleanupDelay,
@@ -75,13 +74,8 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
   const uploadConfig = useEffectiveUploadConfig();
   const isSimpleMode = uploadConfig.uiMode === "simple";
 
-  const errorFilesCount = useMemo(
-    () => files.filter((file) => file.status === "error").length,
-    [files]
-  );
-
   const retryButtonTitle =
-    errorFilesCount > 0 ? `批量重试 (${errorFilesCount})` : "批量重试";
+    errorCount > 0 ? `批量重试 (${errorCount})` : "批量重试";
 
   const showStorageStats = () => {
     setStorageStatsVisible(true);
@@ -129,7 +123,7 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
               type="primary"
               onClick={uploadAll}
               disabled={
-                files.length === 0 ||
+                filesLength === 0 ||
                 isUploading ||
                 isRetryingAll ||
                 isNetworkOffline
@@ -143,7 +137,7 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
               type="primary"
               danger
               onClick={handleClearList}
-              disabled={files.length === 0 || isUploading || isRetryingAll}
+              disabled={filesLength === 0 || isUploading || isRetryingAll}
             >
               清除列表
             </Button>
@@ -152,8 +146,8 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
               title={
                 isNetworkOffline
                   ? "网络已断开，无法重试"
-                  : errorFilesCount > 0
-                  ? `重试 ${errorFilesCount} 个失败文件`
+                  : errorCount > 0
+                  ? `重试 ${errorCount} 个失败文件`
                   : "没有可重试文件"
               }
             >
@@ -161,7 +155,7 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
                 type="primary"
                 onClick={handleRetryAllUpload}
                 disabled={
-                  errorFilesCount === 0 ||
+                  errorCount === 0 ||
                   isUploading ||
                   isRetryingAll ||
                   isNetworkOffline

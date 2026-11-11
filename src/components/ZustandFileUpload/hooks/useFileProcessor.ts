@@ -83,7 +83,7 @@ interface UseFileProcessorOptions {
 
 export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
   const {
-    existingFiles,
+    existingFilesLength,
     isNetworkOffline,
     chunkSize,
     refreshFiles,
@@ -94,7 +94,8 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
     getMessageApi,
   } = useUploadStore(
     useShallow((state) => ({
-      existingFiles: state.files,
+      // T-69：只取长度标量，不再订阅整个 files 数组
+      existingFilesLength: state.files.length,
       isNetworkOffline: state.isNetworkOffline,
       chunkSize: state.chunkSize,
       refreshFiles: state.refreshFiles,
@@ -153,7 +154,7 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
 
     // P2-3：maxFiles 约束的是「列表内文件总数」，不是单次选择的文件数。
     // 只比较本次 files.length 时，多次少量选择即可无限绕过限制。
-    const existingCount = existingFiles.length;
+    const existingCount = existingFilesLength;
     if (existingCount + files.length > uploadConfig.maxFiles) {
       errors.push(
         existingCount > 0

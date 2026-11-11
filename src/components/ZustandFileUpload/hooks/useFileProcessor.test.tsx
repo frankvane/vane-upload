@@ -27,6 +27,8 @@ const h = vi.hoisted(() => {
   };
   const storeState = {
     existingFiles: [] as Array<{ id: string }>,
+    // T-69：真实代码改为只取长度标量，测试 harness 同步提供该字段（mock 直接返回 storeState、忽略 selector）
+    existingFilesLength: 0,
     isNetworkOffline: false,
     networkType: "wifi",
     fileConcurrency: 2,
@@ -109,6 +111,7 @@ beforeEach(() => {
   h.messageApi.info = vi.fn();
 
   h.storeState.existingFiles = [];
+  h.storeState.existingFilesLength = 0;
   h.storeState.isNetworkOffline = false;
   h.storeState.getMessageApi = () => h.messageApi;
 
@@ -131,6 +134,7 @@ describe("useFileProcessor 行为断言", () => {
     h.storeState.existingFiles = Array.from({ length: 9 }, (_, i) => ({
       id: `existing-${i}`,
     }));
+    h.storeState.existingFilesLength = 9;
     h.config.maxFiles = 10;
 
     const { result } = renderHook(() => useFileProcessor({ uploadAll: vi.fn() }));
