@@ -298,7 +298,6 @@ export function useBatchUploader(): BatchUploaderActions {
     },
     [
       engine,
-      syncFile,
       persistAndSync,
       chunkConcurrency,
       maxRetries,

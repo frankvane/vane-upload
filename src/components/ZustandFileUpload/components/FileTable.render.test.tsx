@@ -41,7 +41,7 @@ vi.mock("../../../ui/table", async (importOriginal) => {
                       const value = (record as Record<string, unknown>)[
                         col.dataIndex as string
                       ];
-                      const rendered = col.render
+                      const rendered: React.ReactNode = col.render
                         ? (
                             col.render as (
                               v: unknown,
@@ -49,7 +49,7 @@ vi.mock("../../../ui/table", async (importOriginal) => {
                               idx: number,
                             ) => React.ReactNode
                           )(value, record, rowIndex)
-                        : value;
+                        : (value as React.ReactNode);
                       return (
                         <td key={(col.key as string) ?? colIndex}>{rendered}</td>
                       );
@@ -205,21 +205,17 @@ describe("VU-41 FileTable 数据源稳定性", () => {
  * 真正渲染进 DOM，因此其 onClick 与 disabled 分支均可被断言。每条断言都精确到具体的
  * 禁用条件，改坏任一按钮的 disabled 逻辑都会让用例转红。
  */
-type ActionHandlers = {
-  pauseUploadFile: ReturnType<typeof vi.fn>;
-  resumeUploadFile: ReturnType<typeof vi.fn>;
-  cancelUploadFile: ReturnType<typeof vi.fn>;
-  handleDeleteFile: ReturnType<typeof vi.fn>;
-  handleRetryUpload: ReturnType<typeof vi.fn>;
-};
-
-const makeHandlers = (): ActionHandlers => ({
-  pauseUploadFile: vi.fn(),
-  resumeUploadFile: vi.fn(),
-  cancelUploadFile: vi.fn(),
-  handleDeleteFile: vi.fn(),
-  handleRetryUpload: vi.fn(),
+// 显式给 vi.fn 标注签名：无参 vi.fn() 推断为 Mock<Procedure | Constructable>，
+// 无法赋给 FileTable 的具体回调类型（tsc -p tsconfig.test.json 会报错）。
+const makeHandlers = () => ({
+  handleDeleteFile: vi.fn<(id: string) => Promise<void>>(),
+  handleRetryUpload: vi.fn<(file: UploadFile) => Promise<void>>(),
+  pauseUploadFile: vi.fn<(file: UploadFile) => void>(),
+  resumeUploadFile: vi.fn<(file: UploadFile) => void>(),
+  cancelUploadFile: vi.fn<(file: UploadFile) => void>(),
 });
+
+type ActionHandlers = ReturnType<typeof makeHandlers>;
 
 // useUploadStore 是读取 UploadStoreContext 的 hook，测试里要拿 store 实例本身须经由
 // useUploadEngine().store（与 VU-41 用例同一来源）；CaptureStore 把实例抓到 actionStoreRef。
@@ -254,12 +250,13 @@ const renderActionTable = (
   act(() => {
     store.getState().setFiles(files);
   });
-  if (opts.isNetworkOffline !== undefined) {
+  const { isNetworkOffline, isUploading } = opts;
+  if (isNetworkOffline !== undefined) {
     // store 无 setIsNetworkOffline action，离线态由网络探测 hook 经 setState 写入
-    act(() => store.setState({ isNetworkOffline: opts.isNetworkOffline }));
+    act(() => store.setState({ isNetworkOffline }));
   }
-  if (opts.isUploading !== undefined) {
-    act(() => store.getState().setIsUploading(opts.isUploading));
+  if (isUploading !== undefined) {
+    act(() => store.getState().setIsUploading(isUploading));
   }
   return utils;
 };

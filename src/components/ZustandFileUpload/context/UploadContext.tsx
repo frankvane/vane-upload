@@ -140,6 +140,8 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   const allowedFileTypesKey = JSON.stringify(allowedFileTypes ?? []);
   const stableAllowedFileTypes = useMemo(
     () => allowedFileTypes ?? [],
+    // 刻意只依赖内容签名：加回 allowedFileTypes 会让内容相同的新数组击穿引用。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [allowedFileTypesKey]
   );
   const visibleColumnsKey =
@@ -147,6 +149,8 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   const stableVisibleColumns = useMemo<UploadColumnKey[] | undefined>(() => {
     if (visibleColumns === undefined) return undefined;
     return visibleColumns;
+    // 同上：只依赖内容签名，原数组每次渲染都是新引用。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleColumnsKey]);
 
   // VU-16 / VU-45：context value 只在这些原语 / 稳定引用变化时才换身份，

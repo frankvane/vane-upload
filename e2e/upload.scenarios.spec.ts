@@ -120,7 +120,7 @@ test("VU-63-12 网络离线切换：上传中离线 → 上传失败，恢复后
   const file = fixture("offline-switch.bin", content);
 
   // 用长延迟闸口把上传卡在「上传中」，确保离线发生在在途请求上
-  const { gate, handler } = makeUploadGate(8_000);
+  const { handler } = makeUploadGate(8_000);
   await page.route("**/api/file/upload", handler);
 
   await uploadFiles(page, [file]);

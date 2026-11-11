@@ -7,7 +7,7 @@ import { useUploadEngine } from "../context/UploadEngineContext";
 import { UploadProvider } from "../context/UploadContext";
 import { useUploadStore } from "../store/upload";
 import { useShallow } from "zustand/react/shallow";
-import type { UploadFile } from "../types/upload";
+import { UploadStatus, type UploadFile } from "../types/upload";
 
 type Store = ReturnType<typeof useUploadEngine>["store"];
 let storeRef: Store | null = null;
@@ -131,13 +131,13 @@ describe("FileUploadActions", () => {
 
     // 单文件在「非 error」状态间流转：errorCount 与数量都不变 -> 工具栏不应重渲染
     act(() => {
-      store.getState().patchFile("a", { status: "uploading" });
+      store.getState().patchFile("a", { status: UploadStatus.UPLOADING });
     });
     expect(toolbarRenders).toBe(afterAdd);
 
     // errorCount 真正变化（出现失败文件）：应重渲染一次
     act(() => {
-      store.getState().patchFile("b", { status: "error" });
+      store.getState().patchFile("b", { status: UploadStatus.ERROR });
     });
     expect(toolbarRenders).toBe(afterAdd + 1);
   });

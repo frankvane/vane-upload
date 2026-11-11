@@ -455,7 +455,9 @@ describe("chunkCache（方案 A）", () => {
     }
 
     // 放行第 2 批：此时代际已被 bump，过期写回应被忽略
-    stallResolve?.();
+    // TS 控制流无法看到「赋值发生在 Promise 回调里」，会把 stallResolve
+    // 窄化成 null 并让 ?.() 变成 never；显式断言恢复声明的联合类型。
+    (stallResolve as (() => void) | null)?.();
 
     const status = await statusPromise;
     expect(status).toBe("unavailable");
