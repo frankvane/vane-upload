@@ -186,8 +186,14 @@ export const deleteCachedChunk = async (
   index: number,
 ): Promise<void> => {
   const db = await openDb();
-  const tx = db.transaction(CHUNKS_STORE, "readwrite");
+  // 跨两 store 同一事务：删片的同时移除 ready 提交标记（FILES_STORE 无对应 meta 时
+  // 该 delete 为 no-op）。这是「ready ≡ 分片齐全」等价的关键——原本完整的 ready 缓存
+  // 删掉任一分片后即不再完整，若保留 ready meta，读取端会误判为可零点击续传，实则缺片，
+  // 刷新后续传会在缺失分片处被 ChunkCacheMissError 二次降级（数据一致性缺陷，见 T-52）。
+  // 上传中途刷新也因此安全降级为重选，而非拿着半套分片去合并。
+  const tx = db.transaction([CHUNKS_STORE, FILES_STORE], "readwrite");
   tx.objectStore(CHUNKS_STORE).delete([key.instanceId, key.fileId, index]);
+  tx.objectStore(FILES_STORE).delete([key.instanceId, key.fileId]);
   await txDone(tx);
 };
 

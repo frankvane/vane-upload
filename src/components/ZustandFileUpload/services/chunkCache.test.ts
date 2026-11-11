@@ -253,6 +253,34 @@ describe("chunkCache（方案 A）", () => {
     expect(await isFileCacheReady("inst-a", file.id)).toBe(true);
   });
 
+  /**
+   * T-52：就绪标记必须与「分片齐全」严格等价。
+   * 已预热（ready）的文件在上传期每确认一分片即 deleteCachedChunk（chunkPipeline.ts:165），
+   * 若删片不删 ready meta，则 listReadyFileIds 仍含该文件 —— 上传中途刷新会被误判为
+   * 可零点击续传，实则缺片，续传在缺失分片处被 ChunkCacheMissError 二次降级（数据一致性缺陷）。
+   * 修复前该断言红（listReadyFileIds 仍含 fileId），修复后绿（删片同时移除 ready meta）。
+   */
+  it("T-52：已就绪缓存删除单片后不再判为可续传（ready ≡ 分片齐全）", async () => {
+    const { file, fileRef } = createFixture("cache-ready-del", 10, 4);
+
+    const status = await primeChunkCache(file, fileRef, { instanceId: "inst" });
+    expect(status).toBe("ready");
+    expect(await listReadyFileIds("inst")).toEqual(new Set([file.id]));
+
+    // 模拟服务端确认成功、释放本地单片缓存（chunkPipeline.ts:165 的真实调用路径）
+    await deleteCachedChunk({ instanceId: "inst", fileId: file.id }, 0);
+
+    // 关键不变量：删掉任一分片后，缓存不再完整，必须移出就绪集合。
+    // （注：同一会话内 isFileCacheReady 仍可能命中内存 primeEntries 的 ready 快照，
+    //  属 T-55 的内存 entry 释放范畴；真实刷新场景页面重载后内存快照消失、改读 IDB，
+    //  此时 meta 已随删片移除 → 正确判非就绪。此处仅校验 T-52 的 IDB 级不变量。）
+    expect(await listReadyFileIds("inst")).toEqual(new Set());
+    // 该片已被清，其余分片仍在（不影响删除语义本身）
+    expect(
+      await readCachedChunk({ instanceId: "inst", fileId: file.id }, 0)
+    ).toBeUndefined();
+  });
+
   it("store 层：删除单片后重新读取为空，其余分片不受影响", async () => {
     const key = { instanceId: "inst", fileId: "manual" };
     await putCachedChunks(key, [
