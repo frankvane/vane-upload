@@ -58,7 +58,7 @@ npm run dev
 | `CORS_ORIGIN` | 空 | 具体域名白名单，逗号分隔；`*` 仅兼容告警 |
 | `RATE_LIMIT_ENABLED` | 开启 | 设为 `false` 关闭限流 |
 | `RATE_LIMIT_MAX` | `300` | 每分钟每 IP 请求上限；`0` = 不挂载限流器 |
-| `TRUST_PROXY_HOPS` | 未设置（不信任代理） | 反向代理跳数，整数。设置后 `req.ip` 取可信 `X-Forwarded-For` 最右一跳，限流按真实源 IP 分桶；**禁止**设为 `true` 或留空后依赖伪造 XFF |
+| `TRUST_PROXY_HOPS` | 未设置（不信任代理） | 反向代理跳数，整数。**必须**按反代实际层数设置（单台反代为 `1`）。设置后 `req.ip` 取可信 `X-Forwarded-For` 最右一跳，限流按真实源 IP 分桶；**若限流开启却留空（=0），所有客户端会被计入同一个桶，限流退化为「全站单桶」**（启动期会输出 `[限流]` 告警，见 T-62）。**禁止**设为 `true` 或留空后依赖伪造 XFF |
 | `MAX_UPLOAD_SIZE_MB` | `5120` | 单文件上限 |
 | `MAX_CHUNKS` | `100000` | 单文件分片上限 |
 | `MAX_TOTAL_UPLOAD_SIZE_MB` | `20480` | 进程级总容量上限 |
@@ -95,7 +95,9 @@ npm run dev
   `[path]`。请求日志只记路径模板，不记 query（VU-38）。
 - **日志轮转与 stdout 采集由部署方负责**（例如容器日志驱动 + logrotate / 日志平台），
   本项目不内置文件轮转，也不引入 winston / pino。
-- 部署基线：① 反代按真实跳数设 `TRUST_PROXY_HOPS`，不要设 `true`；
+- 部署基线：① 反代按真实跳数设 `TRUST_PROXY_HOPS`（单台反代 = `1`），不要设 `true`；
+  否则限流退化为「全站单桶」，启动期会告警；反向代理限流基线见仓库根 `nginx/nginx.conf`
+  （`limit_req_zone` + `limit_req` 按客户端 IP 限速，`X-Forwarded-For` 透传真实源 IP）。
   ② Cookie 鉴权需由部署方设置 `SameSite` / `Secure` / CSRF 防护；
   ③ `server/data`、`server/tmp/upload`、`server/uploads` 挂持久化卷；
   ④ `PID 1` 必须能收到 `SIGTERM`。

@@ -23,6 +23,30 @@ if (trustProxyHops > 0) {
   app.set("trust proxy", trustProxyHops);
 }
 
+/**
+ * 限流代理就绪自检（T-62）。
+ *
+ * 当限流开启但「信任代理跳数」为 0（即未声明反代层数）时，express-rate-limit 的
+ * req.ip 会恒为反代地址，所有客户端被计入同一个桶，限流退化为「全站单桶」，
+ * 无法按真实源 IP 限流。返回告警文案（需修复），无需告警时返回 null。
+ *
+ * 设计为纯函数（注入参数）以便单测确定性断言，不依赖运行期 env 副作用。
+ *
+ * @param {{rateLimitEnabled: boolean, trustProxyHops: number, isTest: boolean}} opts
+ * @returns {string | null}
+ */
+function rateLimitProxyReadiness({ rateLimitEnabled, trustProxyHops: hops, isTest }) {
+  if (isTest) return null;
+  if (!rateLimitEnabled) return null;
+  if (hops > 0) return null;
+  return (
+    "[限流] RATE_LIMIT_ENABLED=true 但 TRUST_PROXY_HOPS 未设置（=0）。" +
+    "反代部署下 req.ip 会恒为代理地址，express-rate-limit 将把所有客户端计入同一个桶，" +
+    "限流退化为「全站单桶」，无法按真实源 IP 限流。请按反代实际跳数设置 TRUST_PROXY_HOPS" +
+    "（单台反代通常为 1；多层则按层数累加）。参考部署基线 nginx/nginx.conf。"
+  );
+}
+
 // S5 指纹收敛：关闭 Express 默认 x-powered-by 响应头
 app.disable("x-powered-by");
 
@@ -62,6 +86,17 @@ registerSafePathToken(morgan);
 // 测试环境不刷请求日志（几十条/文件会淹没 TAP 输出）；分级本身由 LOG_LEVEL 控制。
 if (!config.isTest()) {
   app.use(morgan(requestLogFormat, { stream: requestLogStream }));
+}
+
+// 限流代理就绪自检（T-62）：限流开启但未声明反代跳数时，req.ip 恒为代理地址，
+// 所有客户端共用一个桶，限流退化为「全站单桶」。启动期明确告警，提示运维设 TRUST_PROXY_HOPS。
+const rateLimitReadinessWarn = rateLimitProxyReadiness({
+  rateLimitEnabled: config.rateLimitEnabled(),
+  trustProxyHops: config.trustProxyHops(),
+  isTest: config.isTest(),
+});
+if (rateLimitReadinessWarn) {
+  logger.warn(rateLimitReadinessWarn);
 }
 
 // 限流：默认 300 次/分钟/IP（RATE_LIMIT_MAX 可调，RATE_LIMIT_ENABLED=false 关闭）。
@@ -196,3 +231,4 @@ app.use(errorHandler);
 
 module.exports = app;
 module.exports.errorHandler = errorHandler;
+module.exports.rateLimitProxyReadiness = rateLimitProxyReadiness;
