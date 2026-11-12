@@ -41,7 +41,8 @@
     "test:server": "npm test -w server",
     "size:check": "node scripts/size-check.mjs",
     "check:dev-only": "node scripts/check-dev-only-code.mjs",
-    "ci": "node scripts/check-node.mjs && npm run typecheck && npm run lint && npm run test:coverage && node scripts/check-coverage-floor.mjs && npm run test:server:coverage && npm run build && npm run size:check && npm run check:dev-only",
+    "summarize:skips": "node scripts/summarize-test-skips.mjs",
+    "ci": "node scripts/check-node.mjs && npm run typecheck && npm run lint && npm run test:coverage && node scripts/check-coverage-floor.mjs && npm run test:server:coverage && npm run summarize:skips && npm run build && npm run size:check && npm run check:dev-only",
     "test:e2e": "playwright test",
     "test:e2e:report": "playwright show-report"
   },

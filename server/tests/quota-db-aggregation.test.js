@@ -54,9 +54,9 @@ test("VU-04：uploadChunk 响应前分片已落库（崩溃窗口消除）", asy
   const rows = await FileChunk.findAll({
     where: { chunk_index: 0, status: 1 },
   });
-  assert.ok(rows.length >= 1, "分片应已持久化到 DB");
-  const row = rows.find((r) => r.size === 500);
-  assert.ok(row, "DB 记录应携带真实 size=500");
+  // T-73：旧断言 `rows.length >= 1` 允许「多落几行」也过；这里必须是恰好 1 行、size 精确。
+  assert.equal(rows.length, 1, "响应后分片应恰好持久化 1 行到 DB");
+  assert.equal(rows[0].size, 500, "DB 记录应携带真实 size=500");
 });
 
 test("VU-03：配额来自 DB 聚合，累计超限返回 413", async () => {
@@ -93,5 +93,10 @@ test("VU-11：getChunkUsage 直接读 DB，磁盘文件缺失不影响计数", a
   // 全局 / 用户维度同样基于 DB。
   const globalUsage =
     await uploadController.__quotaInternals.getGlobalChunkUsage();
-  assert.ok(globalUsage.bytes >= 500, "全局配额也应基于 DB 聚合");
+  // T-73：`>= 500` 只证明「不为零」。改为与 DB 全表聚合逐字节对齐——
+  // 若全局配额读磁盘、少算/多算任一行，这里立即转红。
+  const allRows = await FileChunk.findAll({ where: { status: 1 } });
+  const expectedBytes = allRows.reduce((sum, row) => sum + row.size, 0);
+  assert.equal(globalUsage.bytes, expectedBytes, "全局配额必须等于 DB 全表字节和");
+  assert.equal(globalUsage.count, allRows.length, "全局分片数必须等于 DB 有效行数");
 });

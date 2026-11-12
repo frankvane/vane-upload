@@ -1,10 +1,13 @@
 /**
  * VU-59 [P1] 后端关键用例集成测试（TC-01 ~ TC-24）
  * --------------------------------------------------------------------------
- * 落地范围：后端可直接覆盖的用例（TC-01~TC-14、TC-20~TC-24）。
+ * 落地范围：后端可直接覆盖的用例（TC-01~TC-14、TC-14B、TC-20~TC-24）。
  * 前端专属用例（TC-15 取消 / TC-16 暂停恢复 / TC-17 刷新恢复 / TC-18 IndexedDB
  * 降级 / TC-19 网络自适应）在浏览器侧才有对应执行路径，后端无等价接口，
  * 一律在本文件顶部以 frontend-covered-elsewhere 标注并 skip，不强行伪造。
+ * T-73：TC-14B 是 T-61 落地时新增的「同 storageId 不同 md5 合并互斥」用例，
+ * 曾误占用 TC-15 编号（与顶部的 skip「取消」用例冲突），现按语义归入 TC-14
+ * 的合并锁族并改号，避免台账里同一个编号对应两条完全不同的用例。
  *
  * T-23 skip 归档（5 条）：**跳过原因**是执行路径只存在于浏览器（fetch abort /
  * 前端状态机 / IndexedDB / 网络探测），后端没有等价接口，伪造出来测的就不是
@@ -643,11 +646,11 @@ test("TC-14 并发合并同键（10 个 Promise.all）→ 仅 1 次落盘，File
 });
 
 // =========================================================================
-// TC-15：mergeKey 仅按 userId:storageId 计价（不含 md5）
+// TC-14B：mergeKey 仅按 userId:storageId 计价（不含 md5）
 // 同 storageId、不同 md5 的两个并发合并必须互斥，绝不会各跑各的、重复合并同一批分片。
 // （T-61 修复前 mergeKey 含 md5，同 storageId 不同 md5 会拿到不同的锁、并发双写。）
 // =========================================================================
-test("TC-15 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘", async () => {
+test("TC-14B 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘", async () => {
   const fid = "tc15";
   const parts = [];
   for (let i = 0; i < 3; i += 1) {
@@ -690,11 +693,35 @@ test("TC-15 同 storageId 不同 md5 并发合并互斥：仅 1 次成功落盘"
     200,
     `真实 md5 那路最终应合并成功（含 503 重试），首轮=${real.status}`
   );
-  assert.notEqual(bogus.status, 200, "伪造 md5 那路不得成功落盘");
+  assert.equal(finalReal.body.code, 200);
 
-  // 无论哪一路胜出，落盘都只能有 1 行——证明二者被同一把锁互斥，而非各写各的。
-  const count = await File.count({ where: { file_id: `test:${fid}` } });
-  assert.equal(count, 1, "同 storageId 不应重复落盘");
+  // T-73：旧断言 `notEqual(bogus.status, 200)` 允许 400/403/409/500 任意值通过。
+  // 表驱动锁定两种唯一合法终态及各自的精确文案。
+  const bogusOutcomes = new Map([
+    [422, "文件 MD5 校验未通过"],
+    [503, "文件正在合并中，请稍后重试"],
+  ]);
+  assert.equal(
+    bogusOutcomes.has(bogus.status),
+    true,
+    `伪造 md5 那路只允许 422/503，实际 ${bogus.status} (${bogus.body?.message})`
+  );
+  assert.equal(
+    bogus.body.message,
+    bogusOutcomes.get(bogus.status),
+    "拒绝原因必须与状态码一一对应"
+  );
+
+  // 无论哪一路胜出，落盘都只能有 1 行，且必须是真实 md5 那一路的产物。
+  const rows = await File.findAll({ where: { file_id: `test:${fid}` } });
+  assert.equal(rows.length, 1, "同 storageId 不应重复落盘");
+  assert.equal(rows[0].md5, realMd5, "落盘行必须属于真实 md5 那一路");
+  const abs = path.join(UPLOADS_DIR, path.basename(rows[0].file_path));
+  assert.equal(
+    md5Buffer(fs.readFileSync(abs)),
+    realMd5,
+    "产物字节必须与真实合并内容一致"
+  );
 });
 
 // =========================================================================
@@ -1019,5 +1046,7 @@ test("TC-24 崩溃重启可续传；活跃（受保护）但 mtime 超 TTL 的�
     true,
     "mtime 新鲜的分片不应被清理"
   );
-  assert.ok(removed.includes(`${orphanSid}_0`));
+  // T-73：旧断言 `includes` 允许「顺手删掉了别的分片」也通过；改为精确集合，
+  // 保证本次扫描只删了这一个孤儿，没有误伤受保护 / 新鲜分片。
+  assert.deepEqual(removed, [`${orphanSid}_0`]);
 });

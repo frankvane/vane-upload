@@ -147,8 +147,20 @@ test("queued chunk state flush retries SQLITE_BUSY and succeeds", async () => {
     assert.equal(uploadRes.status, 200);
     assert.equal(uploadRes.body.code, 200);
 
+    // T-73：旧断言只有 `calls >= 2` + 上传 200，完全不校验重试后的数据。
+    // 这里精确到「恰好一次重试」+ DB 行数/size + 磁盘内容，避免「重试了但没落库」假绿。
     await flushPendingChunkStates();
-    assert.ok(calls >= 2);
+    assert.equal(calls, 2, "SQLITE_BUSY 应恰好触发 1 次重试（共 2 次 bulkCreate）");
+    const rows = await FileChunk.findAll({
+      where: { file_id: scoped(fileId), chunk_index: 0, status: 1 },
+    });
+    assert.equal(rows.length, 1, "重试成功后必须恰好落 1 行");
+    assert.equal(rows[0].size, chunkBuffer.length, "落库 size 必须等于分片字节数");
+    assert.equal(
+      fs.readFileSync(buildChunkPath(scoped(fileId), 0), "utf8"),
+      "busy-retry-case",
+      "磁盘分片内容必须与上传字节一致"
+    );
   } finally {
     FileChunk.bulkCreate = originalBulkCreate;
   }
@@ -445,30 +457,116 @@ test("T-38：abort × merge 并发，合并成功或明确 409，无 ENOENT / �
     fs.promises.readFile = originalReadFile;
   }
 
-  const mergeOk = mergeRes.status === 200;
-  const abortRejected = abortRes.status === 409;
-  assert.ok(
-    mergeOk || abortRejected,
+  // T-73：旧断言是 `mergeOk || abortRejected` + `mergeRes.status < 500`，允许
+  // 401/409/503 任意组合通过；状态不变量又被 `if (produced)` 包住，产物没落盘时
+  // 整段不执行。改为唯一的允许组合 + 无条件终态断言。
+  assert.deepEqual(
+    { merge: mergeRes.status, abort: abortRes.status },
+    { merge: 200, abort: 409 },
     `并发结果不干净：merge=${mergeRes.status} (${mergeRes.body?.message}), abort=${abortRes.status}`
   );
-  // 源分片被 abort 删掉后 merge 读片会抛 ENOENT → 500，绝不允许。
-  assert.ok(
-    mergeRes.status < 500,
-    `merge 不得因源分片消失而 ENOENT 崩溃：${mergeRes.body?.message}`
-  );
+  assert.equal(mergeRes.body.code, 200);
+  assert.equal(abortRes.body.message, "文件正在合并中，请稍后重试");
 
-  // 状态不变量：产物一旦落盘，该 storageId 下不得残留被 abort 归零（status=0）的分片。
-  const produced = await File.findOne({
+  const producedRows = await File.findAll({
     where: { md5: chunkMd5, size: chunkBuffer.length, status: 1 },
   });
-  if (produced) {
-    const zeroed = await FileChunk.count({
-      where: { file_id: scoped(fileId), status: 0 },
-    });
-    assert.equal(
-      zeroed,
-      0,
-      "产物已落盘时不得同时残留被 abort 归零的分片状态"
-    );
+  assert.equal(producedRows.length, 1, "并发结束后产物必须恰好落盘 1 行");
+  const absolute = path.join(
+    UPLOADS_DIR,
+    path.basename(producedRows[0].file_path)
+  );
+  assert.equal(fs.existsSync(absolute), true, "产物文件必须真实存在");
+  assert.equal(
+    md5Buffer(fs.readFileSync(absolute)),
+    chunkMd5,
+    "产物字节必须与源分片完全一致"
+  );
+  assert.equal(
+    await FileChunk.count({ where: { file_id: scoped(fileId), status: 0 } }),
+    0,
+    "产物已落盘时不得同时残留被 abort 归零的分片状态"
+  );
+});
+
+// T-73：upload × merge 并发。此前后端只有 abort×merge（T-38）与 upload×upload
+// （TC-12），没有任何「合并读片期间又到达一个分片」的用例。用与 T-38 相同的
+// readGate 门闩制造真实并发，精确断言后到分片不改变本次合并产物。
+test("T-73：upload × merge 并发，合并期间到达的分片不污染产物", async () => {
+  const chunkBuffer = Buffer.from("t73-upload-merge-payload", "utf8");
+  const chunkMd5 = md5Buffer(chunkBuffer);
+  const lateBuffer = Buffer.from("t73-late-chunk", "utf8");
+  const lateMd5 = md5Buffer(lateBuffer);
+  const fileId = "t73_upload_merge_file";
+  const chunkPath = buildChunkPath(scoped(fileId), 0);
+
+  const uploadRes = await request(app)
+    .post("/api/file/upload")
+    .field("file_id", fileId)
+    .field("index", "0")
+    .field("chunk_md5", chunkMd5)
+    .attach("chunk", chunkBuffer, { filename: "chunk-0.bin" });
+  assert.equal(uploadRes.status, 200);
+
+  const originalReadFile = fs.promises.readFile;
+  let signalRead;
+  const readReached = new Promise((resolve) => {
+    signalRead = resolve;
+  });
+  let releaseRead;
+  const readGate = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  fs.promises.readFile = async (...args) => {
+    if (String(args[0]) === chunkPath) {
+      signalRead();
+      await readGate;
+    }
+    return originalReadFile.apply(fs.promises, args);
+  };
+
+  let mergeRes;
+  let lateRes;
+  try {
+    const mergePromise = request(app)
+      .post("/api/file/merge")
+      .send({
+        file_id: fileId,
+        md5: chunkMd5,
+        name: "t73-upload-merge.bin",
+        size: chunkBuffer.length,
+        total: 1,
+      })
+      .then((res) => res);
+    await readReached;
+    lateRes = await request(app)
+      .post("/api/file/upload")
+      .field("file_id", fileId)
+      .field("index", "1")
+      .field("chunk_md5", lateMd5)
+      .attach("chunk", lateBuffer, { filename: "chunk-1.bin" });
+    releaseRead();
+    mergeRes = await mergePromise;
+  } finally {
+    fs.promises.readFile = originalReadFile;
   }
+
+  assert.equal(lateRes.status, 200, "合并期间到达的分片请求本身应正常返回");
+  assert.equal(lateRes.body.code, 200);
+  assert.equal(mergeRes.status, 200, "合并不得因并发上传而失败");
+  assert.equal(mergeRes.body.code, 200);
+
+  const producedRows = await File.findAll({
+    where: { md5: chunkMd5, size: chunkBuffer.length, status: 1 },
+  });
+  assert.equal(producedRows.length, 1, "产物必须恰好 1 行");
+  const absolute = path.join(
+    UPLOADS_DIR,
+    path.basename(producedRows[0].file_path)
+  );
+  assert.equal(
+    fs.readFileSync(absolute, "utf8"),
+    "t73-upload-merge-payload",
+    "后到的 index=1 分片不得进入本次合并产物"
+  );
 });

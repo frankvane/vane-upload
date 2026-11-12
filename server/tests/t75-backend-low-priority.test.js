@@ -111,12 +111,18 @@ test("T-75 /api/health 的 lastError 不泄漏路径 / token / 存储键", async
   };
   try {
     queue.enqueueChunkState({ file_id: "t75-health", chunk_index: 0 });
-    await assert.rejects(() => queue.flushPendingChunkStates());
-    const lastError = String(queue.getQueueHealth().lastError || "");
-    assert.ok(lastError.length > 0, "失败必须可观测（不能假绿）");
-    assert.ok(!lastError.includes("/home/alice"), "绝对路径未脱敏");
-    assert.ok(!lastError.includes("abc123"), "token 未脱敏");
-    assert.ok(!lastError.includes("secretkey"), "存储键未脱敏");
+    // T-73：旧断言不带匹配条件，任何抛错都能过；锁定真实注入的故障类型。
+    await assert.rejects(
+      () => queue.flushPendingChunkStates(),
+      /SQLITE_CANTOPEN/
+    );
+    // T-73：`lastError.length > 0` 只证明「有内容」，改成精确比对脱敏后的全文，
+    // 一次断言同时覆盖「失败可观测」与「三类敏感信息全部被替换」。
+    assert.equal(
+      String(queue.getQueueHealth().lastError || ""),
+      "SQLITE_CANTOPEN [path] file_id: ***",
+      "lastError 必须是脱敏后的确定文案"
+    );
   } finally {
     FileChunk.bulkCreate = original;
     await queue.resetChunkStateQueueForTests();
