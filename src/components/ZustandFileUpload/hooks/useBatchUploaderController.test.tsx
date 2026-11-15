@@ -25,6 +25,7 @@ const h = vi.hoisted(() => {
     autoCleanup: false,
     refreshFiles: vi.fn(async () => undefined),
     setProgressDetail: vi.fn(),
+    setSoftOffline: vi.fn(),
     setBatchInfo: vi.fn(),
     setIsUploading: vi.fn(),
     getMessageApi: vi.fn(),
@@ -44,6 +45,7 @@ const h = vi.hoisted(() => {
         patchFile,
         progressMap: {} as Record<string, number>,
         setProgressDetail: storeState.setProgressDetail,
+        setSoftOffline: storeState.setSoftOffline,
       })),
       setState: vi.fn(),
     },
@@ -177,6 +179,7 @@ const setEngineFiles = (files: UploadFile[]) => {
     patchFile: h.patchFile,
     progressMap: {} as Record<string, number>,
     setProgressDetail: h.storeState.setProgressDetail,
+    setSoftOffline: h.storeState.setSoftOffline,
   });
 };
 
@@ -192,6 +195,7 @@ const setEngineState = (
     patchFile: h.patchFile,
     progressMap,
     setProgressDetail: h.storeState.setProgressDetail,
+    setSoftOffline: h.storeState.setSoftOffline,
   });
 };
 

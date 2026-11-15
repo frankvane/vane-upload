@@ -89,6 +89,8 @@ export interface UploadState {
   chunkSize: number;
   maxRetries: number;
   isNetworkOffline: boolean;
+  /** 软离线：浏览器认为在线但实际不可达（连续上传失败降级），由上传结果信号驱动 */
+  softOffline: boolean;
 
   autoUpload: boolean;
   autoCleanup: boolean;
@@ -99,6 +101,8 @@ export interface UploadState {
   config: UploadConfig | null;
 
   setFiles: (files: UploadFile[]) => void;
+  /** 软离线状态由上传结果信号驱动（连续失败降级），无变化时跳过重渲染 */
+  setSoftOffline: (value: boolean) => void;
   /** 局部更新某文件的部分字段（T3.3：暂停/继续即时反馈） */
   patchFile: (id: string, patch: Partial<UploadFile>) => void;
   /**
@@ -185,6 +189,7 @@ export const createUploadStore = (storage: UploadStorage): UploadStore =>
     chunkSize: 1024 * 1024,
     maxRetries: 3,
     isNetworkOffline: false,
+    softOffline: false,
     autoUpload: true,
     autoCleanup: true,
     cleanupDelay: 10,
@@ -193,6 +198,10 @@ export const createUploadStore = (storage: UploadStorage): UploadStore =>
     config: null,
 
     setFiles: (files) => set({ files: sealFiles(files) }),
+    setSoftOffline: (value) =>
+      set((state) =>
+        state.softOffline === value ? {} : { softOffline: value }
+      ),
     patchFile: (id, patch) =>
       set((state) => ({
         files: state.files.map((f) =>

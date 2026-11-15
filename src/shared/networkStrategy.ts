@@ -24,6 +24,11 @@ export const resolveNetworkBadgeInfo = (
     return { text: "离线", status: "error" };
   }
 
+  // 软离线：浏览器认为在线但实际不可达（连续上传失败降级）。
+  if (networkType === "network-anomaly") {
+    return { text: verbose ? "网络异常" : "网络异常", status: "warning" };
+  }
+
   switch (networkType) {
     case "4g":
       return { text: "4G", status: "success" };
@@ -49,6 +54,45 @@ export interface NetworkProbe {
   type?: string;
 }
 
+/**
+ * 软离线跟踪器。
+ *
+ * `navigator.onLine === true` 只代表「有网络连接」，不代表「能访问服务器」
+ * （连上 WiFi 但没有互联网、或网关把请求都丢到错误页即「假在线」）。
+ * 为此引入软离线检测：累计连续上传终态失败次数，达到阈值即判定为软离线，
+ * 触发与硬离线一致的「暂停新上传」降级；任意一次上传成功即清零，自动恢复。
+ */
+export interface SoftOfflineTracker {
+  readonly threshold: number;
+  /** 记录一次上传成功（含秒传），清零连续失败计数 */
+  reportSuccess(): void;
+  /** 记录一次上传终态失败，递增连续失败计数 */
+  reportFailure(): void;
+  /** 连续失败是否已触达阈值 */
+  isSoftOffline(): boolean;
+  /** 强制清零（如用户手动重试/恢复网络） */
+  reset(): void;
+}
+
+export const createSoftOfflineTracker = (threshold = 3): SoftOfflineTracker => {
+  let consecutiveFailures = 0;
+  return {
+    threshold,
+    reportSuccess() {
+      consecutiveFailures = 0;
+    },
+    reportFailure() {
+      consecutiveFailures += 1;
+    },
+    isSoftOffline() {
+      return consecutiveFailures >= threshold;
+    },
+    reset() {
+      consecutiveFailures = 0;
+    },
+  };
+};
+
 export interface NetworkStrategyResult {
   networkType: string;
   isNetworkOffline: boolean;
@@ -67,10 +111,12 @@ const resolveOffline = (online?: boolean): boolean => {
 };
 
 export const resolveNetworkStrategy = (
-  probe: NetworkProbe
+  probe: NetworkProbe,
+  softOffline = false
 ): NetworkStrategyResult => {
   const { rtt, online, effectiveType, type } = probe;
-  const isOffline = resolveOffline(online);
+  const hardOffline = resolveOffline(online);
+  const isOffline = hardOffline || softOffline;
 
   let chunkConcurrency = 2;
   if (!isOffline) {
@@ -135,11 +181,19 @@ export const resolveNetworkStrategy = (
     chunkSize = 512 * 1024;
   }
 
-  const networkType = isOffline ? "offline" : effectiveType || type || "unknown";
+  // 软离线（连续失败降级）：浏览器认为在线但实际不可达，用专属 networkType 区分，
+  // 便于 UI 显示「网络异常」而非「离线」，同时与硬离线一致地暂停新上传。
+  const networkType = isOffline
+    ? hardOffline
+      ? "offline"
+      : "network-anomaly"
+    : effectiveType || type || "unknown";
 
   return {
     networkType,
-    isNetworkOffline: isOffline,
+    // 仅硬离线反映在 isNetworkOffline（保留其语义）；软离线通过 networkType +
+    // concurrency=0 体现，不污染硬离线 UI/逻辑。
+    isNetworkOffline: hardOffline,
     fileConcurrency,
     chunkConcurrency,
     chunkSize,

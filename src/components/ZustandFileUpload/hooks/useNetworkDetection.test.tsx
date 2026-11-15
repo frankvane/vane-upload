@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
     setState: vi.fn(),
     getState: vi.fn(() => ({}) as Record<string, unknown>),
   },
+  softOffline: false,
 }));
 
 vi.mock("../../../shared/useNetwork", () => ({
@@ -27,10 +28,10 @@ vi.mock("../../../shared/useNetwork", () => ({
 }));
 
 vi.mock("../store/upload", () => ({
-  useUploadStore: vi.fn(),
+  useUploadStore: vi.fn((selector) => selector({ softOffline: h.softOffline })),
   useUploadStoreApi: vi.fn(() => h.storeApi),
   createUploadStore: vi.fn(),
-   
+
   UploadStoreContext: {} as any,
 }));
 
@@ -40,6 +41,7 @@ import { useNetworkDetection } from "./useNetworkDetection";
 describe("useNetworkDetection（网络策略写入与去重）", () => {
   beforeEach(() => {
     h.network = { online: true, rtt: 30, effectiveType: "4g", type: "wifi" };
+    h.softOffline = false;
     h.storeApi.setState.mockClear();
   });
 
@@ -131,5 +133,21 @@ describe("useNetworkDetection（网络策略写入与去重）", () => {
         chunkSize: 256 * 1024,
       })
     );
+  });
+
+  it("软离线：store.softOffline=true 时解析出 network-anomaly 且并发归零、硬离线标志不变", () => {
+    h.softOffline = true;
+    renderHook(() => useNetworkDetection());
+
+    const lastCall = h.storeApi.setState.mock.calls.at(-1)![0] as Record<
+      string,
+      unknown
+    >;
+    expect(lastCall.networkType).toBe("network-anomaly");
+    expect(lastCall.fileConcurrency).toBe(0);
+    expect(lastCall.chunkConcurrency).toBe(0);
+    expect(lastCall.isNetworkOffline).toBe(false);
+
+    h.softOffline = false;
   });
 });

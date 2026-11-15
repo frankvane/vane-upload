@@ -208,27 +208,35 @@ test("GAP-B6 清除列表：列表清空回到空态", async ({ page }) => {
   await expect(page.getByText("暂无数据")).toBeVisible({ timeout: 5_000 });
 });
 
-test("GAP-C2 大文件（40MB 代理 95MB）多分片平滑上传至完成", async ({
+test("GAP-C2 大文件（40MB）多分片平滑上传至完成且产物 md5 一致", async ({
   page,
 }) => {
   test.setTimeout(180_000);
-  // 关闭自动清理：40MB 在负载机上上传耗时接近测试超时，默认 cleanupDelay=5s 会把
-  // 「已完成」记录自动移除，使断言窗口与清理窗口碰撞（同机负载波动假红）。回归手册也建议
-  // 实测时先关掉自动清理，这里显式关闭以保证「已完成」行可被稳定断言。
+  // 关闭自动清理：40MB 上传耗时较长，默认 cleanupDelay=5s 会把「已完成」记录自动移除，
+  // 使断言窗口与清理窗口碰撞。显式关闭以保证「已完成」行可被稳定断言。
   await toggleSwitchAfter(page, "自动清理").click();
   await expect(toggleSwitchAfter(page, "自动清理")).toBeChecked({
     checked: false,
   });
 
-  // 用应用自带「测试注入口」的「3×40MB 队列」注入大文件（手册指定路径）。
-  // 选用此按钮而非「自定义 MB」输入框 / 隐藏 input 的 setInputFiles：前者对 React 受控
-  // number input 的 fill 偶发不生效、后者 40MB 内存 buffer 在负载机上偶发入队失败（空表），
-  // 本按钮派发确定文件名（队列-1-40MB.bin）的 change 事件，最稳定。仅断言首个 40MB 文件
-  // 到达终态，其余两个同样会上传、不影响判定。
-  await page.getByRole("button", { name: "3×40MB 队列" }).click();
-  await waitRowStatus(page, "队列-1-40MB.bin", "已完成", 150_000);
+  // 已知内容的大文件：seed 含 RUN_SALT 保证唯一（避免命中秒传、强制真实多分片上传），
+  // 以便独立计算源 md5 与服务端产物比对。直接经隐藏 file input 注入（手册 GAP-C2 路径）。
+  const name = `gap-c2-${RUN_SALT}.bin`;
+  const content = randContent(40 * 1024 * 1024, "gap-c2-" + RUN_SALT);
+  const expectedMd5 = md5(content);
+  await uploadFiles(page, [
+    { name, mimeType: "application/octet-stream", buffer: content },
+  ]);
 
-  // 服务端产物落地：uploads 目录下应出现一个恰好 40MB 的产物（内容随机 ⇒ 真实多分片上传）。
+  await waitRowStatus(page, name, "已完成", 150_000);
+
+  // 强校验：服务端多分片拼回产物字节级 md5 与源一致（证明分片无损拼回，非仅 size 对）。
+  const productPath = await findProductFile(expectedMd5);
+  expect(
+    productPath,
+    "应能在 uploads 目录找到 md5 一致的多分片产物",
+  ).not.toBeNull();
+  // 冗余校验：产物体积恰好 40MB。
   const productReady = fs
     .readdirSync(UPLOADS_DIR)
     .some(
@@ -287,4 +295,29 @@ test("GAP-F5 删除已完成记录：完成后删除，记录移除", async ({ p
   await waitRowStatus(page, "gap-f5.bin", "已完成", 30_000);
   await rowOf(page, "gap-f5.bin").getByRole("button", { name: "删除" }).click();
   await expect(rowOf(page, "gap-f5.bin")).toHaveCount(0, { timeout: 8_000 });
+});
+
+test("GAP-D1 软离线降级：连续上传失败触发网络异常降级（假在线保护）", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  // 模拟「浏览器在线但服务端不可达」假在线：所有分片上传请求直接失败。
+  await page.route("**/api/file/upload", (route) => void route.abort());
+  const specs = ["a", "b", "c"].map((k) => ({
+    name: `soft-${k}-${RUN_SALT}.bin`,
+    seed: `soft-${k}-${RUN_SALT}`,
+  }));
+  const files = specs.map((s) => ({
+    ...fixture(s.name, randContent(8 * 1024, s.seed)),
+  }));
+  await uploadFiles(page, files);
+  // 三个文件连续终态失败触达阈值（默认 3）→ 软离线降级，暂停新上传。
+  for (const f of files) {
+    await waitRowStatus(page, f.name, "上传失败", 30_000);
+  }
+  // 降级后网络徽章显示「网络异常」（networkType=network-anomaly）。
+  await expect(page.getByText("网络异常", { exact: true })).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.unroute("**/api/file/upload");
 });

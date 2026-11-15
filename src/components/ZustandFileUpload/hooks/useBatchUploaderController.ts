@@ -9,6 +9,7 @@ import {
 } from "../services/uploadOrchestrator";
 import { useUploadStore } from "../store/upload";
 import { useUploadEngine } from "../context/UploadEngineContext";
+import { createSoftOfflineTracker } from "../../../shared/networkStrategy";
 import { useEffectiveUploadConfig } from "./useEffectiveConfig";
 import { useShallow } from "zustand/react/shallow";
 import { isUploadableStatus } from "../services/uploadStorage";
@@ -106,6 +107,11 @@ export function useBatchUploader(): BatchUploaderActions {
   // T-32：本批被「暂停」的文件。暂停是可继续的中断，与取消同口径：推进批次进度，
   // 但既不计成功也不计失败，否则悬浮条会显示「1 个失败」且重试全部会误重试。
   const pausedInBatchIdsRef = useRef<Set<string>>(new Set());
+
+  // 软离线跟踪器：累计连续上传终态失败，触达阈值即降级（浏览器在线但实际不可达）。
+  // 任意一次上传成功（含秒传/INSTANT）清零，自动恢复。详见 networkStrategy。
+  // createSoftOfflineTracker 是无副作用的轻量工厂，直接作为 useRef 初始值（避免 render 期访问 ref.current）。
+  const softOfflineTrackerRef = useRef(createSoftOfflineTracker());
 
   const {
     cleanupPolicy,
@@ -275,6 +281,10 @@ export function useBatchUploader(): BatchUploaderActions {
         } catch {
           // 宿主自行处理回调异常
         }
+        // 软离线：任意一次成功（含秒传/INSTANT）即清零连续失败计数。
+        const tracker = softOfflineTrackerRef.current!;
+        tracker.reportSuccess();
+        engine.store.getState().setSoftOffline(tracker.isSoftOffline());
         await cleanupPolicy.addCompletedFile(file.id);
         return true;
       }
@@ -294,6 +304,10 @@ export function useBatchUploader(): BatchUploaderActions {
       } catch {
         // 宿主回调失败不改变「文件已失败」这一事实
       }
+      // 软离线：终态失败递增连续失败计数，触达阈值即降级暂停新上传。
+      const tracker = softOfflineTrackerRef.current!;
+      tracker.reportFailure();
+      engine.store.getState().setSoftOffline(tracker.isSoftOffline());
       return false;
     },
     [

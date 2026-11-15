@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createSoftOfflineTracker,
   resolveNetworkBadgeInfo,
   resolveNetworkStrategy,
 } from "./networkStrategy";
@@ -136,6 +137,9 @@ describe("resolveNetworkStrategy", () => {
     } finally {
       if (original) {
         Object.defineProperty(window.navigator, "onLine", original);
+      } else {
+        // jsdom 下 onLine 是原型 getter，非 own property：删除我们定义的覆盖，恢复原型行为。
+        delete (window.navigator as any).onLine;
       }
     }
   });
@@ -152,6 +156,83 @@ describe("resolveNetworkStrategy", () => {
     expect(result.fileConcurrency).toBe(0);
     expect(result.chunkConcurrency).toBe(0);
     expect(result.chunkSize).toBe(512 * 1024);
+  });
+
+  it("soft offline (concurrent failures) degrades like hard offline but keeps isNetworkOffline=false", () => {
+    // 隔离：固定 navigator.onLine=true，确保硬离线标志仅由本用例的 online 决定。
+    const original = Object.getOwnPropertyDescriptor(
+      window.navigator,
+      "onLine",
+    );
+    Object.defineProperty(window.navigator, "onLine", {
+      value: true,
+      configurable: true,
+    });
+
+    try {
+      const result = resolveNetworkStrategy(
+        { online: true, effectiveType: "4g", type: "wifi", rtt: 40 },
+        true,
+      );
+
+      // 软离线：暂停新上传（并发归零），但硬离线标志保持 false，networkType 专用。
+      expect(result.isNetworkOffline).toBe(false);
+      expect(result.networkType).toBe("network-anomaly");
+      expect(result.fileConcurrency).toBe(0);
+      expect(result.chunkConcurrency).toBe(0);
+      expect(result.chunkSize).toBe(512 * 1024);
+    } finally {
+      if (original) {
+        Object.defineProperty(window.navigator, "onLine", original);
+      } else {
+        // jsdom 下 onLine 是原型 getter，非 own property，直接删除我们定义的覆盖。
+        delete (window.navigator as any).onLine;
+      }
+    }
+  });
+});
+
+describe("createSoftOfflineTracker", () => {
+  it("starts online and reportSuccess resets consecutive failures", () => {
+    const t = createSoftOfflineTracker(3);
+    expect(t.isSoftOffline()).toBe(false);
+    t.reportFailure();
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(false);
+    t.reportSuccess();
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(false);
+  });
+
+  it("trips soft offline after threshold consecutive failures", () => {
+    const t = createSoftOfflineTracker(3);
+    t.reportFailure();
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(false);
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(true);
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(true);
+  });
+
+  it("resets via reportSuccess and explicit reset", () => {
+    const t = createSoftOfflineTracker(2);
+    t.reportFailure();
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(true);
+    t.reportSuccess();
+    expect(t.isSoftOffline()).toBe(false);
+    t.reportFailure();
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(true);
+    t.reset();
+    expect(t.isSoftOffline()).toBe(false);
+  });
+
+  it("honors custom threshold", () => {
+    const t = createSoftOfflineTracker(1);
+    t.reportFailure();
+    expect(t.isSoftOffline()).toBe(true);
   });
 });
 
@@ -192,5 +273,12 @@ describe("resolveNetworkBadgeInfo", () => {
       status: "default",
     });
     expect(resolveNetworkBadgeInfo("", false).text).toBe("未知");
+  });
+
+  it("maps network-anomaly (soft offline) to warning badge", () => {
+    expect(resolveNetworkBadgeInfo("network-anomaly", false)).toEqual({
+      text: "网络异常",
+      status: "warning",
+    });
   });
 });
