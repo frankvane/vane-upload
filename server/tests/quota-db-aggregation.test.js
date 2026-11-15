@@ -29,6 +29,7 @@ const app = require("../src/app");
 const { syncModels, sequelize, FileChunk } = require("../src/models");
 const { ensureBaseDirs } = require("../src/config/paths");
 const uploadController = require("../src/controllers/uploadController");
+const { buildScopedFileId } = require("../src/utils/fileSecurity");
 
 const uploadChunk = (fileId, index, buffer) =>
   request(app)
@@ -99,4 +100,32 @@ test("VU-11：getChunkUsage 直接读 DB，磁盘文件缺失不影响计数", a
   const expectedBytes = allRows.reduce((sum, row) => sum + row.size, 0);
   assert.equal(globalUsage.bytes, expectedBytes, "全局配额必须等于 DB 全表字节和");
   assert.equal(globalUsage.count, allRows.length, "全局分片数必须等于 DB 有效行数");
+});
+
+test("P2：覆盖写同一分片仅按最新 size 计费（user 与 global 口径一致）", async () => {
+  // 覆盖写同 index：先 600B 再 400B。配额必须按「-旧+新」计费，累计应为 400B，
+  // 而非 1000B。replacedCounted 之前用 `userUsage.bytes >= replacedBytes` 的脆弱代理，
+  // 与 global 维度（始终 -旧+新）口径不一致；现统一为 hasExistingChunk。
+  const storageId = buildScopedFileId("test", "f-overwrite");
+  await uploadChunk("f-overwrite", 0, Buffer.alloc(600, 1));
+  const r2 = await uploadChunk("f-overwrite", 0, Buffer.alloc(400, 2));
+  assert.equal(r2.status, 200, "覆盖写不应因重复计数而误超上限");
+
+  const dbRow = await FileChunk.findOne({
+    where: { file_id: storageId, chunk_index: 0, status: 1 },
+  });
+  assert.equal(dbRow.size, 400, "DB 记录应为最新 size（覆盖写更新同一行，而非新增）");
+  // 该文件维度的配额聚合：覆盖写必须按「-旧+新」计费，结果为 400B 而非累计 1000B。
+  const fileUsage = await uploadController.__quotaInternals.getChunkUsage(storageId);
+  assert.equal(fileUsage.bytes, 400, "文件维度配额应为最新 size，而非累计");
+  assert.equal(fileUsage.count, 1, "覆盖写不应新增分片行");
+  // 全局聚合与 DB 全表一致（global 口径始终 -旧+新）。
+  const globalUsage =
+    await uploadController.__quotaInternals.getGlobalChunkUsage();
+  const allRows = await FileChunk.findAll({ where: { status: 1 } });
+  assert.equal(
+    globalUsage.bytes,
+    allRows.reduce((s, r) => s + r.size, 0),
+    "全局配额必须等于 DB 全表字节和"
+  );
 });

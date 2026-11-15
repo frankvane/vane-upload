@@ -1,7 +1,8 @@
+const path = require("path");
 const app = require("./app");
-const { ensureBaseDirs } = require("./config/paths");
+const { ensureBaseDirs, UPLOADS_DIR } = require("./config/paths");
 const { config, validateStartupConfig } = require("./config");
-const { syncModels, sequelize } = require("./models");
+const { syncModels, sequelize, File } = require("./models");
 const { startOrphanChunkJanitor } = require("./janitor");
 const { getMergingStorageIds } = require("./controllers/uploadController");
 const { flushPendingChunkStates } = require("./services/chunkStateQueue");
@@ -35,6 +36,17 @@ const bootstrap = async ({ skipConfigValidation = false } = {}) => {
   // VU-15：传入受保护集合——正在合并的文件其源分片不得被清理，避免合并中途丢片。
   stopJanitor = startOrphanChunkJanitor({
     protectFileIds: () => getMergingStorageIds(),
+    // P2：uploads/ 孤儿对账——崩溃窗口（moveIntoPlace 后未提交）或已删除文件残留的落盘文件。
+    uploadsDir: UPLOADS_DIR,
+    getUploadFileNames: async () => {
+      const rows = await File.findAll({
+        where: { status: 1 },
+        attributes: ["file_path"],
+      });
+      return new Set(
+        rows.map((row) => path.basename(String(row.file_path || "")))
+      );
+    },
   });
 
   server = app.listen(PORT, () => {

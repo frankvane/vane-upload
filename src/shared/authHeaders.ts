@@ -36,6 +36,16 @@ const STATIC_TOKEN_WARNING =
 let staticTokenWarningShown = false;
 
 /**
+ * CSRF 纵深（与后端 `middleware/auth.js` 协同）：同域/跨域 Cookie 鉴权场景下，
+ * 浏览器会自动携带认证 Cookie；后端对 Cookie 认证的非安全方法强制要求本自定义头，
+ * 以阻断「诱导浏览器代发携带认证 Cookie 的状态变更请求」。该头非 CORS 安全列表成员，
+ * 跨站攻击者无法在无预检情况下附加。Bearer 认证（Authorization 头）不依赖 Cookie，不受影响。
+ * 前端仅在 `withCredentials` 为 true（Cookie 鉴权）时附带，避免对纯 Bearer 部署产生多余头。
+ */
+export const VANE_CSRF_HEADER = "X-Vane-Csrf";
+export const VANE_CSRF_TOKEN = "1";
+
+/**
  * 开发期对静态 authToken 提示一次。判据是「写了静态值且没有动态取数」——
  * 即使 `getAuthHeaders` 覆盖了它，字面量仍留在 bundle 里，所以不看 getAuthHeaders。
  * 单次标记是模块级的：同一页面多个 <ZustandFileUpload> 实例、StrictMode 双渲染
@@ -55,21 +65,24 @@ export async function resolveAuthHeaders(
 ): Promise<Record<string, string>> {
   warnIfStaticAuthToken(config);
 
+  let headers: Record<string, string>;
   if (config.getAuthHeaders) {
-    const headers = await config.getAuthHeaders();
-    return headers ?? {};
+    headers = (await config.getAuthHeaders()) ?? {};
+  } else {
+    const scheme = config.authScheme || "Bearer";
+    const token = config.getAuthToken
+      ? await config.getAuthToken()
+      : config.authToken;
+
+    headers = token ? { Authorization: `${scheme} ${token}` } : {};
   }
 
-  const scheme = config.authScheme || "Bearer";
-  const token = config.getAuthToken
-    ? await config.getAuthToken()
-    : config.authToken;
-
-  if (token) {
-    return { Authorization: `${scheme} ${token}` };
+  // Cookie 鉴权（withCredentials）时附带 CSRF 防御头，供后端校验。
+  if (config.withCredentials === true) {
+    headers[VANE_CSRF_HEADER] = VANE_CSRF_TOKEN;
   }
 
-  return {};
+  return headers;
 }
 
 /**

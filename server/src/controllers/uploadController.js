@@ -184,7 +184,12 @@ exports.instantCheck = async (req, res) => {
       if (exports.getMergingStorageIds().has(storageId)) {
         return jsonError(res, 409, "文件正在合并中，请稍后重试");
       }
-      const cleared = await resetChunkResults(storageId, userId);
+      // 更细互斥：resetChunkResults（清源分片 + status:0）必须与该文件的上传/合并串行，
+      // 否则会与在飞合并读片交叉，或清掉正在被并发上传写入的分片。409 快检先行避免阻塞等待；
+      // 若 409 之后、本锁获取之前合并抢先开始，则本锁会让重置等合并结束后变为 no-op（已提交+清盘）。
+      const cleared = await runExclusiveByKey(`file:${storageId}`, () =>
+        resetChunkResults(storageId, userId)
+      );
       return jsonOk(res, {
         uploaded: false,
         chunkCheckResult: [],
@@ -292,7 +297,10 @@ exports.abortUpload = async (req, res) => {
       return jsonError(res, 409, "文件正在合并中，请稍后重试");
     }
 
-    const cleared = await resetChunkResults(storageId, userId);
+    // 更细互斥：resetChunkResults 必须与该文件的上传/合并串行（同 instantCheck 重置分支）。
+    const cleared = await runExclusiveByKey(`file:${storageId}`, () =>
+      resetChunkResults(storageId, userId)
+    );
     return jsonOk(res, { cleared });
   } catch (error) {
     if (isSqliteBusyError(error)) {
@@ -355,7 +363,11 @@ exports.uploadChunk = async (req, res) => {
     // P2：锁键改为按用户分片 `quota:${userId}`——不同用户可并行上传（解除全站串行化），
     // 同用户内串行保证 user / file 维度配额校验仍正确（global 维度退为最终一致，属可接受取舍）。
     // 校验失败以返回值传回外层统一响应，避免在锁内直接写 res 造成二次响应。
-    const rejection = await runExclusiveByKey(`quota:${userId}`, async () => {
+    // 更细互斥：外层再按 storageId 持一把「文件锁」，使「上传 / 合并 / instant 重置 / abort」
+    // 同一文件时严格串行——否则合并读片期间并发上传会写/覆盖正在被读的分片，或重置会清掉
+    // 在飞合并的源片（status:1 源分片被 unlink 后合并报 ENOENT/MD5 不一致）。不同文件互不影响。
+    const rejection = await runExclusiveByKey(`file:${storageId}`, () =>
+      runExclusiveByKey(`quota:${userId}`, async () => {
       // VU-03/04/11：写入前做累计配额校验（单文件累计字节 + 分片数）。
       // 配额直接来自 DB 聚合（FileChunk.size / count），是重启/并发安全的 source of truth，
       // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
@@ -400,9 +412,14 @@ exports.uploadChunk = async (req, res) => {
 
       // VU-03（user 维度）：同一凭据不断更换 file_id 也不能无限占用存储。
       // 覆盖写只按差额计费；若该分片此前不计入本用户，则按新增计。
+      // replacedCounted 直接由 hasExistingChunk 决定：existingDbChunk 必为 status:1，
+      // 而 getUserChunkUsage 聚合的正是该用户全部 status:1 分片，故该分片必然已计入
+      // 聚合值。旧实现用 `userUsage.bytes >= replacedBytes` 这个脆弱代理判断，
+      // 在并发/边界下可能误判为 false → 覆盖写被当成新增 → user 维度重复计费/误超界；
+      // 这与 global 维度「始终按 -旧+新」口径不一致（见上方 nextGlobalBytes）。
+      // 改为与 global 维度对称：覆盖写恒为 -replacedBytes + 本片字节，消除该竞态。
       const userUsage = await getUserChunkUsage(userId);
-      const replacedCounted =
-        Boolean(hasExistingChunk) && userUsage.bytes >= replacedBytes;
+      const replacedCounted = Boolean(hasExistingChunk);
       const nextUserBytes =
         userUsage.bytes -
         (replacedCounted ? replacedBytes : 0) +
@@ -449,7 +466,8 @@ exports.uploadChunk = async (req, res) => {
         throw flushError;
       }
       return null;
-    });
+      })
+    );
     if (rejection) {
       return jsonError(
         res,
@@ -559,7 +577,11 @@ exports.mergeChunks = async (req, res) => {
     }
     releaseMergeLock = lockResult.release;
 
-    await flushFileChunkStates(storageId);
+    // 更细互斥：整个合并临界区（读源片 → 拼 staging → 落盘 → 事务 → 清源片）必须与该文件的上传 /
+    // instant 重置 / abort 串行——否则并发上传会写/覆盖正在被读的分片，或重置会清掉在飞合并的源片。
+    // 与 uploadChunk 一致：文件锁为外层、mergeLocks（或 quota 锁）为内层，锁顺序统一，避免死锁。
+    return await runExclusiveByKey(`file:${storageId}`, async () => {
+      await flushFileChunkStates(storageId);
 
     // 秒传/已合并检查从事务内移到事务外：与 DB 的交互保持短事务，
     // 避免大文件合并的 readFile/appendFile/md5File IO 长时间持锁
@@ -731,6 +753,7 @@ exports.mergeChunks = async (req, res) => {
     }
 
     return jsonOk(res);
+    });
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback();

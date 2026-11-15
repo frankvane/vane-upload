@@ -4,7 +4,7 @@ const path = require("path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { sweepOrphanChunks } = require("../src/janitor");
+const { sweepOrphanChunks, sweepOrphanUploads } = require("../src/janitor");
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -86,6 +86,80 @@ test("子目录不被当作文件删除", async () => {
     const removed = await sweepOrphanChunks({ dir, ttlMs: TTL_MS });
     assert.deepEqual(removed, []);
     assert.equal(fs.existsSync(path.join(dir, "subdir", "inside")), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sweepOrphanUploads：已知（已落库）文件保留，孤儿超 TTL 删除", async () => {
+  const dir = makeDir();
+  try {
+    const known = path.join(
+      dir,
+      "u0123456789ab_f_abcdef0123456789abcdef0123456789.png",
+    );
+    const orphan = path.join(
+      dir,
+      "u0123456789ab_f_deadbeefdeadbeefdeadbeefdeadbeef.png",
+    );
+    fs.writeFileSync(known, "k");
+    fs.writeFileSync(orphan, "o");
+    setOld(orphan, TTL_MS + 60 * 1000);
+
+    const removed = await sweepOrphanUploads({
+      dir,
+      ttlMs: TTL_MS,
+      getKnownFileNames: () => new Set([path.basename(known)]),
+    });
+
+    assert.deepEqual(removed, [path.basename(orphan)]);
+    assert.equal(fs.existsSync(orphan), false);
+    assert.equal(fs.existsSync(known), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sweepOrphanUploads：正在合并的 storageId 受保护，跳过其落盘文件", async () => {
+  const dir = makeDir();
+  try {
+    // 即便超 TTL，只要 storageId 仍「正在合并」就不能删（moveIntoPlace 已落盘但事务未提交）。
+    const merging = path.join(
+      dir,
+      "uMERGING_f_abcdef0123456789abcdef0123456789.png",
+    );
+    fs.writeFileSync(merging, "m");
+    setOld(merging, TTL_MS + 60 * 1000);
+
+    const removed = await sweepOrphanUploads({
+      dir,
+      ttlMs: TTL_MS,
+      getKnownFileNames: () => new Set(),
+      getProtectedFileIds: () => new Set(["uMERGING_f"]),
+    });
+
+    assert.deepEqual(removed, []);
+    assert.equal(fs.existsSync(merging), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sweepOrphanUploads：非 vane 命名文件不擅自删除", async () => {
+  const dir = makeDir();
+  try {
+    const other = path.join(dir, "random-file.txt");
+    fs.writeFileSync(other, "x");
+    setOld(other, TTL_MS + 60 * 1000);
+
+    const removed = await sweepOrphanUploads({
+      dir,
+      ttlMs: TTL_MS,
+      getKnownFileNames: () => new Set(),
+    });
+
+    assert.deepEqual(removed, []);
+    assert.equal(fs.existsSync(other), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

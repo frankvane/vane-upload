@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { TMP_UPLOAD_DIR } = require("./config/paths");
+const { TMP_UPLOAD_DIR, UPLOADS_DIR } = require("./config/paths");
 const { config } = require("./config");
 const { logger } = require("./utils/logger");
 
@@ -92,6 +92,91 @@ const sweepOrphanChunks = async ({
 };
 
 /**
+ * 对账 uploads/ 目录：清理「崩溃窗口」产生的孤儿落盘文件。
+ *
+ * 场景：合并在 moveIntoPlace 写入 uploads/ 之后、DB 事务提交之前若进程崩溃，
+ * 会留下一个「磁盘有文件、DB 无 File 行」的孤儿；此外用户删除文件后其落盘文件
+ * 也可能残留（由删除接口清源分片，但不一定清 uploads/ 行——取决于实现）。
+ *
+ * 与分片 janitor 一致：用 TTL 兜底，避免误删「刚 moveIntoPlace 但尚未提交」的文件。
+ * 关键保护：
+ *  - `getProtectedFileIds`（= getMergingStorageIds）覆盖「正在合并」的 storageId：
+ *    合并进行中 moveIntoPlace 已把文件放进 uploads/，但事务尚未提交，必须跳过；
+ *  - `getKnownFileNames` 覆盖「已有 File.status:1 行」的文件基名，已落库的不删。
+ *
+ * 落盘文件名形如 buildStoredFileName(storageId, md5, safeName) =
+ * `${storageId}_${md5}` 或 `${storageId}_${md5}${ext}`，md5 恒为末尾 32 位十六进制，
+ * 据此把 storageId 还原出来与受保护集合比对。非 vane 命名的文件（如未知残留）
+ * 不擅自删除。
+ *
+ * @param {object} [options]
+ * @param {string} [options.dir]
+ * @param {number} [options.ttlMs]
+ * @param {number} [options.now]
+ * @param {() => Set<string>|null} [options.getProtectedFileIds] 正在合并的 storageId 集合
+ * @param {() => Set<string>|null} [options.getKnownFileNames] 已落库文件的基名集合
+ * @returns {Promise<string[]>} 被删除的文件名列表
+ */
+const sweepOrphanUploads = async ({
+  dir = UPLOADS_DIR,
+  ttlMs = DEFAULT_TTL_HOURS * 60 * 60 * 1000,
+  now = Date.now(),
+  getProtectedFileIds,
+  getKnownFileNames,
+} = {}) => {
+  const removed = [];
+  // 回调可能同步返回 Set，也可能异步（如查询 DB 取已落库文件基名）；await 对两者都安全。
+  const protectedIds =
+    typeof getProtectedFileIds === "function" ? await getProtectedFileIds() : null;
+  const known =
+    typeof getKnownFileNames === "function" ? await getKnownFileNames() : null;
+
+  let entries;
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return removed;
+  }
+
+  for (const entry of entries) {
+    if (PROTECTED_FILES.has(entry.name)) {
+      continue;
+    }
+    const filePath = path.join(dir, entry.name);
+    let stat;
+    try {
+      // VU-34：lstat 不跟随符号链接，软链只删自身、不碰目标。
+      stat = await fs.promises.lstat(filePath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile() && !stat.isSymbolicLink()) {
+      continue;
+    }
+
+    // 还原 storageId：末尾 `_<32hex>` 之前的部分（md5 是唯一确定的 32 位十六进制段）。
+    const match = entry.name.match(/^(.*)_([a-f0-9]{32})(\.[^.]*)?$/i);
+    if (!match) {
+      // 非 vane 落盘命名：不擅自删除，交给人工或其他策略。
+      continue;
+    }
+    const storageId = match[1];
+    if (protectedIds && protectedIds.has(storageId)) {
+      continue; // 正在合并，事务未提交，跳过
+    }
+    if (known && known.has(entry.name)) {
+      continue; // 已有对应 File.status:1 行
+    }
+    if (now - stat.mtimeMs > ttlMs) {
+      await fs.promises.unlink(filePath).catch(() => undefined);
+      removed.push(entry.name);
+    }
+  }
+
+  return removed;
+};
+
+/**
  * 启动 janitor：立即执行一次扫描，之后每 intervalHours 执行一次。
  * @returns {() => void} stop 函数
  */
@@ -101,6 +186,8 @@ const startOrphanChunkJanitor = ({
   logger: injectedLogger,
   protectFileIds,
   dir,
+  uploadsDir,
+  getUploadFileNames,
 } = {}) => {
   const log = injectedLogger || logger;
   // VU-55：默认值由 config 统一提供，不再散落环境变量读取。
@@ -118,6 +205,7 @@ const startOrphanChunkJanitor = ({
     60 *
     1000;
   const sweepDir = dir || TMP_UPLOAD_DIR;
+  const uploadsSweepDir = uploadsDir || null;
 
   let stopped = false;
 
@@ -133,6 +221,25 @@ const startOrphanChunkJanitor = ({
         log.info(`[janitor] removed ${removed.length} orphan chunk file(s)`);
       } else if (removed.length > 0 && typeof log.log === "function") {
         log.log(`[janitor] removed ${removed.length} orphan chunk file(s)`);
+      }
+
+      // P2：uploads/ 孤儿对账（崩溃窗口落盘文件 / 已删除文件的残留落盘）。
+      if (uploadsSweepDir) {
+        const removedUploads = await sweepOrphanUploads({
+          dir: uploadsSweepDir,
+          ttlMs,
+          getProtectedFileIds: protectFileIds,
+          getKnownFileNames: getUploadFileNames,
+        });
+        if (removedUploads.length > 0 && typeof log.info === "function") {
+          log.info(
+            `[janitor] removed ${removedUploads.length} orphan upload file(s)`,
+          );
+        } else if (removedUploads.length > 0 && typeof log.log === "function") {
+          log.log(
+            `[janitor] removed ${removedUploads.length} orphan upload file(s)`,
+          );
+        }
       }
     } catch (error) {
       if (typeof log.error === "function") {
@@ -161,6 +268,7 @@ const startOrphanChunkJanitor = ({
 
 module.exports = {
   sweepOrphanChunks,
+  sweepOrphanUploads,
   startOrphanChunkJanitor,
   DEFAULT_TTL_HOURS,
   DEFAULT_INTERVAL_HOURS,

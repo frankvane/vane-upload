@@ -73,6 +73,16 @@ const config = {
     getList("FILE_AUTH_COOKIE_TOKENS", [], { lowercase: false }),
   demoUserId: () => get("DEMO_USER_ID", "test"),
 
+  // CSRF 纵深：Cookie 鉴权场景下，对 Cookie 认证的非安全方法（POST/PUT/DELETE/PATCH）
+  // 强制要求自定义头 X-Vane-Csrf（非 CORS 安全列表成员，跨站无法在无 CORS 预检下附加）。
+  // Bearer 认证（Authorization 头）不受此约束——令牌不随浏览器自动发送，天然 CSRF 安全。
+  // 默认在配置了 Cookie 鉴权时开启；CSRF_PROTECTION=0/false 可显式关闭（如纯 Bearer 部署）。
+  csrfProtectionEnabled: () => {
+    const raw = String(get("CSRF_PROTECTION", "")).toLowerCase();
+    if (raw === "0" || raw === "false") return false;
+    return Boolean(config.cookieName());
+  },
+
   // CORS / 限流
   corsOrigin: () => String(get("CORS_ORIGIN", "")).trim(),
   rateLimitEnabled: () => get("RATE_LIMIT_ENABLED", "true") !== "false",

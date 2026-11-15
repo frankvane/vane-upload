@@ -3,8 +3,15 @@ const assert = require("node:assert/strict");
 const { createAuthMiddleware } = require("../src/middleware/auth");
 
 // 用 res/next 桩模拟 express 中间件调用
-function run(mw, { authorization, cookie } = {}) {
-  const req = { headers: { ...(authorization ? { authorization } : {}), ...(cookie ? { cookie } : {}) } };
+function run(mw, { authorization, cookie, method, headers = {} } = {}) {
+  const req = {
+    method,
+    headers: {
+      ...(authorization ? { authorization } : {}),
+      ...(cookie ? { cookie } : {}),
+      ...headers,
+    },
+  };
   const res = {
     statusCode: null,
     body: null,
@@ -98,5 +105,63 @@ test("verify 回调放行 → 放行；拒绝则不放行（需回调自行 res 
 test("显式 requireAuth:false 是唯一的放开口子（demo/测试）", () => {
   const mw = createAuthMiddleware({ requireAuth: false });
   const { nextCalled } = run(mw, {});
+  assert.equal(nextCalled, true);
+});
+
+test("CSRF 纵深：Cookie 认证的非安全方法缺 X-Vane-Csrf 头 → 403", () => {
+  const mw = createAuthMiddleware({
+    cookieName: "sid",
+    cookieTokens: ["abc123"],
+    csrfProtection: true,
+  });
+  const { res, nextCalled } = run(mw, {
+    cookie: "sid=abc123",
+    method: "POST",
+  });
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.code, 403);
+});
+
+test("CSRF 纵深：Cookie 认证的非安全方法带 X-Vane-Csrf 头 → 放行", () => {
+  const mw = createAuthMiddleware({
+    cookieName: "sid",
+    cookieTokens: ["abc123"],
+    csrfProtection: true,
+  });
+  const { nextCalled } = run(mw, {
+    cookie: "sid=abc123",
+    method: "POST",
+    headers: { "x-vane-csrf": "1" },
+  });
+  assert.equal(nextCalled, true);
+});
+
+test("CSRF 纵深：Cookie 认证的安全方法（GET）无需 X-Vane-Csrf 头", () => {
+  const mw = createAuthMiddleware({
+    cookieName: "sid",
+    cookieTokens: ["abc123"],
+    csrfProtection: true,
+  });
+  const { nextCalled } = run(mw, { cookie: "sid=abc123" }); // method 缺省视为安全
+  assert.equal(nextCalled, true);
+});
+
+test("CSRF 纵深：Bearer 认证不受 CSRF 约束（即便开启）", () => {
+  const mw = createAuthMiddleware({ bearerTokens: ["secret"], csrfProtection: true });
+  const { nextCalled } = run(mw, {
+    authorization: "Bearer secret",
+    method: "POST",
+  });
+  assert.equal(nextCalled, true);
+});
+
+test("CSRF 纵深：未开启时 Cookie 认证非安全方法无需 X-Vane-Csrf 头", () => {
+  const mw = createAuthMiddleware({
+    cookieName: "sid",
+    cookieTokens: ["abc123"],
+    csrfProtection: false,
+  });
+  const { nextCalled } = run(mw, { cookie: "sid=abc123", method: "POST" });
   assert.equal(nextCalled, true);
 });

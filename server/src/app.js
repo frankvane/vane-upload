@@ -167,6 +167,7 @@ if (authMode !== "demo") {
       cookieTokens,
       cookieName,
       requireAuth: true,
+      csrfProtection: config.csrfProtectionEnabled(),
     })
   );
 } else {

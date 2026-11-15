@@ -538,15 +538,20 @@ test("T-73：upload × merge 并发，合并期间到达的分片不污染产物
         total: 1,
       })
       .then((res) => res);
-    await readReached;
-    lateRes = await request(app)
+    await readReached; // merge 已持 file 锁进入读片临界区
+    // 更细互斥：合并临界区（含读片）持 file 锁，同文件并发 upload 会等该锁释放后才落盘。
+    // 必须先把迟到 upload 以 promise 形式发射、释放读片门闩让 merge 跑完，再 await upload——
+    // 否则「await 迟到的 upload（等文件锁）」会阻塞 releaseRead，而 merge 又被门闩卡住，死锁。
+    const latePromise = request(app)
       .post("/api/file/upload")
       .field("file_id", fileId)
       .field("index", "1")
       .field("chunk_md5", lateMd5)
-      .attach("chunk", lateBuffer, { filename: "chunk-1.bin" });
+      .attach("chunk", lateBuffer, { filename: "chunk-1.bin" })
+      .then((res) => res);
     releaseRead();
     mergeRes = await mergePromise;
+    lateRes = await latePromise;
   } finally {
     fs.promises.readFile = originalReadFile;
   }

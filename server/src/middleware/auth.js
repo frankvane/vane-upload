@@ -16,6 +16,13 @@
 //     因此生产路径绝不会出现“开了开关却 silently 全开”。
 const crypto = require("crypto");
 
+// CSRF 纵深：Cookie 认证的非安全方法必须携带的自定义头（值固定）。该头不在 CORS
+// 安全列表内，跨站攻击者无法在无预检的情况下附加，从而阻断「诱导浏览器代发携带
+// 认证 Cookie 的状态变更请求」。Bearer 认证不依赖 Cookie，天然不受 CSRF 影响。
+const CSRF_HEADER = "x-vane-csrf";
+const CSRF_TOKEN = "1";
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 // 解析 Cookie；畸形百分号编码（decodeURIComponent 抛错）视为空值，绝不抛异常（S7）。
 function parseCookies(header) {
   if (!header) return {};
@@ -68,6 +75,7 @@ function createAuthMiddleware(options = {}) {
     cookieName,
     verify, // (token, req, next) => void；返回 void 即放行，否则自行 res 结束
     requireAuth = true, // 默认 fail-closed：未提供有效凭据即拒绝
+    csrfProtection = false, // Cookie 认证的非安全方法强制要求 X-Vane-Csrf 头（纵深防御）
   } = options;
 
   return function authMiddleware(req, res, next) {
@@ -94,6 +102,19 @@ function createAuthMiddleware(options = {}) {
       const cookies = parseCookies(req.headers.cookie);
       const cookieValue = cookies[cookieName];
       if (cookieValue) {
+        // CSRF 纵深：Cookie 认证的非安全方法必须携带自定义头 X-Vane-Csrf。
+        // 该头非 CORS 安全列表成员，跨站攻击者无法在无预检的情况下附加，
+        // 从而阻断「诱导浏览器代发携带认证 Cookie 的状态变更请求」。
+        // Bearer 认证（Authorization 头）不依赖 Cookie，天然 CSRF 安全，不受此约束。
+        if (
+          csrfProtection &&
+          !SAFE_METHODS.has((req.method || "GET").toUpperCase()) &&
+          req.headers[CSRF_HEADER] !== CSRF_TOKEN
+        ) {
+          return res
+            .status(403)
+            .json({ code: 403, message: "CSRF 校验失败", data: {} });
+        }
         if (verify) {
           attachPrincipal(req, cookieValue, "cookie");
           return verify(cookieValue, req, next);
