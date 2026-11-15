@@ -466,6 +466,11 @@ export function useBatchUploader(): BatchUploaderActions {
       getMessageApi().error("网络已断开，无法上传文件");
       return false;
     }
+    // 防重入：同步判活，避免「自动续传」与手动点击（或两次点击）在同一渲染帧前
+    // 并发进入、对同文件双发（分析 P1/P2）。runBatch 会置 isUploading，故此处先于其判定。
+    if (engine.store.getState().isUploading) {
+      return false;
+    }
 
     const allFiles = await loadAllUploadFiles(engine.storage);
     const uploadableFiles = allFiles.filter((file) => isUploadableStatus(file.status));
@@ -683,46 +688,34 @@ export function useBatchUploader(): BatchUploaderActions {
           message: "网络已断开，无法重试上传",
         };
       }
-
-      // T-07：入参通常是 store 里的那个对象。原地改写它等于私改 React state ——
-      // 数组引用不变、行组件的 props 引用不变，重试期间的「准备中」根本不会重渲染，
-      // 而 `store.files` 里却已经是新值，DevTools 与实际渲染帧对不上。
-      // 从入口复制一份 draft，之后所有写入都落在 draft 上，由 syncFile/patchFile 换引用。
-      const draft: UploadFile = {
-        ...file,
-        status: UploadStatus.PREPARING_UPLOAD,
-        progress: 0,
-        errorMessage: undefined,
-      };
-      await engine.storage.setItem(draft.id, draft);
-
-      try {
-        const success = await processFileUpload(draft);
-        await flushRefresh();
-
-        if (success && uploadConfig.autoCleanup && cleanupPolicy.pendingCount() > 0) {
-          cleanupPolicy.scheduleCleanup(uploadConfig.cleanupDelay);
-        }
-
-        return {
-          success,
-          message: success ? "重试上传成功" : "重试上传失败",
-        };
-      } catch {
+      // 防重入：正在上传中不允许并发发起新批次，避免与「上传全部」竞态导致同文件
+      // 双发（分析 P1 的根因场景）。
+      if (engine.store.getState().isUploading) {
         return {
           success: false,
-          message: "重试上传时发生错误",
+          message: "正在上传中，请稍后再试",
         };
       }
+
+      // 改为走 runBatch（与 resumeUploadFile 一致）：接入 beginBatchSession /
+      // setIsUploading / 批次 controller.signal（可被整批取消中止）、完整 finalizeBatch
+      // 对账，并统一异常兜底，不再 fire-and-forget 吞错（分析 P1：retryUploadFile 绕过批次编排）。
+      // 服务端 instant 校验会跳过已传分片，做到字节级续传。
+      const { aborted, summary } = await runBatch(
+        [{ ...file, status: UploadStatus.QUEUED, progress: file.progress ?? 0 }],
+        { batchInfo: createInitialBatchInfo(1) }
+      );
+      if (aborted) {
+        return { success: false, message: "重试已取消" };
+      }
+      await finalizeBatch(summary, 1);
+      const ok = summary.failedCount === 0 && summary.successCount === 1;
+      return {
+        success: ok,
+        message: ok ? "重试上传成功" : "重试上传失败",
+      };
     },
-    [
-      isNetworkOffline,
-      engine,
-      processFileUpload,
-      flushRefresh,
-      uploadConfig,
-      cleanupPolicy,
-    ]
+    [isNetworkOffline, engine, runBatch, finalizeBatch]
   );
 
   const retryAllFailedFiles = useCallback(async (): Promise<RetrySummary> => {

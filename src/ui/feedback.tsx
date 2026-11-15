@@ -338,8 +338,16 @@ const ModalInner: React.FC<ModalProps> = ({
 
   return createPortal(
     <>
-      <div className="rui-modal-mask" onClick={() => onCancel?.()} />
-      <div className="rui-modal-wrap">
+      {/* mask 仅作视觉遮罩；wrap 与 mask 同 z-index 且后绘制会整屏覆盖 mask，
+          故关闭点击放在 wrap 上，并以 target===currentTarget 判定「点到对话框之外」，
+          与 antd 语义一致（点击对话框内部不关闭）。 */}
+      <div className="rui-modal-mask" />
+      <div
+        className="rui-modal-wrap"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onCancel?.();
+        }}
+      >
         <div
           ref={dialogRef}
           className="rui-modal"
@@ -420,6 +428,7 @@ export const confirm = (options: ConfirmOptions) => {
 
   root.render(
     <Modal
+      open
       title={options.title}
       onCancel={() => {
         options.onCancel?.();

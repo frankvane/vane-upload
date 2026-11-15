@@ -454,6 +454,9 @@ describe("useBatchUploader（核心状态转移与动作断言）", () => {
     const before = { ...storeFile };
     const persistedMap = useMemoryStorage([storeFile]);
     setEngineState([storeFile]);
+    // T-07 复查：retryUploadFile 现已走 runBatch（与 resumeUploadFile 一致），
+    // 故需让编排器真正跑完批次（串行替身），否则 runBatch 拿不到 summary 会崩。
+    h.orchestrator.runConcurrentQueue.mockImplementation(runQueueSerial);
     // Worker 直接报成功，让整条链路走完
     h.engine.workerPool.runUploadTask.mockResolvedValue({ success: true });
 

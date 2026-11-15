@@ -86,15 +86,25 @@ const TASK_IDLE_TIMEOUT_MS = 120_000;
 export const createUploadWorkerPool = (): UploadWorkerPool => {
   const workerPool = new Set<Worker>();
   const idleWorkers: Worker[] = [];
-  /** fileId → 正在处理该文件的 Worker，供 cancelUploadTask 精确取消（P1-8） */
+  /**
+   * taskId → 正在处理该任务的 Worker，供 cancelUploadTask / pauseUploadTask 精确取消。
+   * 此前以 fileId 单键存储，同一文件被并发发起两次上传（如「重试」与「上传全部」竞态）
+   * 时第二次 set 覆盖第一次，导致旧 Worker 变孤儿、cancel 误杀另一批次的 Worker。
+   * 现改为任务实例键 + latestTaskByFile 反查，新任务取代旧任务（取消并回收旧 Worker），
+   * 从根上消除覆盖竞态（分析 P1）。
+   */
   const taskWorkerMap = new Map<string, Worker>();
   /**
-   * fileId → 该任务「强制结算」回调（F-01 修复）。
+   * taskId → 该任务「强制结算」回调（F-01 修复）。
    * 取消时若 Worker 无法在兜底窗口内回应 cancelled（典型：Worker 正卡在长同步
    * 哈希/大文件合并等待里，postMessage 排在队尾），只 terminate 而不结算会让
    * runUploadTask 的 Promise 永不 resolve，文件永久停在「上传中」。
    */
   const taskSettleMap = new Map<string, () => void>();
+  /** fileId → 该文件最新任务实例 id（取代旧的单键映射，支持并发双发时精确寻址） */
+  const latestTaskByFile = new Map<string, string>();
+  /** 任务实例自增序号（仅进程内唯一即可） */
+  let taskSeq = 0;
 
   const acquireUploadWorker = (): Worker => {
     const existingWorker = idleWorkers.pop();
@@ -131,11 +141,13 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
   };
 
   const cancelUploadTask = (fileId: string): void => {
-    const worker = taskWorkerMap.get(fileId);
+    // 按 fileId 反查当前最新任务实例：取代旧的单键寻址，避免「取消→继续」误伤新任务。
+    const taskId = latestTaskByFile.get(fileId);
+    const worker = taskId ? taskWorkerMap.get(taskId) : undefined;
     // 记录「本次取消所针对的那个任务」的结算回调身份。
     // 必须按身份比对而非按 fileId 判断：用户「取消 → 立刻继续」时，同一 fileId
-    // 会很快挂上新任务，旧定时器若按 fileId 命中就会把新任务也判成取消。
-    const scheduledSettle = taskSettleMap.get(fileId);
+    // 会很快挂上新任务，旧定时器若按旧实例命中就会把新任务也判成取消。
+    const scheduledSettle = taskId ? taskSettleMap.get(taskId) : undefined;
 
     if (!worker && !scheduledSettle) {
       return;
@@ -146,15 +158,15 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
     }
 
     setTimeout(() => {
-      // 任务已结算，或已换成新任务（取消→继续）：本次兜底作废
-      if (!scheduledSettle || taskSettleMap.get(fileId) !== scheduledSettle) {
+      // 任务已结算，或已被新任务取代（取消→继续）：本次兜底作废
+      if (!scheduledSettle || !taskId || taskSettleMap.get(taskId) !== scheduledSettle) {
         return;
       }
 
       // F-01 兜底：Worker 未在窗口内响应 cancel。此前只 terminate 不结算，
       // 导致 runUploadTask 的 Promise 永不 settle —— 行永久停在「上传中 100%」、
       // 速率冻结，既不能继续也无报错。这里同时「销毁 Worker + 强制结算」。
-      taskWorkerMap.delete(fileId);
+      taskWorkerMap.delete(taskId);
       if (worker) {
         disposeUploadWorker(worker);
       }
@@ -163,7 +175,8 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
   };
 
   const pauseUploadTask = (fileId: string): void => {
-    const worker = taskWorkerMap.get(fileId);
+    const taskId = latestTaskByFile.get(fileId);
+    const worker = taskId ? taskWorkerMap.get(taskId) : undefined;
     if (!worker) {
       return;
     }
@@ -182,7 +195,20 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
       });
     }
 
+    // 任务实例 id：取代旧 fileId 单键，支持「同文件并发双发」时精确寻址（分析 P1）。
+    const taskId = `task-${++taskSeq}`;
     const worker = acquireUploadWorker();
+
+    // 同文件已有在途任务：新任务取代旧任务——先结算（取消）旧任务并回收其 Worker，
+    // 否则旧 taskWorkerMap 条目被覆盖后会变成孤儿、cancel 还会误杀新任务的 Worker。
+    const prevTaskId = latestTaskByFile.get(options.file.id);
+    if (prevTaskId && prevTaskId !== taskId) {
+      const prevSettle = taskSettleMap.get(prevTaskId);
+      if (prevSettle) prevSettle(); // 结算（取消）旧任务 → 其内部会回收旧 Worker
+      taskWorkerMap.delete(prevTaskId);
+      taskSettleMap.delete(prevTaskId);
+    }
+    latestTaskByFile.set(options.file.id, taskId);
 
     return new Promise<UploadTaskResult>((resolve) => {
       let settled = false;
@@ -234,15 +260,18 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         }
         settled = true;
         progressThrottle.flush();
-        taskWorkerMap.delete(options.file.id);
-        taskSettleMap.delete(options.file.id);
+        taskWorkerMap.delete(taskId);
+        taskSettleMap.delete(taskId);
+        if (latestTaskByFile.get(options.file.id) === taskId) {
+          latestTaskByFile.delete(options.file.id);
+        }
         cleanup();
         resolve(result);
       };
 
       // F-01：把「强制结算」能力暴露给 cancelUploadTask。取消后 Worker 若卡在
       // 长同步任务里无法及时回应，兜底路径据此结算，保证上层状态机一定收尾。
-      taskSettleMap.set(options.file.id, () => {
+      taskSettleMap.set(taskId, () => {
         shouldRecycleWorker = false;
         finish({
           success: false,
@@ -254,7 +283,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
 
       const handleAbort = () => {
         shouldRecycleWorker = false;
-        taskWorkerMap.delete(options.file.id);
+        taskWorkerMap.delete(taskId);
 
         if (settled) {
           // 任务已结束又收到取消（竞态）：仍需处置 worker 与监听，避免泄漏
@@ -394,7 +423,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
         }
       };
 
-      taskWorkerMap.set(options.file.id, worker);
+      taskWorkerMap.set(taskId, worker);
 
       const message: UploadWorkerRequest = {
         type: "upload",
@@ -451,6 +480,7 @@ export const createUploadWorkerPool = (): UploadWorkerPool => {
       settle();
     }
     taskSettleMap.clear();
+    latestTaskByFile.clear();
 
     for (const worker of Array.from(workerPool)) {
       disposeUploadWorker(worker);

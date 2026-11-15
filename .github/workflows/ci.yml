@@ -24,7 +24,7 @@ jobs:
       # —— run #1 的失败就是这个，日志里只有一句 "Process completed with exit code 9"。
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.8.0
           cache: npm
       - name: Install
         run: npm ci
@@ -40,7 +40,10 @@ jobs:
         if: failure()
         run: |
           set -o pipefail
-          for s in check-node typecheck lint test:coverage check-coverage-floor test:server:coverage build size:check check:dev-only; do
+          # 阶段顺序与 package.json 的 ci 脚本同序（含 summarize:skips）。
+          # 此前列表漏掉 summarize:skips：该阶段失败时 Full gate 已红，但本定位循环
+          # 不重跑它、反把后续阶段跑成 PASS 且不 exit 1，导致门禁红无法 pinpoint（分析 P1）。
+          for s in check-node typecheck lint test:coverage check-coverage-floor test:server:coverage summarize:skips build size:check check:dev-only; do
             if npm run "$s" >"/tmp/$s.log" 2>&1; then
               echo "PASS  $s"
             else
@@ -101,7 +104,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.8.0
           cache: npm
       - name: Install
         run: npm ci
@@ -110,3 +113,23 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: E2E (browser-level regression)
         run: npm run test:e2e
+
+  # T-49 / 分析 P1：secure 鉴权链路 E2E（VU-63-16/17）此前从未进入 CI —— 改坏
+  # resolveAuthHeaders 拼接 / 令牌读取，本地与 demo 门禁全绿却已裸奔。本 job 用独立的
+  # playwright.secure.config.ts 跑带 `Authorization: Bearer` 的上传链路与令牌轮换恢复。
+  # 与默认 e2e job 并行（各跑在独立 runner，端口 3001/5174 互不冲突），勿与默认配置混跑。
+  e2e-secure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.8.0
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: E2E (secure auth regression)
+        run: npx playwright test -c playwright.secure.config.ts
