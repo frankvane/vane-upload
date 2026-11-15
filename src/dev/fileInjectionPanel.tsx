@@ -35,14 +35,14 @@ const makeFile = ({ name, size, seed }: FixtureSpec): File => {
   });
 };
 
-const injectFiles = (files: File[]): boolean => {
+const injectFiles = (files: File[]): number => {
   // 用稳定的 data-testid 定位上传组件的文件输入，避免 document.querySelector
   // 取「页面第一个 file input」在存在多个输入时选错（即便当前仅一个，也更稳健）。
   const input = document.querySelector<HTMLInputElement>(
     '[data-testid="file-input"]',
   );
   if (!input) {
-    return false;
+    return 0;
   }
   const dt = new DataTransfer();
   for (const file of files) {
@@ -50,7 +50,10 @@ const injectFiles = (files: File[]): boolean => {
   }
   input.files = dt.files;
   input.dispatchEvent(new Event("change", { bubbles: true }));
-  return true;
+  // 返回实际派发到选择器文件框的文件数；0 表示未找到输入框（硬失败）。
+  // 注意：派发成功 ≠ 入队成功——应用会按 maxFiles / 类型 / 大小等规则校验，
+  // 超限或非法会被整批拒绝（见 useFileProcessor.validateFiles 的 maxFiles 分支）。
+  return files.length;
 };
 
 const PRESETS: Array<{ label: string; name: string; size: number; seed: number }> = [
@@ -99,8 +102,14 @@ const FileInjectionPanel: React.FC = () => {
   const seedOf = (base: number) => resolveSeed(base, randomContent);
 
   const doInject = (specs: FixtureSpec[], msg: string) => {
-    const ok = injectFiles(specs.map(makeFile));
-    setLastMsg(ok ? `${msg} ✓` : "未找到文件输入框 ✗");
+    const delivered = injectFiles(specs.map(makeFile));
+    if (delivered === 0) {
+      setLastMsg("未找到文件输入框 ✗");
+      return;
+    }
+    // 如实报告「已派发」，而非谎报上传成功：入队/上传是否真正发生由应用校验决定
+    // （例如 maxFiles=10 上限、类型/大小拦截都会整批拒绝，面板无法直接感知）。
+    setLastMsg(`${msg}：已派发 ${delivered} 个文件（等待应用校验/入队）`);
   };
 
   const onPreset = (preset: (typeof PRESETS)[number]) => {
@@ -130,15 +139,20 @@ const FileInjectionPanel: React.FC = () => {
           type="button"
           style={btnStyle}
           onClick={() => {
-            const files: FixtureSpec[] = Array.from({ length: 11 }, (_, i) => ({
+            // maxFiles=10（见各 *-main.tsx 入口与 GAP-B5 用例）：空列表下单次最多
+            // 派发 10 个，否则被「最多只能选择 10 个文件」整批拒绝、零入队。
+            // 原「11 个小文件」即因触发该上限而恒失败（面板还误报 ✓），此处改 10 个
+            // 以真正入队/上传，用作「批量小文件 + 并发/排队」回归；若列表已存在文件，
+            // 仍可能触发上限（这正是手册 B5 的 maxFiles 演示路径）。
+            const files: FixtureSpec[] = Array.from({ length: 10 }, (_, i) => ({
               name: `批量-${i + 1}.bin`,
               size: 64 * 1024,
               seed: seedOf(100 + i),
             }));
-            doInject(files, "注入 11 个小文件");
+            doInject(files, "注入 10 个小文件");
           }}
         >
-          11 个小文件
+          10 个小文件
         </button>
         <button
           type="button"
