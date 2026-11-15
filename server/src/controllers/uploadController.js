@@ -356,18 +356,20 @@ exports.uploadChunk = async (req, res) => {
       });
     }
 
-    // T-37：配额的「读 usage → 三级校验 → 写盘 → enqueue → flush」是一次
-    // check-then-act。并发请求若各自读到同一份 usage 会全部通过校验，突破
-    // file / global / user 三级上限。原实现用全局常量 key 串行化整个临界区，
-    // 导致所有用户/文件的写路径并发度为 1（慢磁盘或 SQLITE_BUSY 重试会阻塞全站上传）。
-    // P2：锁键改为按用户分片 `quota:${userId}`——不同用户可并行上传（解除全站串行化），
-    // 同用户内串行保证 user / file 维度配额校验仍正确（global 维度退为最终一致，属可接受取舍）。
+    // T-37 / VU-44：配额「读三维度用量 → 校验 → 写盘 → 落库提交」整体纳入一把
+    // 全局锁（quota:global），使 file / user / global 三维在任何并发下都强一致——
+    // 跨用户并发上传也绝不超卖全局总容量。写盘必须留在校验之后（覆盖写场景下，
+    // 若先写盘后校验，超限请求会覆盖同 index 已合法落盘的分片再删除，造成数据损坏，
+    // 且违反「超限分片不得落盘」不变量，见 TC-22）。
+    // 关于吞吐：分片 buffer 已由 multer 收进内存（慢的网络接收在锁外），锁内仅剩
+    // 内存→磁盘的小分片写 + DB 落库，均为毫秒级；大文件 merge 走独立 mergeLocks
+    // 不持此锁。故全局强一致的实际串行代价极小，换来的是绝无超卖的正确性。
+    // 锁顺序固定为 file → global，与 merge 的 file → mergeLocks 一致，避免死锁。
     // 校验失败以返回值传回外层统一响应，避免在锁内直接写 res 造成二次响应。
-    // 更细互斥：外层再按 storageId 持一把「文件锁」，使「上传 / 合并 / instant 重置 / abort」
-    // 同一文件时严格串行——否则合并读片期间并发上传会写/覆盖正在被读的分片，或重置会清掉
-    // 在飞合并的源片（status:1 源分片被 unlink 后合并报 ENOENT/MD5 不一致）。不同文件互不影响。
-    const rejection = await runExclusiveByKey(`file:${storageId}`, () =>
-      runExclusiveByKey(`quota:${userId}`, async () => {
+    const rejection = await runExclusiveByKey(`file:${storageId}`, async () => {
+      // 全局临界区：读三维度用量 → 校验 → 写盘 → 落库提交，全部原子。
+      // 校验失败一律直接 return 错误对象（此时尚未写盘），外层统一写响应。
+      return await runExclusiveByKey(`quota:global`, async () => {
       // VU-03/04/11：写入前做累计配额校验（单文件累计字节 + 分片数）。
       // 配额直接来自 DB 聚合（FileChunk.size / count），是重启/并发安全的 source of truth，
       // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
@@ -390,7 +392,8 @@ exports.uploadChunk = async (req, res) => {
         };
       }
 
-      // VU-03（全局维度）：换 file_id 也不能突破进程级总容量。
+      // VU-03（全局维度）：换 file_id / 换用户都不能突破进程级总容量。
+      // 此处与 flush 同处全局锁，跨用户并发也绝不超卖（强一致）。
       const globalUsage = await getGlobalChunkUsage();
       const nextGlobalBytes =
         globalUsage.bytes - replacedBytes + req.file.buffer.length;
@@ -411,13 +414,10 @@ exports.uploadChunk = async (req, res) => {
       }
 
       // VU-03（user 维度）：同一凭据不断更换 file_id 也不能无限占用存储。
-      // 覆盖写只按差额计费；若该分片此前不计入本用户，则按新增计。
-      // replacedCounted 直接由 hasExistingChunk 决定：existingDbChunk 必为 status:1，
-      // 而 getUserChunkUsage 聚合的正是该用户全部 status:1 分片，故该分片必然已计入
-      // 聚合值。旧实现用 `userUsage.bytes >= replacedBytes` 这个脆弱代理判断，
-      // 在并发/边界下可能误判为 false → 覆盖写被当成新增 → user 维度重复计费/误超界；
-      // 这与 global 维度「始终按 -旧+新」口径不一致（见上方 nextGlobalBytes）。
-      // 改为与 global 维度对称：覆盖写恒为 -replacedBytes + 本片字节，消除该竞态。
+      // 覆盖写只按差额计费；replacedCounted 直接由 hasExistingChunk 决定：
+      // existingDbChunk 必为 status:1，而 getUserChunkUsage 聚合的正是该用户全部
+      // status:1 分片，故该分片必然已计入聚合值，覆盖写恒为 -replacedBytes + 本片字节，
+      // 与 global 维度「始终按 -旧+新」口径对称，消除并发/边界下的重复计费竞态。
       const userUsage = await getUserChunkUsage(userId);
       const replacedCounted = Boolean(hasExistingChunk);
       const nextUserBytes =
@@ -440,9 +440,9 @@ exports.uploadChunk = async (req, res) => {
         };
       }
 
-      // 写盘 + 落库同步化（VU-04）：先写磁盘，再 enqueue 含 size 的状态，
-      // 然后强制 flush 本 file 的 pending，确保响应 200 前该分片已持久化到 DB。
-      // 这消除了「磁盘已写、DB 未落」的崩溃窗口，使后续配额查询基于准确的 DB 聚合。
+      // 写盘 + 落库提交（VU-04）：三维度校验全部通过后才写盘，再 enqueue + flush，
+      // 确保「用量读取 → 判定 → 写盘 → 提交」原子，后续并发请求读到的是已含本片的
+      // 准确用量；超限请求在上方直接返回，绝不触碰磁盘（TC-22）。
       await writeRegularFile(chunkPath, req.file.buffer);
       enqueueChunkState({
         file_id: storageId,
@@ -466,8 +466,8 @@ exports.uploadChunk = async (req, res) => {
         throw flushError;
       }
       return null;
-      })
-    );
+      });
+    });
     if (rejection) {
       return jsonError(
         res,
