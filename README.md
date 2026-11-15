@@ -109,7 +109,8 @@ export default function UploadPage() {
 
 | 属性 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `uiMode` | `"full" \| "simple"` | `"full"` | `simple` 仅保留「选择文件 + 文件表格」，隐藏上传/清除/批量重试按钮、批次信息、存储统计抽屉与网络徽标 |
+| `uiMode` | `"full" \| "simple" \| "minimal"` | `"full"` | `simple` 仅保留「选择文件 + 文件表格」，隐藏上传/清除/批量重试按钮、批次信息、存储统计抽屉与网络徽标；`minimal` 极简模式仅保留「选择文件」按钮 + 按钮下方一条按状态分段着色的聚合进度细线，隐藏表格/批次/开关，并强制自动上传 |
+| `messageLevel` | `"all" \| "warning-error" \| "none"` | 按模式 | 控制**组件库内部**轻提示（「处理完成」「存储不可用」「网络断开」等）：`all` 全显示；`warning-error` 仅显示警告/错误、成功与 info 静默（正式版推荐，进度与结果已由 UI 表达）；`none` 全静默，完全交给 `on*` 回调自行呈现。缺省时 `minimal` 自动用 `warning-error`，其余模式用 `all`。**不影响** `onUploadStart`/`onUploadComplete`/`onBatchComplete` 等回调。同屏提示最多 3 条，超出淘汰最早一条 |
 | `autoUpload` | `boolean` | `true` | 选完文件立即开始上传；`false` 时文件停在「排队中」，需点「上传文件」 |
 | `autoUploadDelay` | `number` | `120` | 自动上传的**合并窗口**（毫秒）：预处理完成后等这么久再开跑，把「连续几次选择」合成一批。传 `0` 表示立即上传（间隔超过窗口的两次选择会变成两批，服务端多一轮 `/merge`）；旧版本是写死的 `500`，需要旧观感就显式传 `500`。手动点「上传文件」不经过该窗口 |
 | `autoCleanup` | `boolean` | `true` | 上传完成后自动移除记录 |

@@ -6,6 +6,7 @@ import {
   UploadUIMode,
   UploadAuthConfig,
   UploadColumnKey,
+  MessageLevel,
   ZustandFileUploadProps,
 } from "../types/upload";
 import { API_BASE_URL, API_PATHS } from "../../../config/api";
@@ -47,6 +48,8 @@ export interface UploadContextType extends UploadConfig, UploadAuthConfig {
   cleanupDelay: number;
   networkDisplayMode: "tooltip" | "direct";
   uiMode: UploadUIMode;
+  /** 库内轻提示等级（已按 uiMode 计算有效值，见 UploadProvider） */
+  messageLevel: MessageLevel;
   settingsSource: UploadSettingsSource;
   /** 上传表格可见列（key 数组）；缺省显示全部内置列 */
   visibleColumns?: UploadColumnKey[];
@@ -83,6 +86,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   cleanupDelay = 10,
   networkDisplayMode = "tooltip",
   uiMode = "full",
+  messageLevel,
   settingsSource = "localStorage",
   debug = false,
   visibleColumns,
@@ -104,6 +108,11 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
   // 渲染期就提示一次，别等首次上传才发现 token 是硬编码的。告警本身带模块级
   // 单次标记，StrictMode 双渲染与多实例不会刷屏；生产构建里是空调用。
   warnIfStaticAuthToken({ authToken, getAuthToken });
+
+  // 极简模式默认降噪到 warning-error：只保留失败/警告，成功与 info 由细进度线表达。
+  // 消费方显式传 messageLevel 时以显式值为准（含想强制 all 的场景）。
+  const effectiveMessageLevel: MessageLevel =
+    messageLevel ?? (uiMode === "minimal" ? "warning-error" : "all");
 
   // T3.2 单例治理：每个 <FileUpload> 实例持有一套独立的引擎资源
   // （store / storage / fileRegistry / workerPool），经 context 下发，
@@ -178,6 +187,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       cleanupDelay,
       networkDisplayMode,
       uiMode,
+      messageLevel: effectiveMessageLevel,
       settingsSource,
       debug,
       visibleColumns: stableVisibleColumns,
@@ -217,6 +227,7 @@ export const UploadProvider: React.FC<UploadProviderProps> = ({
       cleanupDelay,
       networkDisplayMode,
       uiMode,
+      effectiveMessageLevel,
       settingsSource,
       debug,
       stableVisibleColumns,

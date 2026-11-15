@@ -365,6 +365,9 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
               maxFileSize: uploadConfig.chunkCacheMaxFileSize,
             };
             // 同一批选择只提示一次同类降级，避免多文件时刷屏。
+            // VU-47：这三条是「续传能力降级」的告知性信息，不影响本次上传
+            // （尤其是秒传/成功文件根本不需要续传缓存），故降级为 info：
+            // 极简/warning-error 模式自动静默，full 模式用 all 时仍可见。
             const notifiedCacheIssues = new Set<ChunkCacheStatus>();
             const notifyCacheIssue = (status: ChunkCacheStatus) => {
               if (status === "ready" || notifiedCacheIssues.has(status)) {
@@ -377,15 +380,15 @@ export function useFileProcessor({ uploadAll }: UseFileProcessorOptions) {
                   limit && Number.isFinite(limit) && limit > 0
                     ? `${Math.round(limit / 1024 / 1024)}MB`
                     : "配置";
-                messageApi.warning(
+                messageApi.info(
                   `部分文件待缓存分片超过${limitText}上限，未启用刷新续传缓存，刷新后需重新选择文件`
                 );
               } else if (status === "insufficient-space") {
-                messageApi.warning(
+                messageApi.info(
                   "浏览器可用空间不足，未启用刷新续传缓存，刷新后需重新选择文件"
                 );
               } else {
-                messageApi.warning(
+                messageApi.info(
                   "浏览器存储不可用（如隐私模式）或写入失败，刷新后需重新选择文件继续上传"
                 );
               }

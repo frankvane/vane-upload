@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 
-import { message } from "./message";
+import { createLeveledMessageApi, message, type MessageInstance } from "./message";
 
 describe("ui/message", () => {
   afterEach(() => {
@@ -40,5 +40,71 @@ describe("ui/message", () => {
 
   it("调用不抛错（DOM 环境下正常挂载）", () => {
     expect(() => message.info("noop")).not.toThrow();
+  });
+
+  it("同屏最多保留 3 条，超出淘汰最早一条", async () => {
+    message.info("第一条");
+    message.info("第二条");
+    message.info("第三条");
+    message.info("第四条");
+    await waitFor(() => {
+      expect(document.querySelectorAll(".rui-message-notice")).toHaveLength(3);
+    });
+    expect(screen.queryByText("第一条")).toBeNull();
+    expect(screen.queryByText("第二条")).not.toBeNull();
+    expect(screen.queryByText("第四条")).not.toBeNull();
+  });
+});
+
+describe("createLeveledMessageApi", () => {
+  const makeBase = () => {
+    const base: MessageInstance = {
+      success: vi.fn(),
+      error: vi.fn(),
+      warning: vi.fn(),
+      info: vi.fn(),
+    };
+    return base;
+  };
+
+  it("默认 / all：四类全部放行", () => {
+    for (const level of [undefined, "all"] as const) {
+      const base = makeBase();
+      const api = createLeveledMessageApi(base, level);
+      api.success("s");
+      api.error("e");
+      api.warning("w");
+      api.info("i");
+      expect(base.success).toHaveBeenCalledTimes(1);
+      expect(base.error).toHaveBeenCalledTimes(1);
+      expect(base.warning).toHaveBeenCalledTimes(1);
+      expect(base.info).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("warning-error：仅放行 error / warning，success / info 静默", () => {
+    const base = makeBase();
+    const api = createLeveledMessageApi(base, "warning-error");
+    api.success("s");
+    api.info("i");
+    api.error("e");
+    api.warning("w");
+    expect(base.success).not.toHaveBeenCalled();
+    expect(base.info).not.toHaveBeenCalled();
+    expect(base.error).toHaveBeenCalledWith("e");
+    expect(base.warning).toHaveBeenCalledWith("w");
+  });
+
+  it("none：四类全部静默", () => {
+    const base = makeBase();
+    const api = createLeveledMessageApi(base, "none");
+    api.success("s");
+    api.error("e");
+    api.warning("w");
+    api.info("i");
+    expect(base.success).not.toHaveBeenCalled();
+    expect(base.error).not.toHaveBeenCalled();
+    expect(base.warning).not.toHaveBeenCalled();
+    expect(base.info).not.toHaveBeenCalled();
   });
 });

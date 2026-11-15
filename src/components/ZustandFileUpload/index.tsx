@@ -85,6 +85,7 @@ const ZustandFileUploadCore: React.FC = () => {
       maxFiles: uploadConfig.maxFiles,
       chunkCacheMaxFileSize: uploadConfig.chunkCacheMaxFileSize,
       debug: uploadConfig.debug,
+      messageLevel: uploadConfig.messageLevel,
     });
   }, [
     setConfig,
@@ -102,11 +103,14 @@ const ZustandFileUploadCore: React.FC = () => {
     uploadConfig.maxFiles,
     uploadConfig.chunkCacheMaxFileSize,
     uploadConfig.debug,
+    uploadConfig.messageLevel,
   ]);
 
   useEffect(() => {
     initSettings({
-      autoUpload: uploadConfig.autoUpload,
+      // minimal 模式隐藏了「上传文件」按钮，必须自动上传，否则文件入队后无从触发。
+      autoUpload:
+        uploadConfig.uiMode === "minimal" ? true : uploadConfig.autoUpload,
       autoCleanup: uploadConfig.autoCleanup,
       cleanupDelay: uploadConfig.cleanupDelay,
       networkDisplayMode: uploadConfig.networkDisplayMode,
@@ -115,6 +119,7 @@ const ZustandFileUploadCore: React.FC = () => {
   }, [
     initSettings,
     uploadConfig.autoUpload,
+    uploadConfig.uiMode,
     uploadConfig.autoCleanup,
     uploadConfig.cleanupDelay,
     uploadConfig.networkDisplayMode,
@@ -226,21 +231,25 @@ const ZustandFileUploadCore: React.FC = () => {
         batchUploader={batchUploader}
         fileOperations={fileOperations}
       />
-      {uploadConfig.uiMode !== "simple" && (
-        <BatchInfoDisplay batchUploader={batchUploader} />
-      )}
-      <Suspense fallback={null}>
-        <LazyFileTable
-          fileOperations={fileOperations}
-          pauseUploadFile={batchUploader.pauseUploadFile}
-          resumeUploadFile={batchUploader.resumeUploadFile}
-          cancelUploadFile={batchUploader.cancelUploadFile}
-        />
-      </Suspense>
-      {uploadConfig.uiMode !== "simple" && (
-        <Suspense fallback={null}>
-          <LazyStorageStatsDrawer />
-        </Suspense>
+      {uploadConfig.uiMode !== "minimal" && (
+        <>
+          {uploadConfig.uiMode !== "simple" && (
+            <BatchInfoDisplay batchUploader={batchUploader} />
+          )}
+          <Suspense fallback={null}>
+            <LazyFileTable
+              fileOperations={fileOperations}
+              pauseUploadFile={batchUploader.pauseUploadFile}
+              resumeUploadFile={batchUploader.resumeUploadFile}
+              cancelUploadFile={batchUploader.cancelUploadFile}
+            />
+          </Suspense>
+          {uploadConfig.uiMode !== "simple" && (
+            <Suspense fallback={null}>
+              <LazyStorageStatsDrawer />
+            </Suspense>
+          )}
+        </>
       )}
     </div>
   );

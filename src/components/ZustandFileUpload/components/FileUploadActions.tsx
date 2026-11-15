@@ -10,6 +10,7 @@ import { useShallow } from "zustand/react/shallow";
 // T-20：从具体模块导入，不再走 components/index.ts barrel。
 // barrel 会静态 re-export FileTable / StorageStatsDrawer，此前靠 tree-shaking
 // 才没把表格代码拉进这条链路；改成具体导入是结构性保证，不依赖打包器的摇树运气。
+import MinimalProgressLine from "./MinimalProgressLine";
 import NetworkStatusBadge from "./NetworkStatusBadge";
 import ProcessProgressDisplay from "./ProcessProgressDisplay";
 
@@ -72,7 +73,11 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
   const { uploadAll } = batchUploader;
   const { handleClearList, handleRetryAllUpload } = fileOperations;
   const uploadConfig = useEffectiveUploadConfig();
-  const isSimpleMode = uploadConfig.uiMode === "simple";
+  // minimal（极简）与 simple（简单）都只保留「选择文件」；minimal 的聚合进度细线
+  // 由 index.tsx 单独渲染，工具栏本身两者一致。
+  const isSimpleMode =
+    uploadConfig.uiMode === "simple" || uploadConfig.uiMode === "minimal";
+  const isMinimalMode = uploadConfig.uiMode === "minimal";
 
   const retryButtonTitle =
     errorCount > 0 ? `批量重试 (${errorCount})` : "批量重试";
@@ -109,13 +114,31 @@ const FileUploadActions: React.FC<FileUploadActionsProps> = ({
           gap: 8,
         }}
       >
-        <Button
-          onClick={triggerFileInput}
-          disabled={isNetworkOffline}
-          title={isNetworkOffline ? "网络已断开，无法选择文件" : ""}
-        >
-          选择文件
-        </Button>
+        {isMinimalMode ? (
+          // 极简模式：进度细线紧贴「选择文件」按钮正下方，宽度与按钮一致
+          // （inline-flex 列由按钮撑宽，细线 width:100% 即不超过按钮），
+          // 高度仅 4px，比独立一行更省空间。
+          <div
+            style={{ display: "inline-flex", flexDirection: "column", gap: 0 }}
+          >
+            <Button
+              onClick={triggerFileInput}
+              disabled={isNetworkOffline}
+              title={isNetworkOffline ? "网络已断开，无法选择文件" : ""}
+            >
+              选择文件
+            </Button>
+            <MinimalProgressLine />
+          </div>
+        ) : (
+          <Button
+            onClick={triggerFileInput}
+            disabled={isNetworkOffline}
+            title={isNetworkOffline ? "网络已断开，无法选择文件" : ""}
+          >
+            选择文件
+          </Button>
+        )}
 
         {!isSimpleMode && (
           <>

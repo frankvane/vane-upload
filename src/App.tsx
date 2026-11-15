@@ -1,13 +1,10 @@
-import {
-  CSSProperties,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE_URL, API_PATHS } from "./config/api";
 import ZustandFileUpload from "./components/ZustandFileUpload";
-import type { UploadFile } from "./components/ZustandFileUpload/types/upload";
+import type {
+  UploadFile,
+  UploadUIMode,
+} from "./components/ZustandFileUpload/types/upload";
 
 interface UploadBatchResult {
   success: number;
@@ -54,7 +51,14 @@ const customFileValidator = (file: File) => {
   return { valid: true };
 };
 
+const UI_MODES: { value: UploadUIMode; label: string }[] = [
+  { value: "full", label: "完整" },
+  { value: "simple", label: "简单" },
+  { value: "minimal", label: "极简" },
+];
+
 const App = () => {
+  const [uiMode, setUiMode] = useState<UploadUIMode>("full");
   const [notices, setNotices] = useState<NoticeItem[]>([]);
   const noticeTimersRef = useRef<Map<number, number>>(new Map());
   const noticeIdRef = useRef(0);
@@ -156,6 +160,35 @@ const App = () => {
 
       <div
         style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 12,
+        }}
+      >
+        <span style={{ fontSize: 13, color: "#4b5563" }}>界面模式</span>
+        {UI_MODES.map((mode) => (
+          <button
+            key={mode.value}
+            type="button"
+            onClick={() => setUiMode(mode.value)}
+            style={{
+              padding: "4px 14px",
+              fontSize: 13,
+              cursor: "pointer",
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              backgroundColor: uiMode === mode.value ? "#1677ff" : "#fff",
+              color: uiMode === mode.value ? "#fff" : "#374151",
+            }}
+          >
+            {mode.label}
+          </button>
+        ))}
+      </div>
+
+      <div
+        style={{
           position: "fixed",
           top: 16,
           right: 16,
@@ -195,6 +228,8 @@ const App = () => {
         }}
       >
         <ZustandFileUpload
+          key={uiMode}
+          uiMode={uiMode}
           baseURL={API_BASE_URL}
           uploadApi={API_PATHS.file.upload}
           checkApi={API_PATHS.file.instant}
@@ -202,7 +237,7 @@ const App = () => {
           fileConcurrency={2}
           chunkConcurrency={2}
           maxRetries={3}
-          maxFileSize={100 * 1024 * 1024}
+          maxFileSize={500 * 1024 * 1024}
           allowedFileTypes={ALLOWED_FILE_TYPES}
           maxFiles={10}
           autoUpload={true}

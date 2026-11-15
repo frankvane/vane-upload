@@ -9,7 +9,11 @@ import {
 import { createContext, useContext } from "react";
 import { useStore } from "zustand";
 import { create, type StoreApi } from "zustand";
-import { message, type MessageInstance } from "../../../ui/message";
+import {
+  message,
+  createLeveledMessageApi,
+  type MessageInstance,
+} from "../../../ui/message";
 import { listUploadFiles } from "../services/uploadStorage";
 import { safeStorage } from "../../../shared/safeStorage";
 
@@ -335,7 +339,10 @@ export const createUploadStore = (storage: UploadStorage): UploadStore =>
       set({ autoUpload, autoCleanup, cleanupDelay, networkDisplayMode });
     },
 
-    getMessageApi: () => message,
+    // 所有库内提示都经此出口，按当前配置的 messageLevel 动态过滤：
+    // config 在运行期由 setConfig 注入，未注入前按 all（既有行为）。
+    getMessageApi: () =>
+      createLeveledMessageApi(message, get().config?.messageLevel),
   }));
 
 export const UploadStoreContext = createContext<UploadStore | null>(null);

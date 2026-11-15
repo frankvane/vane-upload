@@ -1,8 +1,10 @@
 import type localforage from "localforage";
 
 import type { UploadAuthConfig } from "../utils/auth";
+import type { MessageLevel } from "../../../ui/message";
 
 export type { UploadAuthConfig };
+export type { MessageLevel };
 
 export enum UploadStatus {
   // Waiting in queue.
@@ -72,7 +74,8 @@ export interface ProcessingStats {
   totalTime?: number;
 }
 
-export type UploadUIMode = "full" | "simple";
+/** UI 模式：full 完整工具栏+表格；simple 仅选择文件+表格；minimal 极简仅选择文件+一条聚合进度细线 */
+export type UploadUIMode = "full" | "simple" | "minimal";
 export type UploadSettingsSource = "localStorage" | "props";
 /**
  * 文件哈希模式（T3.1）：
@@ -135,6 +138,16 @@ export interface ZustandFileUploadProps extends UploadAuthConfig {
   cleanupDelay?: number;
   networkDisplayMode?: "tooltip" | "direct";
   uiMode?: UploadUIMode;
+  /**
+   * 库内轻提示（toast）等级，控制「处理完成 / 存储警告 / 网络断开」等内部消息：
+   * - `all`：全部显示（默认）；
+   * - `warning-error`：仅显示警告与错误，成功/info 静默（正式版推荐）；
+   * - `none`：完全静默，由消费方通过 on* 回调自行呈现。
+   *
+   * 仅影响组件库内部提示，不影响 onUploadStart/onBatchComplete 等回调。
+   * 缺省时 minimal 极简模式自动用 `warning-error`，其余模式用 `all`。
+   */
+  messageLevel?: MessageLevel;
   settingsSource?: UploadSettingsSource;
   /** 调试日志开关：默认 false。开启后 Worker 输出分片级日志（200ms 节流） */
   debug?: boolean;
@@ -228,6 +241,8 @@ export interface UploadConfig {
   withCredentials?: boolean;
   /** 调试日志开关（Worker 内分片级日志，200ms 节流）。默认 false。 */
   debug?: boolean;
+  /** 库内轻提示等级（all / warning-error / none），见 `ZustandFileUploadProps.messageLevel`。 */
+  messageLevel?: MessageLevel;
   /** 自动上传合并窗口（毫秒）。默认 120，见 `ZustandFileUploadProps.autoUploadDelay`。 */
   autoUploadDelay?: number;
   /**

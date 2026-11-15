@@ -5,3 +5,4 @@ export { default as BatchInfoDisplay } from "./BatchInfoDisplay";
 export { default as FileTable } from "./FileTable";
 export { default as ProcessProgressDisplay } from "./ProcessProgressDisplay";
 export { default as StorageStatsDrawer } from "./StorageStatsDrawer";
+export { default as MinimalProgressLine } from "./MinimalProgressLine";
