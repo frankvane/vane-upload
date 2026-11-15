@@ -143,18 +143,20 @@ describe("VU-41 FileTable 数据源稳定性", () => {
     expect(store.getState().progressMap["f-1"]).toBe(42);
   });
 
-  it("低频状态变化仍会重建 columns（保证交互按钮状态不陈旧）", () => {
+  it("低频状态变化不再重建 columns，但操作单元格经内部订阅刷新按钮禁用态", () => {
     captured.length = 0;
     storeRef = null;
 
-    render(
+    const utils = render(
       <UploadProvider settingsSource="props">
         <Harness />
       </UploadProvider>
     );
     const store = storeRef!;
     act(() => {
-      store.getState().setFiles([makeFile("f-1")]);
+      store
+        .getState()
+        .setFiles([{ ...makeFile("f-1"), status: UploadStatus.ERROR } as UploadFile]);
     });
     const before = captured.at(-1)!;
 
@@ -163,10 +165,12 @@ describe("VU-41 FileTable 数据源稳定性", () => {
     });
     const after = captured.at(-1)!;
 
-    expect(after).not.toBe(before);
-    expect(after.columns).not.toBe(before.columns);
-    // dataSource 仍是同一批文件引用
-    expect(after.dataSource).toBe(before.dataSource);
+    // 列定义稳定：isUploading 不再击穿 columns / 整表重渲染（perf 修复）
+    expect(after).toBe(before);
+    expect(after.columns).toBe(before.columns);
+    // 但操作单元格内的「重试」按钮因 ActionCell 内部订阅变为禁用
+    const row = utils.container.querySelector(".rui-table-row") as HTMLElement;
+    expect(within(row).getByText("重试")).toBeDisabled();
   });
 
   it("单文件置 DONE 不重建 columns，且未变文件保持同一引用（TableRow memo 不被击穿）", () => {
@@ -370,7 +374,7 @@ describe("T-71 FileTable 操作列交互断言", () => {
         <CaptureStore>
           <FileTable
             fileOperations={{
-              retryingFiles: { "e-1": true },
+              retryingFiles: {},
               handleDeleteFile: handlers.handleDeleteFile,
               handleRetryUpload: handlers.handleRetryUpload,
             }}
@@ -383,6 +387,10 @@ describe("T-71 FileTable 操作列交互断言", () => {
     );
     act(() => {
       actionStoreRef!.getState().setFiles([error]);
+    });
+    // retryingFiles 现由 store 作为唯一来源（ActionCell 内部订阅），经 store 注入
+    act(() => {
+      actionStoreRef!.getState().setRetryingFiles({ "e-1": true });
     });
     const row = utils.container.querySelector(".rui-table-row") as HTMLElement;
     // 正在重试时 重试 按钮显示「重试中」且禁用

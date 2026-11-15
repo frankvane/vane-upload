@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { Drawer, Modal, Tooltip } from "./feedback";
+import { Drawer, Modal, Popconfirm, Tooltip } from "./feedback";
 
 /**
  * VU-30：ModalInner 的 ESC 监听注册在 useEffect([]) 中，旧实现直接闭包捕获
@@ -210,5 +210,52 @@ describe("T-70 Modal / Drawer 焦点管理", () => {
 
     fireEvent.keyDown(panel, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
+  });
+});
+
+describe("Popconfirm a11y", () => {
+  it("触发器可开合、浮层带 aria-label、确认触发 onConfirm 并关闭", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <Popconfirm
+        title="确认删除？"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      >
+        <button type="button">删除</button>
+      </Popconfirm>,
+    );
+    const trigger = screen.getByRole("button", { name: "删除" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute("aria-label")).toBe("确认删除？");
+
+    fireEvent.click(screen.getByText("确定"));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // 再次点击触发器可重新打开（开合而非只能开）
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog")).not.toBeNull();
+    fireEvent.click(screen.getByText("取消"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("再次点击已打开的触发器可收起浮层", () => {
+    render(
+      <Popconfirm title="确认？">
+        <button type="button">动作</button>
+      </Popconfirm>,
+    );
+    const trigger = screen.getByRole("button", { name: "动作" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog")).not.toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

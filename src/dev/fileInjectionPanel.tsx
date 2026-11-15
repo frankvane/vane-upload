@@ -36,7 +36,11 @@ const makeFile = ({ name, size, seed }: FixtureSpec): File => {
 };
 
 const injectFiles = (files: File[]): boolean => {
-  const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+  // 用稳定的 data-testid 定位上传组件的文件输入，避免 document.querySelector
+  // 取「页面第一个 file input」在存在多个输入时选错（即便当前仅一个，也更稳健）。
+  const input = document.querySelector<HTMLInputElement>(
+    '[data-testid="file-input"]',
+  );
   if (!input) {
     return false;
   }

@@ -4,11 +4,14 @@ import { Drawer } from "../../../ui/feedback";
 import React, { useMemo } from "react";
 
 import { ByteConvert } from "../utils";
-import { UploadStatus, statusMap } from "../types/upload";
+import { UploadFile, UploadStatus, statusMap } from "../types/upload";
 import { useUploadStore } from "../store/upload";
 import { useShallow } from "zustand/react/shallow";
 
 const { Title } = Typography;
+
+// 关闭态复用稳定空数组，避免因 files 变化触发抽屉（隐藏时）无谓重渲染。
+const EMPTY_FILES: UploadFile[] = [];
 
 interface StorageStats {
   totalFiles: number;
@@ -18,14 +21,13 @@ interface StorageStats {
 }
 
 const StorageStatsDrawer: React.FC = () => {
-  const { files, storageStatsVisible, setStorageStatsVisible } =
-    useUploadStore(
-      useShallow((state) => ({
-        files: state.files,
-        storageStatsVisible: state.storageStatsVisible,
-        setStorageStatsVisible: state.setStorageStatsVisible,
-      }))
-    );
+  // 仅订阅「可见性」与 setter；files 在关闭态返回稳定 EMPTY_FILES，
+  // 打开态才订阅真实文件列表，统计随抽屉显隐实时派生，关闭时不再随 files 流转重渲染。
+  const storageStatsVisible = useUploadStore((s) => s.storageStatsVisible);
+  const setStorageStatsVisible = useUploadStore((s) => s.setStorageStatsVisible);
+  const files = useUploadStore(
+    useShallow((s) => (s.storageStatsVisible ? s.files : EMPTY_FILES)),
+  );
 
   // VU-64：统计信息由 files 派生，改为渲染期 useMemo 计算，
   // 不再经 useEffect + setState（避免 react-hooks/set-state-in-effect 的级联渲染）。

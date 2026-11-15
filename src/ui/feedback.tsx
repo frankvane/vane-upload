@@ -107,6 +107,25 @@ export const Tooltip: React.FC<TooltipProps> = ({
     return registerEscapeHandler(() => hide());
   }, [visible, hide]);
 
+  // a11y：aria-describedby 必须挂到「首个可聚焦元素」而非最外层包裹 div，
+  // 否则屏幕阅读器聚焦 Switch/Input 等控件时不会播报提示（此前挂在 div 上被忽略）。
+  // 可见时关联、隐藏/卸载时清除；优先取子元素自身，否则递归找首个 focusable 后代。
+  React.useEffect(() => {
+    const el = childRef.current;
+    if (!el) return;
+    const target =
+      el.matches(FOCUSABLE_SELECTOR) ? el : el.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    if (!target) return;
+    if (visible) {
+      target.setAttribute("aria-describedby", tooltipId);
+    } else {
+      target.removeAttribute("aria-describedby");
+    }
+    return () => {
+      target.removeAttribute("aria-describedby");
+    };
+  }, [visible, tooltipId]);
+
   if (!title) return children;
 
   const container = (getPopupContainer ?? defaultGetPopupContainer)();
@@ -140,7 +159,6 @@ export const Tooltip: React.FC<TooltipProps> = ({
         onMouseLeave,
         onFocus,
         onBlur,
-        "aria-describedby": visible ? tooltipId : undefined,
       } as Partial<React.HTMLAttributes<HTMLElement>>)}
       {canDOM &&
         visible &&
@@ -200,6 +218,7 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
     null,
   );
   const anchorRef = React.useRef<HTMLElement | null>(null);
+  const popoverRef = React.useRef<HTMLDivElement | null>(null);
 
   const openAt = React.useCallback(() => {
     const el = anchorRef.current;
@@ -208,6 +227,15 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
     setPos({ left: rect.left + rect.width / 2, top: rect.bottom + 6 });
     setOpen(true);
   }, []);
+
+  // 触发器点击：按当前 open 切换开/合，而非只能打开。
+  const handleTriggerClick = React.useCallback(() => {
+    if (open) {
+      setOpen(false);
+    } else {
+      openAt();
+    }
+  }, [open, openAt]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -226,20 +254,35 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
     };
   }, [open]);
 
+  // a11y：打开时把焦点移入浮层首个按钮，并用 trapTabKey 圈禁 Tab，防焦点逃出。
+  React.useEffect(() => {
+    if (!open) return;
+    const node = popoverRef.current;
+    if (!node) return;
+    node.querySelector<HTMLElement>("button")?.focus();
+  }, [open]);
+
+  // 仅字符串 title 可作 aria-label；复杂节点留给标题文本自身。
+  const dialogAriaLabel = typeof title === "string" ? title : undefined;
+
   return (
     <>
       {React.cloneElement(children, {
         ref: anchorRef,
-        onClick: openAt,
+        onClick: handleTriggerClick,
       } as Partial<React.HTMLAttributes<HTMLElement>>)}
       {canDOM &&
         open &&
         pos &&
         createPortal(
           <div
+            ref={popoverRef}
             className="rui-popover rui-popconfirm"
             style={{ left: pos.left, top: pos.top, position: "fixed", transform: "translateX(-50%)" }}
             role="dialog"
+            aria-label={dialogAriaLabel}
+            aria-modal="false"
+            onKeyDown={(e) => trapTabKey(e, popoverRef.current)}
           >
             <div className="rui-popconfirm-title">
               <span style={{ color: "#faad14" }} aria-hidden="true">

@@ -636,7 +636,10 @@ export const InputNumber: React.FC<InputNumberProps> = ({
   const [inner, setInner] = React.useState<string>(
     value !== undefined ? String(value) : "",
   );
-  const display = value !== undefined ? String(value) : inner;
+  // display 始终以内部 inner 为准：受控清空（onChange(null) 被上游忽略）后显示为空、
+  // 超界输入经 onChange 钳制后同步回写显示，修复「受控清空不生效」与「超界显示残留」。
+  // 该组件仅用于受控回填场景（父级值随本组件 onChange 更新），无需从 value 反向同步。
+  const display = inner;
   const input = (
     <input
       className={[
@@ -659,10 +662,11 @@ export const InputNumber: React.FC<InputNumberProps> = ({
         }
         const n = Number(raw);
         if (Number.isNaN(n)) return;
-        setInner(raw);
         let clamped = n;
         if (min !== undefined) clamped = Math.max(min, clamped);
         if (max !== undefined) clamped = Math.min(max, clamped);
+        // 同步回写钳制后的值，避免受控态下显示仍停在越界原始输入。
+        setInner(String(clamped));
         onChange?.(clamped);
       }}
       onBlur={(e) => {

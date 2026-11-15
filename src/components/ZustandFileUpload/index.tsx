@@ -217,6 +217,7 @@ const ZustandFileUploadCore: React.FC = () => {
         ref={inputRef}
         onChange={handleFileChange}
         multiple
+        data-testid="file-input"
         style={{ display: "none" }}
       />
 
