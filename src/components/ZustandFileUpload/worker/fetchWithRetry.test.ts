@@ -161,7 +161,32 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
     );
   });
 
-  it("E2E-04：连接级错误立即失败，不按 maxRetries 反复等待", async () => {
+  it("P2：连接级错误按 maxRetries 有限重试后拒绝，不无限等待", async () => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(
+      fetchWithRetry(
+        URL_SAFE,
+        { method: "GET" },
+        { maxRetries: 5, retryInterval: 0, retryConnectionErrors: true },
+        deps,
+      ),
+    ).rejects.toThrow("Failed to fetch");
+    // 首次 + 4 次重试 = 5 次；不再「立即失败」，也未被无限重试。
+    expect(spy).toHaveBeenCalledTimes(5);
+    // 连接级错误重试耗尽时也上报「retry」消息。
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "retry",
+        attemptNumber: 5,
+        retriesLeft: 0,
+      }),
+    );
+  });
+
+  it("P2：retryConnectionErrors 默认 false 时连接级错误立即失败不重试（预检快失败）", async () => {
     const spy = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new TypeError("Failed to fetch"));
@@ -175,6 +200,24 @@ describe("fetchWithRetry（T-17 独立直测）", () => {
       ),
     ).rejects.toThrow("Failed to fetch");
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("P2：用户主动取消的连接中断不再重试，直接以取消语义拒绝", async () => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new TypeError("Failed to fetch"));
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      fetchWithRetry(
+        URL_SAFE,
+        { method: "GET" },
+        { maxRetries: 5, retryInterval: 0, signal: controller.signal },
+        deps,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError", message: "上传已取消" });
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("任务已取消时不再发起请求，抛 AbortError 而非普通失败", async () => {

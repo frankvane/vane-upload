@@ -578,9 +578,17 @@ export function useBatchUploader(): BatchUploaderActions {
         return;
       }
       // 乐观更新：立即在内存与持久化中置 PAUSED，并通知 Worker 分片边界暂停
+      const currentProgress =
+        engine.store.getState().progressMap[file.id] ?? file.progress ?? 0;
       engine.store.getState().patchFile(file.id, {
         status: UploadStatus.PAUSED,
         errorMessage: undefined,
+      });
+      // P2：暂停后速率/剩余时间归零，避免 UI 冻结显示历史速率。
+      engine.store.getState().setProgressDetail(file.id, {
+        progress: currentProgress,
+        speed: 0,
+        eta: 0,
       });
       await engine.storage.setItem(file.id, {
         ...file,

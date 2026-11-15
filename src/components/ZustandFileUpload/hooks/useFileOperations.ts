@@ -110,6 +110,8 @@ export function useFileOperations(
         }
 
         await refreshFiles();
+        // P2：删除后清理进度三张 map 的残留条目，避免内存泄漏。
+        engine.store.getState().clearProgressMaps([id]);
         getMessageApi().success("文件已删除");
       } catch {
         getMessageApi().error("删除文件失败");
@@ -156,6 +158,10 @@ export function useFileOperations(
       await engine.storage.clear();
       // 清空列表 = 放弃所有续传：同步清空该实例的全部分片缓存。
       await clearInstanceChunkCache(engine.instanceId);
+      // P2：清空列表时一并清理进度三张 map 的全部残留条目，避免内存泄漏。
+      engine.store
+        .getState()
+        .clearProgressMaps(files.map((file) => file.id));
       await refreshFiles();
       getMessageApi().success("文件列表已清空");
       return true;

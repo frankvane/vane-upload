@@ -45,6 +45,8 @@ const createCleanupPolicy = (engine: UploadEngine) =>
     setFiles: (files) => engine.store.getState().setFiles(files),
     refreshFiles: (knownFiles) =>
       engine.store.getState().refreshFiles(knownFiles),
+    clearProgressMaps: (ids) =>
+      engine.store.getState().clearProgressMaps(ids),
     setBatchInfo: (updater) => engine.store.getState().setBatchInfo(updater),
     clearBatchInfo: () => engine.store.getState().setBatchInfo(null),
     getCleanupDelay: () => engine.store.getState().cleanupDelay,

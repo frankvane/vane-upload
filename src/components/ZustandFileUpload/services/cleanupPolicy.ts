@@ -8,6 +8,8 @@ interface CleanupPolicyOptions {
   setFiles: (files: UploadFile[]) => void;
   /** 传入已知快照时直接采用，避免再读一遍 IndexedDB（VU-50）。 */
   refreshFiles: (knownFiles?: UploadFile[]) => Promise<void>;
+  /** P2：文件被清理后按 fileId 删除进度三张 map 残留条目（防内存泄漏）。可选：测试可直接不传。 */
+  clearProgressMaps?: (ids: string[]) => void;
   setBatchInfo: (
     updater:
       | BatchInfo
@@ -183,6 +185,10 @@ export class UploadCleanupPolicy {
         ? snapshot.filter((file) => !removedIds.has(file.id))
         : snapshot;
     await this.options.refreshFiles(nextFiles);
+    // P2：被自动清理的文件从进度三张 map 中移除，避免内存泄漏。
+    if (removedIds.size > 0) {
+      this.options.clearProgressMaps?.(Array.from(removedIds));
+    }
   }
 
   cleanupCompletedFilesFromUI() {
@@ -192,6 +198,7 @@ export class UploadCleanupPolicy {
 
     const ids = new Set(this.completedFileIds);
     const currentFiles = this.options.getFiles();
+    const removedUiIds: string[] = [];
 
     const nextFiles = currentFiles.filter((file) => {
       if (!ids.has(file.id)) {
@@ -205,10 +212,18 @@ export class UploadCleanupPolicy {
       }
 
       this.completedFileIds.delete(file.id);
-      return !canCleanup(file.status);
+      if (canCleanup(file.status)) {
+        removedUiIds.push(file.id);
+        return false;
+      }
+      return true;
     });
 
     this.options.setFiles(nextFiles);
+    // P2：被 UI 自动清理的文件从进度三张 map 中移除，避免内存泄漏。
+    if (removedUiIds.length > 0) {
+      this.options.clearProgressMaps?.(removedUiIds);
+    }
   }
 
   async forceCleanupUI() {

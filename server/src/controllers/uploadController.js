@@ -90,6 +90,31 @@ exports.getMergingStorageIds = () =>
     mergeLocks.keys().map((key) => key.slice(key.lastIndexOf(":") + 1))
   );
 
+// P2：合并成功后按 file_id 全量清理磁盘源分片（含 index ≥ total 的孤儿分片）。
+// 分片文件名形如 `${storageId}_${index}`，统一前缀 + 数字后缀枚举删除，
+// 避免残留等分 janitor TTL，也避免只清 0..total-1 而漏掉超界孤儿分片。
+// 仅作 best-effort：清理失败不影响已提交的 200 响应，janitor 会兜底回收。
+const cleanupStorageChunksOnDisk = async (storageId) => {
+  const prefix = `${storageId}_`;
+  let entries;
+  try {
+    entries = await fs.promises.readdir(TMP_UPLOAD_DIR);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries
+      .filter(
+        (name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length))
+      )
+      .map((name) =>
+        fs.promises
+          .unlink(path.join(TMP_UPLOAD_DIR, name))
+          .catch(() => undefined)
+      )
+  );
+};
+
 // VU-03/04/11 测试钩子：暴露配额聚合内部函数，便于断言「配额直接读 DB 而非磁盘」。
 // 仅用于单测，不影响生产行为。
 exports.__quotaInternals = {
@@ -152,6 +177,13 @@ exports.instantCheck = async (req, res) => {
       (parsedKey.size !== sizeValue ||
         (chunkSizeValue !== null && parsedKey.chunkSize !== chunkSizeValue))
     ) {
+      // P2：重置会 flush+unlink+status:0 清掉该 storageId 的源分片；若此时该文件
+      // 正在合并（mergeLocks 已登记），清源片会与在飞合并的读片/落盘交叉，造成
+      // 「分片不存在 / MD5 不一致」合并不对称失败。命中即返回 409 让客户端稍后重试，
+      // 与 abortUpload 对已合并文件的 409 保护保持一致。
+      if (exports.getMergingStorageIds().has(storageId)) {
+        return jsonError(res, 409, "文件正在合并中，请稍后重试");
+      }
       const cleared = await resetChunkResults(storageId, userId);
       return jsonOk(res, {
         uploaded: false,
@@ -318,10 +350,12 @@ exports.uploadChunk = async (req, res) => {
 
     // T-37：配额的「读 usage → 三级校验 → 写盘 → enqueue → flush」是一次
     // check-then-act。并发请求若各自读到同一份 usage 会全部通过校验，突破
-    // file / global / user 三级上限。用全局 key 串行化整个临界区：global 维度
-    // 天然全局互斥，user / file 维度也被同一把锁覆盖，且单 key 不会死锁。
+    // file / global / user 三级上限。原实现用全局常量 key 串行化整个临界区，
+    // 导致所有用户/文件的写路径并发度为 1（慢磁盘或 SQLITE_BUSY 重试会阻塞全站上传）。
+    // P2：锁键改为按用户分片 `quota:${userId}`——不同用户可并行上传（解除全站串行化），
+    // 同用户内串行保证 user / file 维度配额校验仍正确（global 维度退为最终一致，属可接受取舍）。
     // 校验失败以返回值传回外层统一响应，避免在锁内直接写 res 造成二次响应。
-    const rejection = await runExclusiveByKey("upload-quota", async () => {
+    const rejection = await runExclusiveByKey(`quota:${userId}`, async () => {
       // VU-03/04/11：写入前做累计配额校验（单文件累计字节 + 分片数）。
       // 配额直接来自 DB 聚合（FileChunk.size / count），是重启/并发安全的 source of truth，
       // 不再依赖进程内近似 Map，也不再触发全目录 stat 扫描（VU-03 / VU-11）。
@@ -630,13 +664,10 @@ exports.mergeChunks = async (req, res) => {
     movedIntoPlace = true;
     stagingPath = "";
 
-    // VU-59：合并产物已落盘，统一清理已并入产物的源分片。删除必须放在
-    // moveIntoPlace 成功之后；本请求若从未 moveIntoPlace（含缺失分片 / md5 不匹配
-    // / 磁盘或 DB 异常），循环内未 unlink，所有已传分片原样保留，客户端可续传。
-    for (let i = 0; i < totalChunks; i += 1) {
-      const chunkPath = buildChunkPath(storageId, i);
-      await fs.promises.unlink(chunkPath).catch(() => undefined);
-    }
+    // VU-59：合并产物已落盘，源分片清理前移到事务提交成功之后（见下方 commit 后），
+    // 以保证原子性：若 DB 事务失败回滚，源分片仍保留，客户端可安全重合并；
+    // 此前在 commit 前 unlink，回滚后源片已删、DB 回滚到 status:1，下次 /merge
+    // 报「分片不存在」被迫全量重传。
 
     // VU-14：sharp 从未声明为依赖，缩略图能力永远不可用；
     // 不引入新的重型依赖，改为显式保留空值（列仍兼容历史数据）。
@@ -685,6 +716,12 @@ exports.mergeChunks = async (req, res) => {
 
       await transaction.commit();
       transaction = null;
+
+      // P2（原子性 + 孤儿清理）：源分片清理必须放在事务提交成功之后。
+      // 此时 moveIntoPlace 已成功、File/FileChunk 已落库，可安全删除所有源分片
+      // （含 index ≥ total 的孤儿分片）；若上面 commit 失败进入 catch，源分片保留，
+      // 客户端重合并即可，不会因「分片不存在」被迫全量重传。
+      await cleanupStorageChunksOnDisk(storageId);
     } catch (dbError) {
       if (transaction && !transaction.finished) {
         await transaction.rollback();

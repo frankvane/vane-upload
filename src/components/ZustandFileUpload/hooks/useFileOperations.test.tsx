@@ -30,7 +30,10 @@ const h = vi.hoisted(() => ({
       clear: vi.fn(async () => undefined),
     },
     store: {
-      getState: vi.fn(() => ({ files: [] as UploadFile[] })),
+      getState: vi.fn(() => ({
+        files: [] as UploadFile[],
+        clearProgressMaps: h.clearProgressMaps,
+      })),
     },
     workerPool: {
       cancelUploadTask: vi.fn(),
@@ -39,6 +42,7 @@ const h = vi.hoisted(() => ({
       releaseFileRef: vi.fn(),
     },
   },
+  clearProgressMaps: vi.fn(),
   uploadConfig: {
     baseURL: "",
     uploadApi: "/api/file/upload",
@@ -107,7 +111,10 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     h.storeState.refreshFiles.mockResolvedValue(undefined);
     h.engine.storage.removeItem.mockResolvedValue(undefined);
     h.engine.storage.clear.mockResolvedValue(undefined);
-    h.engine.store.getState.mockReturnValue({ files: [] });
+    h.engine.store.getState.mockReturnValue({
+      files: [],
+      clearProgressMaps: h.clearProgressMaps,
+    });
     h.engine.workerPool.cancelUploadTask.mockClear();
     h.engine.fileRegistry.releaseFileRef.mockClear();
     h.fetch.mockClear();
@@ -144,6 +151,8 @@ describe("useFileOperations（动作与错误分支断言）", () => {
 
     expect(h.engine.storage.removeItem).toHaveBeenCalledWith("f1");
     expect(h.storeState.refreshFiles).toHaveBeenCalledTimes(1);
+    // P2：删除后清理进度三张 map 的残留条目（防内存泄漏）。
+    expect(h.clearProgressMaps).toHaveBeenCalledWith(["f1"]);
     expect(h.message.success).toHaveBeenCalledWith("文件已删除");
     expect(h.message.error).not.toHaveBeenCalled();
   });
@@ -158,6 +167,7 @@ describe("useFileOperations（动作与错误分支断言）", () => {
           chunkSize: 1024,
         }),
       ],
+      clearProgressMaps: h.clearProgressMaps,
     });
     const { result } = renderHook(() => useFileOperations(makeBatch()));
 
@@ -184,6 +194,7 @@ describe("useFileOperations（动作与错误分支断言）", () => {
   it("E2E-03：未完成哈希的文件跳过 abort 请求", async () => {
     h.engine.store.getState.mockReturnValue({
       files: [makeFile({ id: "f1", fileSize: 100 })],
+      clearProgressMaps: h.clearProgressMaps,
     });
     const { result } = renderHook(() => useFileOperations(makeBatch()));
 
@@ -239,7 +250,10 @@ describe("useFileOperations（动作与错误分支断言）", () => {
 
   it("handleClearList 成功：先中止在途 Worker 再清空存储 + 刷新 + 成功提示", async () => {
     const file = makeFile({ id: "f1", hash: "h1" } as Partial<UploadFile>);
-    h.engine.store.getState.mockReturnValue({ files: [file] });
+    h.engine.store.getState.mockReturnValue({
+      files: [file],
+      clearProgressMaps: h.clearProgressMaps,
+    });
     const { result } = renderHook(() => useFileOperations(makeBatch()));
 
     let returned = false;
@@ -253,6 +267,8 @@ describe("useFileOperations（动作与错误分支断言）", () => {
     await vi.waitFor(() => expect(h.fetch).toHaveBeenCalledTimes(1));
     expect(h.engine.storage.clear).toHaveBeenCalledTimes(1);
     expect(h.storeState.refreshFiles).toHaveBeenCalledTimes(1);
+    // P2：清空列表时一并清理进度三张 map 的全部残留条目（防内存泄漏）。
+    expect(h.clearProgressMaps).toHaveBeenCalledWith(["f1"]);
     expect(h.message.success).toHaveBeenCalledWith("文件列表已清空");
     expect(returned).toBe(true);
   });

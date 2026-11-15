@@ -209,6 +209,8 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
       maxRetries: networkParams?.maxRetries || 3,
       timeout: networkParams?.timeout || 30000,
       retryInterval: networkParams?.retryInterval || 1000,
+      // P2：分片上传对连接级错误（弱网闪断）有限重试，不再直接放大成整文件失败。
+      retryConnectionErrors: true,
     };
     debug("网络参数", { chunkConcurrency, ...retryOptions });
 
@@ -241,6 +243,9 @@ self.onmessage = async (event: MessageEvent<UploadWorkerMessage>) => {
     // 不再进入分片上传阶段（否则会继续白跑一轮「上传中 0%」）。
     const probeExtra: FetchRetryConfig = {
       maxRetries: Math.min(retryOptions.maxRetries, 2),
+      // E2E-04：预检/状态查询是「探针」，连接级错误必须快速失败以即时探测后端不可用，
+      // 不进入分片上传；故关闭连接级重试（5xx 仍按 maxRetries 退避）。
+      retryConnectionErrors: false,
     };
     let precheckFailure: unknown = null;
 

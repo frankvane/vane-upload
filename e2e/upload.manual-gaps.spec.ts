@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Route } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -17,8 +17,6 @@ const UPLOADS_DIR = E2E_UPLOADS_DIR;
 
 const RUN_SALT =
   Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function md5(buf: Buffer | string): string {
   return crypto.createHash("md5").update(buf).digest("hex");

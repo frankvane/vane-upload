@@ -13,6 +13,10 @@ export interface FetchRetryConfig {
   maxRetries?: number;
   timeout?: number;
   retryInterval?: number;
+  /** P2：连接级错误（网络断开 / 超时 / 后端不可达）是否纳入有限重试。
+   * 默认 false：预检/状态查询等「探针」应快速失败以即时探测后端不可用（E2E-04）；
+   * 分片上传置 true：弱网下单分片闪断退避重试，不再直接放大成整文件失败。 */
+  retryConnectionErrors?: boolean;
   authHeaders?: Record<string, string>;
   credentials?: RequestCredentials;
   /** F3：允许携带鉴权头的宿主白名单；URL host 不在白名单内时不附加 authHeaders */
@@ -42,6 +46,21 @@ export interface FetchRetryDeps {
   postMessage: (message: RetryExhaustedMessage) => void;
 }
 
+/**
+ * P2：指数退避 + 可选抖动。基数为 retryInterval，按 2^(attempt-1) 增长并封顶
+ * maxBackoffMs；默认 jitterMs=0 以保持既有单测确定性。弱网下把线性退避换成
+ * 指数退避，避免多次重试叠加成长时间线性等待。
+ */
+const computeBackoffMs = (
+  attempt: number,
+  retryInterval: number,
+  maxBackoffMs = 30000,
+  jitterMs = 0,
+): number => {
+  const base = Math.min(maxBackoffMs, retryInterval * 2 ** (attempt - 1));
+  return Math.round(base + Math.random() * jitterMs);
+};
+
 export async function fetchWithRetry(
   url: string,
   options: RequestInit,
@@ -49,6 +68,7 @@ export async function fetchWithRetry(
     maxRetries = 3,
     timeout = 30000,
     retryInterval = 1000,
+    retryConnectionErrors = false,
     authHeaders,
     credentials,
     allowedHosts,
@@ -215,7 +235,7 @@ export async function fetchWithRetry(
           // 判断是否需要重试
           const isServerError = response.status >= 500;
           if (isServerError && attempts < maxRetries) {
-            const nextRetryDelay = retryInterval * currentAttempt;
+            const nextRetryDelay = computeBackoffMs(currentAttempt, retryInterval);
             debug(`将在 ${nextRetryDelay}ms 后重试请求`, undefined, true);
             setTimeout(makeRequest, nextRetryDelay);
             return;
@@ -249,23 +269,51 @@ export async function fetchWithRetry(
           true,
         );
 
-        // E2E-04：网络错误 / 超时即判失败，不再按 maxRetries 反复等待。
-        // 后端不可用时每次尝试都必然失败，继续重试只会让 UI 长时间停在
-        // 「上传中 0%」；5xx 的重试仍保留在上面的响应分支。
-        const isNetworkError =
-          wrappedError.name === "TypeError" ||
-          wrappedError.message.includes("network");
-        const isTimeoutError =
-          wrappedError.name === "AbortError" ||
-          wrappedError.message.includes("timeout");
-        debug(
-          `请求异常直接失败${
-            isNetworkError || isTimeoutError ? "（连接级错误，不再重试）" : ""
-          }`,
-          { error: wrappedError.message },
-          true,
-        );
+        // P2：连接级错误（网络断开 / 超时 / 后端不可达的 TypeError）纳入有限重试，
+        // 复用 maxRetries 与指数退避：弱网下一次闪断不再直接放大成整文件失败，
+        // 而是退避后重试；只有耗尽 maxRetries 才拒绝（与 5xx 一致）。
+        // 用户主动取消（外部 signal.aborted）则直接拒绝、不重试——外部信号已置位，
+        // 即便底层抛的是 AbortError 也归属取消语义，避免被误判为超时连接错误。
+        const abortedByUser = Boolean(signal?.aborted);
+        if (abortedByUser) {
+          reject(wrappedError);
+          return;
+        }
 
+        const isConnectionError =
+          wrappedError.name === "TypeError" ||
+          wrappedError.name === "AbortError" ||
+          wrappedError.message.includes("network") ||
+          wrappedError.message.includes("timeout") ||
+          wrappedError.message.includes("Failed to fetch");
+
+        // P2：仅当显式开启 retryConnectionErrors（分片上传路径）时才对连接级错误重试；
+        // 预检/状态查询等探针保持快速失败（E2E-04）。
+        if (
+          isConnectionError &&
+          retryConnectionErrors &&
+          attempts < maxRetries
+        ) {
+          const nextRetryDelay = computeBackoffMs(currentAttempt, retryInterval);
+          debug(
+            `连接级错误，将在 ${nextRetryDelay}ms 后重试请求（第 ${currentAttempt}/${maxRetries} 次）`,
+            { error: wrappedError.message },
+            true,
+          );
+          setTimeout(makeRequest, nextRetryDelay);
+          return;
+        }
+
+        if (isConnectionError) {
+          // 连接级错误重试耗尽：上报「retry」消息，让桥接层感知「已放弃重试」。
+          postMessage({
+            type: "retry",
+            error: wrappedError.message,
+            attemptNumber: currentAttempt,
+            retriesLeft: Math.max(0, maxRetries - currentAttempt),
+            message: `连接失败，已达到最大重试次数(${maxRetries}次)，上传失败`,
+          });
+        }
         reject(wrappedError);
       } finally {
         // 收敛定时器：无论成功、5xx 重试还是网络异常，都不残留未清理的 timeout

@@ -113,6 +113,9 @@ export interface UploadState {
     fileId: string,
     detail: { progress: number; speed: number; eta: number },
   ) => void;
+  /** P2：文件被删除/清理后，按 fileId 删除 progressMap/speedMap/etaMap 条目，
+   * 避免长周期多轮批量上传下三张 map 无限增长造成内存泄漏。 */
+  clearProgressMaps: (ids: string[]) => void;
   setBatchInfo: (batchInfo: BatchInfoUpdater) => void;
   setProcessProgress: (progress: ProcessProgress | null) => void;
   setFileTimings: (timings: FileTimingsUpdater) => void;
@@ -214,6 +217,23 @@ export const createUploadStore = (storage: UploadStorage): UploadStore =>
         speedMap: { ...state.speedMap, [fileId]: detail.speed },
         etaMap: { ...state.etaMap, [fileId]: detail.eta },
       })),
+    clearProgressMaps: (ids) =>
+      set((state) => {
+        if (ids.length === 0) return {};
+        const next = { ...state };
+        const progressMap = { ...state.progressMap };
+        const speedMap = { ...state.speedMap };
+        const etaMap = { ...state.etaMap };
+        for (const id of ids) {
+          delete progressMap[id];
+          delete speedMap[id];
+          delete etaMap[id];
+        }
+        next.progressMap = progressMap;
+        next.speedMap = speedMap;
+        next.etaMap = etaMap;
+        return next;
+      }),
     setBatchInfo: (batchInfo) =>
       set((state) => ({
         batchInfo:
