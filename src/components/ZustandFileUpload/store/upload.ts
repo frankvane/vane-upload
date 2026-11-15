@@ -63,6 +63,15 @@ export interface UploadState {
   speedMap: Record<string, number>;
   /** T3.4：预计剩余时间（秒）按 fileId 索引，供 UI 展示 */
   etaMap: Record<string, number>;
+  /**
+   * 进度增量更新的「版本号」信号（P2-perf）。
+   *
+   * `setProgressDetail` / `clearProgressMaps` 改为**原地改写单键**（O(1)），
+   * 不再整体展开三张 map。为避免引入引用相等陷阱，仍通过自增本版本号触发
+   * Zustand 通知；订阅 `progressMap/speedMap/etaMap` 的单元格用 `useShallow`
+   * 只比较本 fileId 的原始值，渲染粒度与改动前一致。
+   */
+  progressVersion: number;
   retryingFiles: Record<string, boolean>;
 
   batchInfo: BatchInfo | null;
@@ -108,13 +117,15 @@ export interface UploadState {
       | Record<string, number>
       | ((prev: Record<string, number>) => Record<string, number>)
   ) => void;
-  /** VU-40：一次 set 原子更新三张 map，避免每条进度消息触发 3 次订阅通知。 */
+  /** VU-40 + P2-perf：一次 set 原子更新三张 map，避免每条进度消息触发 3 次
+   * 订阅通知；P2-perf 起改为**原地增量**改写单键（O(1)），不再整体展开。 */
   setProgressDetail: (
     fileId: string,
     detail: { progress: number; speed: number; eta: number },
   ) => void;
   /** P2：文件被删除/清理后，按 fileId 删除 progressMap/speedMap/etaMap 条目，
-   * 避免长周期多轮批量上传下三张 map 无限增长造成内存泄漏。 */
+   * 避免长周期多轮批量上传下三张 map 无限增长造成内存泄漏；
+   * P2-perf 起改为原地删除（O(ids)）并自增 progressVersion。 */
   clearProgressMaps: (ids: string[]) => void;
   setBatchInfo: (batchInfo: BatchInfoUpdater) => void;
   setProcessProgress: (progress: ProcessProgress | null) => void;
@@ -154,11 +165,12 @@ export type UploadStore = StoreApi<UploadState>;
  *                供 refreshFiles 读取持久化元数据。
  */
 export const createUploadStore = (storage: UploadStorage): UploadStore =>
-  create<UploadState>((set) => ({
+  create<UploadState>((set, get) => ({
     files: [],
     progressMap: {},
     speedMap: {},
     etaMap: {},
+    progressVersion: 0,
     retryingFiles: {},
     batchInfo: null,
     processProgress: null,
@@ -211,29 +223,28 @@ export const createUploadStore = (storage: UploadStorage): UploadStore =>
       set((state) => ({
         etaMap: typeof etaMap === "function" ? etaMap(state.etaMap) : etaMap,
       })),
-    setProgressDetail: (fileId, detail) =>
-      set((state) => ({
-        progressMap: { ...state.progressMap, [fileId]: detail.progress },
-        speedMap: { ...state.speedMap, [fileId]: detail.speed },
-        etaMap: { ...state.etaMap, [fileId]: detail.eta },
-      })),
-    clearProgressMaps: (ids) =>
-      set((state) => {
-        if (ids.length === 0) return {};
-        const next = { ...state };
-        const progressMap = { ...state.progressMap };
-        const speedMap = { ...state.speedMap };
-        const etaMap = { ...state.etaMap };
-        for (const id of ids) {
-          delete progressMap[id];
-          delete speedMap[id];
-          delete etaMap[id];
-        }
-        next.progressMap = progressMap;
-        next.speedMap = speedMap;
-        next.etaMap = etaMap;
-        return next;
-      }),
+    setProgressDetail: (fileId, detail) => {
+      // P2-perf：增量更新。原地改写三张 map 的单个键（O(1)），不再整体展开
+      // （旧实现每调用一次对整张 map 做 {...map}，N 个文件时单节流窗口累计
+      // O(N^2) 复制）。通过 progressVersion 自增触发 Zustand 通知；
+      // ProgressCell 用 useShallow 仅比较本 fileId 的原始值，渲染粒度不变。
+      const s = get();
+      s.progressMap[fileId] = detail.progress;
+      s.speedMap[fileId] = detail.speed;
+      s.etaMap[fileId] = detail.eta;
+      set((state) => ({ progressVersion: state.progressVersion + 1 }));
+    },
+    clearProgressMaps: (ids) => {
+      if (ids.length === 0) return;
+      // P2-perf：原地删除（O(ids)），同时自增 progressVersion 触发通知。
+      const s = get();
+      for (const id of ids) {
+        delete s.progressMap[id];
+        delete s.speedMap[id];
+        delete s.etaMap[id];
+      }
+      set((state) => ({ progressVersion: state.progressVersion + 1 }));
+    },
     setBatchInfo: (batchInfo) =>
       set((state) => ({
         batchInfo:
